@@ -20,8 +20,10 @@ mutable struct CuPdhcgSolverState
 	current_gradient::CuVector{Float64}
 	current_direction::CuVector{Float64}
 	CG_switch::Bool
-	precondition_matrix::Union{Nothing, CuArray{Float64, 2}}
-	adagrad_state::Union{Nothing, CuArray{Float64, 1}}
+	primal_precondition::Union{Nothing, CuArray{Float64, 1}}
+	primal_adagrad_state::Union{Nothing, CuArray{Float64, 1}}
+	dual_precondition::Union{Nothing, CuArray{Float64, 1}}
+	dual_adagrad_state::Union{Nothing, CuArray{Float64, 1}}
 end
 mutable struct QP_constant_paramter_gpu
 	Q_origin::CUDA.CUSPARSE.CuSparseMatrixCSR{Float64, Int32}
@@ -470,6 +472,7 @@ function optimize_gpu(
 	original_problem::QuadraticProgrammingProblem;
 	initial_primal::Union{Nothing, Vector{Float64}} = nothing,
 	initial_dual::Union{Nothing, Vector{Float64}} = nothing,
+	initial_diagonal_precondition::Union{Nothing, Vector{Float64}} = nothing,
 )
 	validate(original_problem)
 	qp_cache = cached_quadratic_program_info(original_problem)
@@ -544,6 +547,18 @@ function optimize_gpu(
 		initial_dual_point = CUDA.CuArray(initial_dual)
 		initial_dual_product = CUDA.CuArray(scaled_problem.scaled_qp.constraint_matrix' * initial_dual)
 	end
+
+	if isnothing(params.online_precondition_band)
+		primal_precondition = nothing
+		primal_adagrad_state = nothing
+		dual_precondition = nothing
+		dual_adagrad_state = nothing
+	else
+		primal_precondition = CUDA.zeros(Float64, primal_size * (2 * params.online_precondition_band + 1))
+		primal_adagrad_state = CUDA.zeros(Float64, primal_size * (2 * params.online_precondition_band + 1))
+		dual_precondition = CUDA.zeros(Float64, dual_size * (2 * params.online_precondition_band + 1))
+		dual_adagrad_state = CUDA.zeros(Float64, dual_size * (2 * params.online_precondition_band + 1))
+	end
 	# initialization
 	solver_state = CuPdhcgSolverState(
 		initial_primal_point,               # current_primal_solution
@@ -567,6 +582,10 @@ function optimize_gpu(
 		CUDA.zeros(Float64, primal_size),    # current_gradient
 		CUDA.zeros(Float64, primal_size),    # current_direction
 		CG_switch,
+		primal_precondition,                  # primal_precondition
+		primal_adagrad_state,                 # primal_adagrad_state
+		dual_precondition,                    # dual_precondition
+		dual_adagrad_state,                   # dual_adagrad_state
 	)
 
 	buffer_state = CuBufferState(

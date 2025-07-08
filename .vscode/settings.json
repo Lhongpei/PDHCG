@@ -3,5 +3,6 @@
         "activityBar.background": "#372D03",
         "titleBar.activeBackground": "#4D3F04",
         "titleBar.activeForeground": "#FEFAEA"
-    }
+    },
+    "julia.environmentPath": "/home/lihongpei/PDHCG_cuda/pdhcg_env"
 }

@@ -89,3 +89,28 @@ extern "C" __global__ void osgm_band_kernel(
         x[i] -= qg_dot;
     }
 }
+
+//Note: The above kernel assumes that Q_band are initialized to zero before the first call.
+extern "C" __global__ void fill_osgm_diagonal(
+    double* __restrict__ Q_band,
+    const double* __restrict__ diagonal, 
+    int n,
+    int bandwidth
+){
+    int tid = threadIdx.x;
+    int block_start = blockIdx.x * blockDim.x;
+    int g_idx = block_start + tid;
+
+    // Initialize Q_band from G_band and diagonal
+    if (g_idx < n) {
+        int offset = 0;
+        int j = g_idx + offset;
+        if (j >= 0 && j < n) {
+            const int band_offset = offset + bandwidth;
+            const int band_idx = band_offset * n + g_idx;
+            // Initialize Q_band with diagonal values
+            Q_band[band_idx] = diagonal[g_idx];
+        }
+        
+    }
+}

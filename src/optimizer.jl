@@ -37,6 +37,7 @@ function warm_up(qp::PDHCG.QuadraticProgrammingProblem, gpu_flag::Bool,)
         termination_params_warmup,
         restart_params,
         PDHCG.ConstantStepsizeParams(),
+        nothing,  # online_precondition_band
     )
     if gpu_flag
         PDHCG.optimize_gpu(params_warmup, qp);
@@ -53,6 +54,7 @@ function _solve(
         output_dir::Union{String, Nothing} = nothing;
         initial_primal::Union{Vector{Float64}, Nothing} = nothing,
         initial_dual::Union{Vector{Float64}, Nothing} = nothing,
+        initial_diagonal_precondition ::Union{Vector{Float64}, Nothing} = nothing,
     )
     if save_flag
         if output_dir isnothing
@@ -64,8 +66,13 @@ function _solve(
         instance_name = saved_name
     end
     if gpu_flag
-        output = optimize_gpu(parameters, qp, initial_primal = initial_primal, initial_dual = initial_dual)
+        output = optimize_gpu(parameters, qp, initial_primal = initial_primal, initial_dual = initial_dual, 
+            initial_diagonal_precondition = initial_diagonal_precondition)
     else
+        if !isnothing(parameters.online_precondition_band)
+            warning("Online preconditioning is currently not supported in CPU version.")
+            parameters.online_precondition_band = nothing
+        end
         output = optimize(parameters, qp, initial_primal = initial_primal, initial_dual = initial_dual)
     end
     log = SolveLog()
@@ -133,6 +140,7 @@ function pdhcgSolve(
     qp::QuadraticProgrammingProblem;
     gpu_flag::Bool = false,
     warm_up_flag::Bool = false,
+    online_precondition_band::Union{Int64, Nothing} = nothing,
     verbose_level::Int64 = 2,
     time_limit::Float64 = 3600.0,
     relat_error_tolerance::Float64 = 1e-6,
@@ -150,6 +158,7 @@ function pdhcgSolve(
     warm_start_flag::Bool = false,
     initial_primal::Union{Vector{Float64}, Nothing} = nothing,
     initial_dual::Union{Vector{Float64}, Nothing} = nothing,
+    initial_diagonal_precondition::Union{Vector{Float64}, Nothing} = nothing,
 )
     if warm_up_flag
         qpw = copy(qp)
@@ -188,9 +197,13 @@ function pdhcgSolve(
         termination_params,
         restart_params,
         PDHCG.ConstantStepsizeParams(), 
+        online_precondition_band,
     )
     if !warm_start_flag
-        return _solve(qp, params, gpu_flag, save_flag, saved_name, output_dir)
+        return _solve(qp, params, gpu_flag, save_flag, saved_name, output_dir, 
+                        initial_diagonal_precondition = initial_diagonal_precondition)
     end
-    return _solve(qp, params, gpu_flag, save_flag, saved_name, output_dir, initial_primal = initial_primal, initial_dual = initial_dual)
+    return _solve(qp, params, gpu_flag, save_flag, saved_name, output_dir, 
+                        initial_primal = initial_primal, initial_dual = initial_dual, 
+                        initial_diagonal_precondition = initial_diagonal_precondition)
 end
