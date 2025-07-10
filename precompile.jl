@@ -1,4 +1,5 @@
 using DataFrames
+using CSV
 include("src/PDHCG.jl")
 # ENV["JULIA_PROJECT"] = "pdhcg_env"
 dataset_dir = expanduser("~/QP_datasets/MM_benchmark")
@@ -18,6 +19,8 @@ for file in readdir(dataset_dir)
         outer_iter = log.iteration_count
         inner_iter = log.CG_total_iteration
         push!(result_df, (file, time_cost, obj, outer_iter, inner_iter))
+        #save  data frame to csv
+        CSV.write("results.csv", result_df, append=false)
         println("Processed file: $file, Time: $time_cost sec, Objective: $obj, Outer Iterations: $outer_iter, Inner Iterations: $inner_iter")
     end
 end
