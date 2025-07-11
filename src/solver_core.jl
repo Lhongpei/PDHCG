@@ -14,7 +14,8 @@ struct PdhcgParameters
     step_size_policy_params::Union{
         ConstantStepsizeParams,
     }
-    online_precondition_band::Union{Nothing,Int64}
+    online_precondition_band_primal::Union{Nothing,Int64}
+    online_precondition_band_dual::Union{Nothing,Int64}
 end
 mutable struct QP_constant_paramter
     Q_origin::SparseMatrixCSC{Float64,Int64}

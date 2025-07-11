@@ -1,1 +1,1 @@
-active_project
+JULIA_PROJECT

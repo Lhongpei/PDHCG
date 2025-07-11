@@ -235,17 +235,44 @@ function compute_next_dual_solution_kernel!(
 	tx = threadIdx().x + (blockDim().x * (blockIdx().x - 0x1))
 	if tx <= num_equalities
 		@inbounds begin
-			next_dual[tx] = current_dual_solution[tx] + (primal_weight * step_size) * (right_hand_side[tx] - next_primal_product[tx])
+			next_dual[tx] = current_dual_solution[tx] + (primal_weight * step_size) * (right_hand_side[tx] - 2 * next_primal_product[tx] + current_primal_product[tx])
 		end
 	elseif (num_equalities + 1) <= tx <= num_constraints
 		@inbounds begin
-			next_dual[tx] = current_dual_solution[tx] + (primal_weight * step_size) * (right_hand_side[tx] - next_primal_product[tx])
+			next_dual[tx] = current_dual_solution[tx] + (primal_weight * step_size) * (right_hand_side[tx] - 2 * next_primal_product[tx] + current_primal_product[tx])
 			next_dual[tx] = max(next_dual[tx], 0.0)
 		end
 	end
 	return
 end
-
+function compute_next_dual_solution_kernel_with_diag_precond!(
+	right_hand_side::CuDeviceVector{Float64},
+	current_dual_solution::CuDeviceVector{Float64},
+	current_primal_product::CuDeviceVector{Float64},
+	next_primal_product::CuDeviceVector{Float64},
+	step_size::Float64,
+	primal_weight::Float64,
+	num_equalities::Int64,
+	num_constraints::Int64,
+	next_dual::CuDeviceVector{Float64},
+	diagonal_precondition::CuDeviceVector{Float64},
+	norm_precondition::Float64 = 1.0,
+)	
+	tx = threadIdx().x + (blockDim().x * (blockIdx().x - 0x1))
+	if tx <= num_equalities
+		diagonal_precondition[tx] -= (primal_weight * step_size) * (right_hand_side[tx] - current_primal_product[tx]) * (right_hand_side[tx] - next_primal_product[tx]) / (norm_precondition ^ 2 + 1e-8) 
+		next_dual[tx] = current_dual_solution[tx] + diagonal_precondition[tx] * (primal_weight * step_size) * (right_hand_side[tx] - 2 * next_primal_product[tx] + current_primal_product[tx]) 
+		
+		# diagonal_precondition[tx] = max(diagonal_precondition[tx], 0.0)
+	elseif (num_equalities + 1) <= tx <= num_constraints
+		diagonal_precondition[tx] -= (primal_weight * step_size) * (right_hand_side[tx] - current_primal_product[tx]) * (next_dual[tx] > 0.0 ? next_dual[tx] : 0.0) * (right_hand_side[tx] - next_primal_product[tx]) / (norm_precondition ^ 2 + 1e-8)
+		next_dual[tx] = current_dual_solution[tx] + diagonal_precondition[tx] * (primal_weight * step_size) * (right_hand_side[tx] - 2 * next_primal_product[tx] + current_primal_product[tx])
+		
+		# diagonal_precondition[tx] = max(diagonal_precondition[tx], 0.0)
+		next_dual[tx] = max(next_dual[tx], 0.0)
+	end
+	return
+end
 """
 Compute dual solution in the next iteration
 """
@@ -258,22 +285,41 @@ function compute_next_dual_solution!(
 	current_primal_product::CuVector{Float64},
 	next_dual::CuVector{Float64},
 	next_dual_product::CuVector{Float64},
+	dual_precondition::Union{Nothing, CuVector{Float64}} = nothing,
 )
 	NumBlockDual = ceil(Int64, problem.num_constraints / ThreadPerBlock)
+	if isnothing(dual_precondition)
+		CUDA.@sync @cuda threads = ThreadPerBlock blocks = NumBlockDual compute_next_dual_solution_kernel!(
+			problem.right_hand_side,
+			current_dual_solution,
+			current_primal_product,
+			next_primal_product,
+			step_size,
+			primal_weight,
+			problem.num_equalities,
+			problem.num_constraints,
+			next_dual,
+		)
+		CUDA.CUSPARSE.mv!('N', 1, problem.constraint_matrix_t, next_dual, 0, next_dual_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+	else
+		norm_precondition = CUDA.norm(problem.right_hand_side - current_primal_product)
+		# println("norm_precondition: ", norm_precondition)
+		CUDA.@sync @cuda threads = ThreadPerBlock blocks = NumBlockDual compute_next_dual_solution_kernel_with_diag_precond!(
+			problem.right_hand_side,
+			current_dual_solution,
+			current_primal_product,
+			next_primal_product,
+			step_size,
+			primal_weight,
+			problem.num_equalities,
+			problem.num_constraints,
+			next_dual,
+			dual_precondition,
+			norm_precondition,
+		)
+		CUDA.CUSPARSE.mv!('N', 1, problem.constraint_matrix_t, next_dual, 0, next_dual_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
 
-	CUDA.@sync @cuda threads = ThreadPerBlock blocks = NumBlockDual compute_next_dual_solution_kernel!(
-		problem.right_hand_side,
-		current_dual_solution,
-		current_primal_product,
-		next_primal_product,
-		step_size,
-		primal_weight,
-		problem.num_equalities,
-		problem.num_constraints,
-		next_dual,
-	)
-
-	CUDA.CUSPARSE.mv!('N', 1, problem.constraint_matrix_t, next_dual, 0, next_dual_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+	end
 end
 
 """
@@ -302,32 +348,6 @@ function update_solution_in_solver_state!(
 		solver_state.current_dual_product,
 		solver_state.current_primal_obj_product,
 	)
-end
-function cal_multiple_dot(
-	a::CuArray{Float64, 1, CUDA.Mem.DeviceBuffer},
-	b_vectors::Vector{CuArray{Float64, 1, CUDA.Mem.DeviceBuffer}},
-)
-	result = CUDA.zeros(Float64, length(b_vectors))
-	b_matrix = CUDA.hcat(b_vectors...)
-	CUDA.CUBLAS.gemv!('T', 1.0, b_matrix, a, 0.0, result)
-	return result
-end
-
-function compute_triple_dots_kernel!(
-	delta_primal::CUDA.CuDeviceVector{Float64, 1},
-	delta_dual_product::CUDA.CuDeviceVector{Float64, 1},
-	delta_primal_obj_product::CUDA.CuDeviceVector{Float64, 1},
-	result::CUDA.CuDeviceVector{Float64, 1})
-
-	tx = threadIdx().x + (blockIdx().x - 1) * blockDim().x
-	if tx <= length(delta_primal)
-		@inbounds begin
-			CUDA.atomic_add!(pointer(result, 1), delta_primal[tx] * delta_dual_product[tx])
-			CUDA.atomic_add!(pointer(result, 2), delta_primal[tx] * delta_primal_obj_product[tx])
-			CUDA.atomic_add!(pointer(result, 3), delta_primal[tx] * delta_primal[tx])
-		end
-	end
-	return
 end
 
 function compute_interaction_and_movement(
@@ -423,6 +443,7 @@ function take_step!(
 			solver_state.current_primal_product,
 			buffer_state.next_dual,
 			buffer_state.next_dual_product,
+			solver_state.dual_precondition,
 		)
 
 		solver_state.cumulative_kkt_passes += 1
@@ -472,7 +493,8 @@ function optimize_gpu(
 	original_problem::QuadraticProgrammingProblem;
 	initial_primal::Union{Nothing, Vector{Float64}} = nothing,
 	initial_dual::Union{Nothing, Vector{Float64}} = nothing,
-	initial_diagonal_precondition::Union{Nothing, Vector{Float64}} = nothing,
+	initial_diagonal_precondition_primal::Union{Nothing, Vector{Float64}} = nothing,
+	initial_diagonal_precondition_dual::Union{Nothing, Vector{Float64}} = nothing,
 )
 	validate(original_problem)
 	qp_cache = cached_quadratic_program_info(original_problem)
@@ -530,6 +552,7 @@ function optimize_gpu(
 
 	norm_Q, number_of_power_iterations_Q = estimate_maximum_singular_value(scaled_problem.scaled_qp.objective_matrix)
 	norm_A, number_of_power_iterations_A = estimate_maximum_singular_value(scaled_problem.scaled_qp.constraint_matrix)
+
 	if isnothing(initial_primal)
 		initial_primal_point = CUDA.zeros(Float64, primal_size)
 		initial_primal_product = CUDA.zeros(Float64, dual_size)
@@ -548,17 +571,21 @@ function optimize_gpu(
 		initial_dual_product = CUDA.CuArray(scaled_problem.scaled_qp.constraint_matrix' * initial_dual)
 	end
 
-	if isnothing(params.online_precondition_band)
+	if isnothing(params.online_precondition_band_primal)
 		primal_precondition = nothing
 		primal_adagrad_state = nothing
+	else
+		primal_precondition = CUDA.ones(Float64, primal_size * (2 * params.online_precondition_band + 1))
+		primal_adagrad_state = CUDA.zeros(Float64, primal_size * (2 * params.online_precondition_band + 1))
+	end
+	if isnothing(params.online_precondition_band_dual)
 		dual_precondition = nothing
 		dual_adagrad_state = nothing
 	else
-		primal_precondition = CUDA.zeros(Float64, primal_size * (2 * params.online_precondition_band + 1))
-		primal_adagrad_state = CUDA.zeros(Float64, primal_size * (2 * params.online_precondition_band + 1))
-		dual_precondition = CUDA.zeros(Float64, dual_size * (2 * params.online_precondition_band + 1))
-		dual_adagrad_state = CUDA.zeros(Float64, dual_size * (2 * params.online_precondition_band + 1))
+		dual_precondition = CUDA.ones(Float64, dual_size * (2 * params.online_precondition_band_dual + 1))
+		dual_adagrad_state = CUDA.zeros(Float64, dual_size * (2 * params.online_precondition_band_dual + 1))
 	end
+
 	# initialization
 	solver_state = CuPdhcgSolverState(
 		initial_primal_point,               # current_primal_solution
