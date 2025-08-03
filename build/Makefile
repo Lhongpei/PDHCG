@@ -117,17 +117,30 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named osgm_band_update_ptx_gen
+# Target rules for targets named fisher_kernel_ptx_gen
 
 # Build rule for target.
-osgm_band_update_ptx_gen: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 osgm_band_update_ptx_gen
-.PHONY : osgm_band_update_ptx_gen
+fisher_kernel_ptx_gen: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 fisher_kernel_ptx_gen
+.PHONY : fisher_kernel_ptx_gen
 
 # fast build rule for target.
-osgm_band_update_ptx_gen/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_update_ptx_gen.dir/build.make CMakeFiles/osgm_band_update_ptx_gen.dir/build
-.PHONY : osgm_band_update_ptx_gen/fast
+fisher_kernel_ptx_gen/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/fisher_kernel_ptx_gen.dir/build.make CMakeFiles/fisher_kernel_ptx_gen.dir/build
+.PHONY : fisher_kernel_ptx_gen/fast
+
+#=============================================================================
+# Target rules for targets named osgm_band_ptx_gen
+
+# Build rule for target.
+osgm_band_ptx_gen: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 osgm_band_ptx_gen
+.PHONY : osgm_band_ptx_gen
+
+# fast build rule for target.
+osgm_band_ptx_gen/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_ptx_gen.dir/build.make CMakeFiles/osgm_band_ptx_gen.dir/build
+.PHONY : osgm_band_ptx_gen/fast
 
 # Help Target
 help:
@@ -137,7 +150,8 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
-	@echo "... osgm_band_update_ptx_gen"
+	@echo "... fisher_kernel_ptx_gen"
+	@echo "... osgm_band_ptx_gen"
 .PHONY : help
 
 

@@ -1,3 +1,4 @@
-/home/lihongpei/PDHCG_cuda/build/CMakeFiles/osgm_band_update_ptx_gen.dir
+/home/lihongpei/PDHCG_cuda/build/CMakeFiles/fisher_kernel_ptx_gen.dir
+/home/lihongpei/PDHCG_cuda/build/CMakeFiles/osgm_band_ptx_gen.dir
 /home/lihongpei/PDHCG_cuda/build/CMakeFiles/edit_cache.dir
 /home/lihongpei/PDHCG_cuda/build/CMakeFiles/rebuild_cache.dir

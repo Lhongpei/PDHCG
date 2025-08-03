@@ -2,6 +2,8 @@
 # PDHCG
 The `PDHCG` project provides a Python interface for PDHCG algorithm suggested in [Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming](https://arxiv.org/abs/2405.16160).
 
+  *While `PDHCG` is under active development, please feel free to report any issue you may encounter in Github or connect `Hongpei Li` by `ishongpeili@gmail.com`*.
+
 # Install
 - set Environment path `export JULIA_PROJECT=pdhcg_env`
 - Install Package:

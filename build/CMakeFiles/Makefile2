@@ -63,11 +63,13 @@ CMAKE_BINARY_DIR = /home/lihongpei/PDHCG_cuda/build
 # Directory level rules for the build root directory
 
 # The main recursive "all" target.
-all: CMakeFiles/osgm_band_update_ptx_gen.dir/all
+all: CMakeFiles/fisher_kernel_ptx_gen.dir/all
+all: CMakeFiles/osgm_band_ptx_gen.dir/all
 .PHONY : all
 
 # The main recursive "codegen" target.
-codegen: CMakeFiles/osgm_band_update_ptx_gen.dir/codegen
+codegen: CMakeFiles/fisher_kernel_ptx_gen.dir/codegen
+codegen: CMakeFiles/osgm_band_ptx_gen.dir/codegen
 .PHONY : codegen
 
 # The main recursive "preinstall" target.
@@ -75,40 +77,73 @@ preinstall:
 .PHONY : preinstall
 
 # The main recursive "clean" target.
-clean: CMakeFiles/osgm_band_update_ptx_gen.dir/clean
+clean: CMakeFiles/fisher_kernel_ptx_gen.dir/clean
+clean: CMakeFiles/osgm_band_ptx_gen.dir/clean
 .PHONY : clean
 
 #=============================================================================
-# Target rules for target CMakeFiles/osgm_band_update_ptx_gen.dir
+# Target rules for target CMakeFiles/fisher_kernel_ptx_gen.dir
 
 # All Build rule for target.
-CMakeFiles/osgm_band_update_ptx_gen.dir/all:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_update_ptx_gen.dir/build.make CMakeFiles/osgm_band_update_ptx_gen.dir/depend
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_update_ptx_gen.dir/build.make CMakeFiles/osgm_band_update_ptx_gen.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/lihongpei/PDHCG_cuda/build/CMakeFiles --progress-num=1 "Built target osgm_band_update_ptx_gen"
-.PHONY : CMakeFiles/osgm_band_update_ptx_gen.dir/all
+CMakeFiles/fisher_kernel_ptx_gen.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/fisher_kernel_ptx_gen.dir/build.make CMakeFiles/fisher_kernel_ptx_gen.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/fisher_kernel_ptx_gen.dir/build.make CMakeFiles/fisher_kernel_ptx_gen.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/lihongpei/PDHCG_cuda/build/CMakeFiles --progress-num=1 "Built target fisher_kernel_ptx_gen"
+.PHONY : CMakeFiles/fisher_kernel_ptx_gen.dir/all
 
 # Build rule for subdir invocation for target.
-CMakeFiles/osgm_band_update_ptx_gen.dir/rule: cmake_check_build_system
+CMakeFiles/fisher_kernel_ptx_gen.dir/rule: cmake_check_build_system
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/lihongpei/PDHCG_cuda/build/CMakeFiles 1
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/osgm_band_update_ptx_gen.dir/all
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/fisher_kernel_ptx_gen.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/lihongpei/PDHCG_cuda/build/CMakeFiles 0
-.PHONY : CMakeFiles/osgm_band_update_ptx_gen.dir/rule
+.PHONY : CMakeFiles/fisher_kernel_ptx_gen.dir/rule
 
 # Convenience name for target.
-osgm_band_update_ptx_gen: CMakeFiles/osgm_band_update_ptx_gen.dir/rule
-.PHONY : osgm_band_update_ptx_gen
+fisher_kernel_ptx_gen: CMakeFiles/fisher_kernel_ptx_gen.dir/rule
+.PHONY : fisher_kernel_ptx_gen
 
 # codegen rule for target.
-CMakeFiles/osgm_band_update_ptx_gen.dir/codegen:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_update_ptx_gen.dir/build.make CMakeFiles/osgm_band_update_ptx_gen.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/lihongpei/PDHCG_cuda/build/CMakeFiles --progress-num=1 "Finished codegen for target osgm_band_update_ptx_gen"
-.PHONY : CMakeFiles/osgm_band_update_ptx_gen.dir/codegen
+CMakeFiles/fisher_kernel_ptx_gen.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/fisher_kernel_ptx_gen.dir/build.make CMakeFiles/fisher_kernel_ptx_gen.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/lihongpei/PDHCG_cuda/build/CMakeFiles --progress-num=1 "Finished codegen for target fisher_kernel_ptx_gen"
+.PHONY : CMakeFiles/fisher_kernel_ptx_gen.dir/codegen
 
 # clean rule for target.
-CMakeFiles/osgm_band_update_ptx_gen.dir/clean:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_update_ptx_gen.dir/build.make CMakeFiles/osgm_band_update_ptx_gen.dir/clean
-.PHONY : CMakeFiles/osgm_band_update_ptx_gen.dir/clean
+CMakeFiles/fisher_kernel_ptx_gen.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/fisher_kernel_ptx_gen.dir/build.make CMakeFiles/fisher_kernel_ptx_gen.dir/clean
+.PHONY : CMakeFiles/fisher_kernel_ptx_gen.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/osgm_band_ptx_gen.dir
+
+# All Build rule for target.
+CMakeFiles/osgm_band_ptx_gen.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_ptx_gen.dir/build.make CMakeFiles/osgm_band_ptx_gen.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_ptx_gen.dir/build.make CMakeFiles/osgm_band_ptx_gen.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/lihongpei/PDHCG_cuda/build/CMakeFiles --progress-num=2 "Built target osgm_band_ptx_gen"
+.PHONY : CMakeFiles/osgm_band_ptx_gen.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/osgm_band_ptx_gen.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/lihongpei/PDHCG_cuda/build/CMakeFiles 1
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/osgm_band_ptx_gen.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/lihongpei/PDHCG_cuda/build/CMakeFiles 0
+.PHONY : CMakeFiles/osgm_band_ptx_gen.dir/rule
+
+# Convenience name for target.
+osgm_band_ptx_gen: CMakeFiles/osgm_band_ptx_gen.dir/rule
+.PHONY : osgm_band_ptx_gen
+
+# codegen rule for target.
+CMakeFiles/osgm_band_ptx_gen.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_ptx_gen.dir/build.make CMakeFiles/osgm_band_ptx_gen.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/lihongpei/PDHCG_cuda/build/CMakeFiles --progress-num=2 "Finished codegen for target osgm_band_ptx_gen"
+.PHONY : CMakeFiles/osgm_band_ptx_gen.dir/codegen
+
+# clean rule for target.
+CMakeFiles/osgm_band_ptx_gen.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/osgm_band_ptx_gen.dir/build.make CMakeFiles/osgm_band_ptx_gen.dir/clean
+.PHONY : CMakeFiles/osgm_band_ptx_gen.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.

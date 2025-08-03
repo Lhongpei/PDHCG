@@ -17,7 +17,7 @@ endif()
 # Note: While functional, file(GLOB) does not automatically detect new files.
 # You'll need to re-run cmake if you add new .cu files to KERNELS_DIR.
 file(GLOB CUDA_SOURCES "${KERNELS_DIR}/*.cu")
-
+include_directories(${CMAKE_SOURCE_DIR}/src/kernel)
 # --- Compile each CUDA file to PTX and place it in the output directory ---
 foreach(CUDA_FILE ${CUDA_SOURCES})
     get_filename_component(FILE_NAME ${CUDA_FILE} NAME_WE)

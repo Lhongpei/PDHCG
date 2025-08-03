@@ -28,8 +28,16 @@ function generateProblem(problem_type::String; n = 100, density = 0.1, seed = 0)
 
 end
 
-function constructProblem(objective_matrix, objective_vector, objective_constant, constraint_matrix,
-	constraint_lower_bound, variable_lower_bound = nothing, variable_upper_bound = nothing)
+function constructProblem(
+	objective_matrix:: SparseMatrixCSC{Float64,Int64},
+	objective_vector::Vector{Float64},
+	objective_constant::Float64,
+	constraint_matrix::SparseMatrixCSC{Float64,Int64},
+	constraint_lower_bound::Vector{Float64};
+	variable_lower_bound::Union{Vector{Float64}, Nothing} = nothing,
+	variable_upper_bound::Union{Vector{Float64}, Nothing} = nothing,
+	num_equality_constraints::Int64 = 0
+)
 	"""
 	Construct a problem from the given matrices and vectors.
 	Returns a `QuadraticProgrammingProblem`` struct.
@@ -53,6 +61,6 @@ function constructProblem(objective_matrix, objective_vector, objective_constant
 		constraint_matrix,
 		constraint_matrix',
 		constraint_lower_bound,
-		0,
+		num_equality_constraints,
 	)
 end
