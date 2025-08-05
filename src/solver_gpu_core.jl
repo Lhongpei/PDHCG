@@ -496,6 +496,8 @@ function optimize_gpu(
 	initial_diagonal_precondition_primal::Union{Nothing, Vector{Float64}} = nothing,
 	initial_diagonal_precondition_dual::Union{Nothing, Vector{Float64}} = nothing,
 )
+	solving_time_details = Dict{String, Float64}()
+	start_time_root = time()
 	validate(original_problem)
 	qp_cache = cached_quadratic_program_info(original_problem)
 	original_norm_Q = estimate_maximum_singular_value(original_problem.objective_matrix)
@@ -545,13 +547,22 @@ function optimize_gpu(
 	if params.primal_importance <= 0 || !isfinite(params.primal_importance)
 		error("primal_importance must be positive and finite")
 	end
+	rescaled_time = time() 
+	solving_time_details["rescaling_time"] = rescaled_time - start_time_root
+	print_timing_banner("Rescaling time: ", solving_time_details["rescaling_time"])
 
 	d_scaled_problem = scaledqp_cpu_to_gpu(scaled_problem)
-	d_problem = d_scaled_problem.scaled_qp
+	cpu_to_gpu_time = time()
+	solving_time_details["cpu_to_gpu_time"] = cpu_to_gpu_time - rescaled_time
+	print_timing_banner("CPU to GPU time: ", solving_time_details["cpu_to_gpu_time"])
 
+	d_problem = d_scaled_problem.scaled_qp
 
 	norm_Q, number_of_power_iterations_Q = estimate_maximum_singular_value(scaled_problem.scaled_qp.objective_matrix)
 	norm_A, number_of_power_iterations_A = estimate_maximum_singular_value(scaled_problem.scaled_qp.constraint_matrix)
+	estimate_singular_value_time = time()
+	solving_time_details["estimate_singular_value_time"] = estimate_singular_value_time - cpu_to_gpu_time
+	print_timing_banner("Estimate singular value time: ", solving_time_details["estimate_singular_value_time"])
 
 	if isnothing(initial_primal)
 		initial_primal_point = CUDA.zeros(Float64, primal_size)
@@ -713,15 +724,16 @@ function optimize_gpu(
 	iteration_limit = termination_criteria.iteration_limit
 	termination_evaluation_frequency = params.termination_evaluation_frequency
 
-	# This flag represents whether a numerical error occurred during the algorithm
-	# if it is set to true it will trigger the algorithm to terminate.
+	intialized_end_time = time()
+	solving_time_details["initialization_time"] = intialized_end_time - estimate_singular_value_time
+	print_timing_banner("Initialization time: ", solving_time_details["initialization_time"])
+	solving_time_details["total_time_usage_initialization"] = intialized_end_time - start_time_root
+	print_timing_banner("Total time usage during initialization: ", solving_time_details["total_time_usage_initialization"])
+	iteration = 0
 	solver_state.numerical_error = false
 	if params.verbosity > 1
 		display_iteration_stats_heading()
 	end
-
-
-	iteration = 0
 	while true
 		iteration += 1
 
@@ -899,7 +911,9 @@ function optimize_gpu(
 			if termination_reason != false
 				# ** Terminate the algorithm **
 				# This is the only place the algorithm can terminate. Please keep it this way.
-
+				main_algo_end_time = time()
+				solving_time_details["main_algo_time"] = main_algo_end_time - intialized_end_time
+				print_timing_banner("PDHCG algorithm time: ", solving_time_details["main_algo_time"])
 				avg_primal_solution = zeros(primal_size)
 				avg_dual_solution = zeros(dual_size)
 				gpu_to_cpu!(
@@ -919,8 +933,8 @@ function optimize_gpu(
 					termination_reason,
 					current_iteration_stats,
 				)
-
-				return unscaled_saddle_point_output(
+				
+				output = unscaled_saddle_point_output(
 					scaled_problem,
 					Vector(solver_state.current_primal_solution),
 					Vector(solver_state.current_dual_solution),
@@ -929,6 +943,10 @@ function optimize_gpu(
 					iteration_stats,
 					solver_state.CG_total_extra,
 				)
+				post_process_time = time()
+				solving_time_details["post_process_time"] = post_process_time - main_algo_end_time
+				print_timing_banner("Post processing time: ", solving_time_details["post_process_time"])
+				return output
 			end
 
 			buffer_primal_gradient .= d_scaled_problem.scaled_qp.objective_vector .- solver_state.current_dual_product

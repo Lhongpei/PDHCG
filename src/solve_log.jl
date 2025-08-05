@@ -299,6 +299,7 @@ mutable struct SolveLog
     unless care is taken to control for noise in runtime measurement.
     """
     solve_time_sec::Float64
+    detail_time_sec::Dict{String,Float64}
 
     """
     The IterationStats corresponding to the solution returned by the solver.
@@ -338,6 +339,7 @@ function SolveLog()
         Int32(0),
         Int64(0),
         0.0,
+        Dict{String,Float64}(),
         IterationStats(),
         POINT_TYPE_UNSPECIFIED,
         IterationStats[],

@@ -14,7 +14,8 @@ import StructTypes
 using LinearAlgebra
 using Random
 using SparseArrays
-
+using Dates: now
+using Dates
 const KERNEL_DIR = joinpath(@__DIR__, "kernel/compiled_kernel/")
 const Diagonal = LinearAlgebra.Diagonal
 const diag = LinearAlgebra.diag

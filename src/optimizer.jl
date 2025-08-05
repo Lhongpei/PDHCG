@@ -138,7 +138,22 @@ function restartParams(
         primal_weight_update_smoothing,
     )
 end
+function print_timing_banner(
+        name::AbstractString,
+        value::Real,
+        width::Int = 40;          # 标题列宽
+        digits::Int = 4
+    )
+    ts = Dates.format(now(), "HH:MM:SS")
 
+    printstyled("┌─ "; color=:light_black)
+    printstyled("[$ts] "; color=:cyan)
+    printstyled(rpad(name, width); bold=true, color=:bright_green)
+    printstyled("── "; color=:light_black)
+    printstyled(round(value; digits); color=:yellow)
+    println(" s")
+    return nothing
+end
 function pdhcgSolve(
     qp::QuadraticProgrammingProblem;
     gpu_flag::Bool = false,
