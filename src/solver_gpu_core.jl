@@ -378,6 +378,7 @@ function take_step!(
 	problem::CuQuadraticProgrammingProblem,
 	solver_state::CuPdhcgSolverState,
 	buffer_state::CuBufferState,
+	time_dict ::Dict{String, Float64}
 )
 	step_size = solver_state.step_size
 	done = false
@@ -393,7 +394,7 @@ function take_step!(
 		if solver_state.total_number_iterations <= 1
 			first_iter = true
 		end
-
+		start_inner_algorithm_time = time()
 		if solver_state.CG_switch
 			CG_extra = compute_next_primal_solution!(
 				problem,
@@ -432,8 +433,10 @@ function take_step!(
 				first_iter,
 			)
 		end
+		time_dict["Primal algorithm time"] += time() - start_inner_algorithm_time
 		solver_state.CG_total_extra += CG_extra
 
+		start_dual_solution_time = time()
 		compute_next_dual_solution!(
 			problem,
 			solver_state.current_dual_solution,
@@ -445,7 +448,9 @@ function take_step!(
 			buffer_state.next_dual_product,
 			solver_state.dual_precondition,
 		)
-
+		time_dict["Dual algorithm time"] += time() - start_dual_solution_time
+		
+		start_cal_new_primal_weight_time = time()
 		solver_state.cumulative_kkt_passes += 1
 		interaction, movement = compute_interaction_and_movement(
 			solver_state,
@@ -475,7 +480,7 @@ function take_step!(
 		first_term = (1 - 1 / (solver_state.total_number_iterations + 1)^(0.3)) * step_size_limit
 		second_term = (1 + 1 / (solver_state.total_number_iterations + 1)^(0.6)) * step_size
 		step_size = min(first_term, second_term)
-
+		time_dict["Stepsize&Weight update time"] += time() - start_cal_new_primal_weight_time
 
 	end
 
@@ -734,6 +739,12 @@ function optimize_gpu(
 	if params.verbosity > 1
 		display_iteration_stats_heading()
 	end
+	solving_time_details["Primal algorithm time"] = 0.0
+	solving_time_details["KKT evaluation time"] = 0.0
+	solving_time_details["Restart evaluation time"] = 0.0
+	solving_time_details["Stepsize&Weight update time"] = 0.0
+	solving_time_details["Dual algorithm time"] = 0.0
+
 	while true
 		iteration += 1
 
@@ -757,6 +768,7 @@ function optimize_gpu(
 			end
 
 			### KKT ###
+			start_kkt_time = time()
 			if stopkkt_Q
 
 				CUDA.CUSPARSE.mv!('N', 1.0, QP_constant.Q_scaled, solver_state.current_primal_solution, 0.0, current_primal_obj_product_Q, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
@@ -861,7 +873,7 @@ function optimize_gpu(
 
 			current_kkt_err = max(c_i_current.relative_optimality_gap, c_i_current.relative_l_inf_primal_residual, c_i_current.relative_l_inf_dual_residual)
 			avg_kkt_err = max(c_i_avg.relative_optimality_gap, c_i_avg.relative_l_inf_primal_residual, c_i_avg.relative_l_inf_dual_residual)
-
+			
 			if current_kkt_err >= avg_kkt_err
 				current_iteration_stats = current_iteration_stats_avg
 				kkt_err = avg_kkt_err
@@ -870,6 +882,7 @@ function optimize_gpu(
 				kkt_err = current_kkt_err
 			end
 
+			solving_time_details["KKT evaluation time"] += time() - start_kkt_time
 
 			method_specific_stats = current_iteration_stats.method_specific_stats
 			method_specific_stats["time_spent_doing_basic_algorithm"] =
@@ -911,9 +924,8 @@ function optimize_gpu(
 			if termination_reason != false
 				# ** Terminate the algorithm **
 				# This is the only place the algorithm can terminate. Please keep it this way.
+				
 				main_algo_end_time = time()
-				solving_time_details["main_algo_time"] = main_algo_end_time - intialized_end_time
-				print_timing_banner("PDHCG algorithm time: ", solving_time_details["main_algo_time"])
 				avg_primal_solution = zeros(primal_size)
 				avg_dual_solution = zeros(dual_size)
 				gpu_to_cpu!(
@@ -944,14 +956,23 @@ function optimize_gpu(
 					solver_state.CG_total_extra,
 				)
 				post_process_time = time()
+				solving_time_details["main_algo_time"] = output.iteration_stats[end].cumulative_time_sec
 				solving_time_details["post_process_time"] = post_process_time - main_algo_end_time
+				print_timing_banner("PDHCG algorithm time: ", solving_time_details["main_algo_time"])
+				solving_time_details["Basic algorithm time"] = time_spent_doing_basic_algorithm
+				print_timing_banner("Basic algorithm time: ", time_spent_doing_basic_algorithm)
+				print_timing_banner("KKT evaluation time: ", solving_time_details["KKT evaluation time"])
+				print_timing_banner("Primal algorithm time: ", solving_time_details["Primal algorithm time"])
+				print_timing_banner("Dual algorithm time: ", solving_time_details["Dual algorithm time"])
 				print_timing_banner("Post processing time: ", solving_time_details["post_process_time"])
+				print_timing_banner("Stepsize&Weight update time: ", solving_time_details["Stepsize&Weight update time"])
 				return output
 			end
 
 			buffer_primal_gradient .= d_scaled_problem.scaled_qp.objective_vector .- solver_state.current_dual_product
 			buffer_primal_gradient .+= solver_state.current_primal_obj_product
 
+			start_restart_time = time()
 			current_iteration_stats.restart_used = run_restart_scheme(
 				d_scaled_problem.scaled_qp,
 				solver_state.solution_weighted_avg,
@@ -983,6 +1004,7 @@ function optimize_gpu(
 
 				#solver_state.step_size = 0.99 * 2 / (norm_Q / solver_state.primal_weight + sqrt(4*norm_A^2 + norm_Q^2 / solver_state.primal_weight^2))
 			end
+			solving_time_details["Restart evaluation time"] += time() - start_restart_time
 
 			if flag_update_CG_bound
 				buffer_state.CG_bound = kkt_err
@@ -992,7 +1014,6 @@ function optimize_gpu(
 
 		end
 
-		time_spent_doing_basic_algorithm_checkpoint = time()
 
 		if params.verbosity >= 6 && print_to_screen_this_iteration(
 			false, # termination_reason
@@ -1009,8 +1030,8 @@ function optimize_gpu(
 				solver_state.primal_weight,
 			)
 		end
-
-		take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state)
+		time_spent_doing_basic_algorithm_checkpoint = time()
+		take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state, solving_time_details)
 
 		time_spent_doing_basic_algorithm += time() - time_spent_doing_basic_algorithm_checkpoint
 	end

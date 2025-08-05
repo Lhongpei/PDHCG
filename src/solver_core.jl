@@ -969,7 +969,7 @@ function optimize(
             end
         end
 
-        time_spent_doing_basic_algorithm_checkpoint = time()
+        
       
         if params.verbosity >= 6 && print_to_screen_this_iteration(
             false, # termination_reason
@@ -986,7 +986,7 @@ function optimize(
                 solver_state.primal_weight,
             )
           end
-
+        time_spent_doing_basic_algorithm_checkpoint = time()
         take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state)
 
         time_spent_doing_basic_algorithm += time() - time_spent_doing_basic_algorithm_checkpoint
