@@ -206,43 +206,35 @@ end
 """
 Update weighted average
 """
-function add_to_solution_weighted_average!(
-    solution_weighted_avg::SolutionWeightedAverage,
-    current_primal_solution::Vector{Float64},
-    current_dual_solution::Vector{Float64},
-    weight::Float64,
-    current_primal_product::Vector{Float64},
-    current_dual_product::Vector{Float64},
-    current_primal_obj_product::Vector{Float64},
-)
-    add_to_primal_solution_weighted_average!(
-        solution_weighted_avg,
-        current_primal_solution,
-        weight,
-    )
-    add_to_dual_solution_weighted_average!(
-        solution_weighted_avg,
-        current_dual_solution,
-        weight,
-    )
+# function add_to_solution_weighted_average!(
+#     solution_weighted_avg::SolutionWeightedAverage,
+#     current_primal_solution::Vector{Float64},
+#     current_dual_solution::Vector{Float64},
+#     weight::Float64,
+#     current_primal_product::Vector{Float64},
+#     current_dual_product::Vector{Float64},
+#     current_primal_obj_product::Vector{Float64},
+# )
 
-    add_to_primal_product_weighted_average!(
-        solution_weighted_avg,
-        current_primal_product,
-        weight,
-    )
-    add_to_dual_product_weighted_average!(
-        solution_weighted_avg,
-        current_dual_product,
-        weight,
-    )
-    add_to_primal_obj_product_weighted_average!(
-        solution_weighted_avg,
-        current_primal_obj_product,
-        weight,
-    )
-    return
-end
+#     solution_weighted_avg.avg_primal_solutions .= 
+#         solution_weighted_avg.avg_primal_solutions .+ 
+#         weight .* (current_primal_solution .- solution_weighted_avg.avg_primal_solutions)
+#     solution_weighted_avg.primal_solutions_count += 1
+#     solution_weighted_avg.avg_dual_solutions .= 
+#         solution_weighted_avg.avg_dual_solutions .+ 
+#         weight .* (current_dual_solution .- solution_weighted_avg.avg_dual_solutions)
+#     solution_weighted_avg.dual_solutions_count += 1
+#     solution_weighted_avg.avg_primal_product .= 
+#         solution_weighted_avg.avg_primal_product .+ 
+#         weight .* (current_primal_product .- solution_weighted_avg.avg_primal_product)
+#     solution_weighted_avg.avg_dual_product .=
+#         solution_weighted_avg.avg_dual_product .+ 
+#         weight .* (current_dual_product .- solution_weighted_avg.avg_dual_product)
+#     solution_weighted_avg.avg_primal_obj_product .= 
+#         solution_weighted_avg.avg_primal_obj_product .+ 
+#         weight .* (current_primal_obj_product .- solution_weighted_avg.avg_primal_obj_product)
+#     return
+# end
 
 """
 Compute average solutions
@@ -252,11 +244,11 @@ function compute_average!(
     buffer_avg::BufferAvgState,
     problem::QuadraticProgrammingProblem,
 )
-    buffer_avg.avg_primal_solution .= copy(solution_weighted_avg.avg_primal_solutions)
-    buffer_avg.avg_dual_solution .= copy(solution_weighted_avg.avg_dual_solutions)
-    buffer_avg.avg_primal_product .= copy(solution_weighted_avg.avg_primal_product)
-    buffer_avg.avg_dual_product .= copy(solution_weighted_avg.avg_dual_product)
-    buffer_avg.avg_primal_obj_product .= copy(solution_weighted_avg.avg_primal_obj_product)
+    buffer_avg.avg_primal_solution .= solution_weighted_avg.avg_primal_solutions
+    buffer_avg.avg_dual_solution .= solution_weighted_avg.avg_dual_solutions
+    buffer_avg.avg_primal_product .= solution_weighted_avg.avg_primal_product
+    buffer_avg.avg_dual_product .= solution_weighted_avg.avg_dual_product
+    buffer_avg.avg_primal_obj_product .= solution_weighted_avg.avg_primal_obj_product
 
     buffer_avg.avg_primal_gradient .= problem.objective_vector .- solution_weighted_avg.avg_dual_product
     buffer_avg.avg_primal_gradient .+= buffer_avg.avg_primal_obj_product

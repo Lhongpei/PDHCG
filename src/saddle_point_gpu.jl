@@ -140,6 +140,43 @@ end
 """
 Update weighted average
 """
+# function add_to_solution_weighted_average!(
+#     solution_weighted_avg::CuSolutionWeightedAverage,
+#     current_primal_solution::CuVector{Float64},
+#     current_dual_solution::CuVector{Float64},
+#     weight::Float64,
+#     current_primal_product::CuVector{Float64},
+#     current_dual_product::CuVector{Float64},
+#     current_primal_obj_product::CuVector{Float64},
+# )
+#     add_to_primal_solution_weighted_average!(
+#         solution_weighted_avg,
+#         current_primal_solution,
+#         weight,
+#     )
+#     add_to_dual_solution_weighted_average!(
+#         solution_weighted_avg,
+#         current_dual_solution,
+#         weight,
+#     )
+
+#     add_to_primal_product_weighted_average!(
+#         solution_weighted_avg,
+#         current_primal_product,
+#         weight,
+#     )
+#     add_to_dual_product_weighted_average!(
+#         solution_weighted_avg,
+#         current_dual_product,
+#         weight,
+#     )
+#     add_to_primal_obj_product_weighted_average!(
+#         solution_weighted_avg,
+#         current_primal_obj_product,
+#         weight,
+#     )
+#     return
+# end
 function add_to_solution_weighted_average!(
     solution_weighted_avg::CuSolutionWeightedAverage,
     current_primal_solution::CuVector{Float64},
@@ -149,35 +186,41 @@ function add_to_solution_weighted_average!(
     current_dual_product::CuVector{Float64},
     current_primal_obj_product::CuVector{Float64},
 )
-    add_to_primal_solution_weighted_average!(
-        solution_weighted_avg,
-        current_primal_solution,
-        weight,
-    )
-    add_to_dual_solution_weighted_average!(
-        solution_weighted_avg,
-        current_dual_solution,
-        weight,
-    )
-
-    add_to_primal_product_weighted_average!(
-        solution_weighted_avg,
-        current_primal_product,
-        weight,
-    )
-    add_to_dual_product_weighted_average!(
-        solution_weighted_avg,
-        current_dual_product,
-        weight,
-    )
-    add_to_primal_obj_product_weighted_average!(
-        solution_weighted_avg,
-        current_primal_obj_product,
-        weight,
-    )
+    CUDA.@sync begin
+        solution_weighted_avg.avg_primal_solutions .= 
+            solution_weighted_avg.avg_primal_solutions .+ 
+            weight .* (current_primal_solution .- solution_weighted_avg.avg_primal_solutions)
+        solution_weighted_avg.primal_solutions_count += 1
+        solution_weighted_avg.avg_dual_solutions .= 
+            solution_weighted_avg.avg_dual_solutions .+ 
+            weight .* (current_dual_solution .- solution_weighted_avg.avg_dual_solutions)
+        solution_weighted_avg.dual_solutions_count += 1
+        solution_weighted_avg.avg_primal_product .= 
+            solution_weighted_avg.avg_primal_product .+ 
+            weight .* (current_primal_product .- solution_weighted_avg.avg_primal_product)
+        solution_weighted_avg.avg_dual_product .=
+            solution_weighted_avg.avg_dual_product .+ 
+            weight .* (current_dual_product .- solution_weighted_avg.avg_dual_product)
+        solution_weighted_avg.avg_primal_obj_product .= 
+            solution_weighted_avg.avg_primal_obj_product .+ 
+            weight .* (current_primal_obj_product .- solution_weighted_avg.avg_primal_obj_product)
+    end
     return
 end
 
+function compute_average_kernel!(
+    avg_primal_gradient::CuDeviceVector{Float64},
+    objective_vector::CuDeviceVector{Float64},
+    avg_dual_product::CuDeviceVector{Float64},
+    avg_primal_obj_product::CuDeviceVector{Float64},
+    N::Int64,
+)
+    tid = CUDA.threadIdx().x + (CUDA.blockIdx().x - 1) * CUDA.blockDim().x
+    if tid <= N
+        avg_primal_gradient[tid] = objective_vector[tid] - avg_dual_product[tid] + avg_primal_obj_product[tid]
+    end
+    return 
+end
 """
 Compute average solutions
 """
@@ -186,17 +229,45 @@ function compute_average!(
     buffer_avg::CuBufferAvgState,
     problem::CuQuadraticProgrammingProblem,
 )
-    CUDA.copyto!(buffer_avg.avg_primal_solution, solution_weighted_avg.avg_primal_solutions)
-    CUDA.copyto!(buffer_avg.avg_dual_solution, solution_weighted_avg.avg_dual_solutions)
-    CUDA.copyto!(buffer_avg.avg_primal_product, solution_weighted_avg.avg_primal_product)
-    CUDA.copyto!(buffer_avg.avg_dual_product, solution_weighted_avg.avg_dual_product)
-    CUDA.copyto!(buffer_avg.avg_primal_obj_product, solution_weighted_avg.avg_primal_obj_product)
-
-    buffer_avg.avg_primal_gradient .= problem.objective_vector .- solution_weighted_avg.avg_dual_product
-    buffer_avg.avg_primal_gradient .+= buffer_avg.avg_primal_obj_product
+    CUDA.@sync begin
+        CUDA.copyto!(buffer_avg.avg_primal_solution, solution_weighted_avg.avg_primal_solutions)
+        CUDA.copyto!(buffer_avg.avg_dual_solution, solution_weighted_avg.avg_dual_solutions)
+        CUDA.copyto!(buffer_avg.avg_primal_product, solution_weighted_avg.avg_primal_product)
+        CUDA.copyto!(buffer_avg.avg_dual_product, solution_weighted_avg.avg_dual_product)
+        CUDA.copyto!(buffer_avg.avg_primal_obj_product, solution_weighted_avg.avg_primal_obj_product)
+    end
+    # buffer_avg.avg_primal_gradient .= problem.objective_vector .- solution_weighted_avg.avg_dual_product
+    # buffer_avg.avg_primal_gradient .+= buffer_avg.avg_primal_obj_product
+    CUDA.@sync begin
+        N = length(buffer_avg.avg_primal_gradient)
+        threads_per_block = 256
+        blocks = div(N + threads_per_block - 1, threads_per_block)
+        CUDA.@cuda threads=threads_per_block blocks=blocks compute_average_kernel!(
+            buffer_avg.avg_primal_gradient,
+            problem.objective_vector,
+            buffer_avg.avg_dual_product,
+            buffer_avg.avg_primal_obj_product,
+            N,
+        )
+    end
+    return
 
 end
+# function compute_average!(
+#     solution_weighted_avg::CuSolutionWeightedAverage,
+#     buffer_avg::CuBufferAvgState,
+#     problem::CuQuadraticProgrammingProblem,
+# )
+#     CUDA.copyto!(buffer_avg.avg_primal_solution, solution_weighted_avg.avg_primal_solutions)
+#     CUDA.copyto!(buffer_avg.avg_dual_solution, solution_weighted_avg.avg_dual_solutions)
+#     CUDA.copyto!(buffer_avg.avg_primal_product, solution_weighted_avg.avg_primal_product)
+#     CUDA.copyto!(buffer_avg.avg_dual_product, solution_weighted_avg.avg_dual_product)
+#     CUDA.copyto!(buffer_avg.avg_primal_obj_product, solution_weighted_avg.avg_primal_obj_product)
 
+#     buffer_avg.avg_primal_gradient .= problem.objective_vector .- solution_weighted_avg.avg_dual_product
+#     buffer_avg.avg_primal_gradient .+= buffer_avg.avg_primal_obj_product
+
+# end
 """
 Compute weighted KKT residual for restarting
 """

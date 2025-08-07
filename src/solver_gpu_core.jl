@@ -329,16 +329,19 @@ function update_solution_in_solver_state!(
 	solver_state::CuPdhcgSolverState,
 	buffer_state::CuBufferState,
 )
-	solver_state.delta_primal .= buffer_state.next_primal .- solver_state.current_primal_solution
-	solver_state.delta_dual .= buffer_state.next_dual .- solver_state.current_dual_solution
+	CUDA.@sync begin
+		solver_state.delta_primal .= buffer_state.next_primal .- solver_state.current_primal_solution
+		solver_state.delta_dual .= buffer_state.next_dual .- solver_state.current_dual_solution
 
-	solver_state.current_primal_solution .= copy(buffer_state.next_primal)
-	solver_state.current_dual_solution .= copy(buffer_state.next_dual)
-	solver_state.current_dual_product .= copy(buffer_state.next_dual_product)
-	solver_state.current_primal_product .= copy(buffer_state.next_primal_product)
-	solver_state.current_primal_obj_product .= copy(buffer_state.next_primal_obj_product)
+		solver_state.current_primal_solution .= buffer_state.next_primal
+		solver_state.current_dual_solution .= buffer_state.next_dual
+		solver_state.current_dual_product .= buffer_state.next_dual_product
+		solver_state.current_primal_product .= buffer_state.next_primal_product
+		solver_state.current_primal_obj_product .= buffer_state.next_primal_obj_product
 
-	weight = 1 / (1.0 + solver_state.solution_weighted_avg.primal_solutions_count)
+		weight = 1 / (1.0 + solver_state.solution_weighted_avg.primal_solutions_count)
+	end
+
 	add_to_solution_weighted_average!(
 		solver_state.solution_weighted_avg,
 		solver_state.current_primal_solution,
@@ -350,23 +353,84 @@ function update_solution_in_solver_state!(
 	)
 end
 
+function equal_to_a_minus_b_kerel!(
+	a::CuDeviceVector{Float64},
+	b::CuDeviceVector{Float64},
+	c::CuDeviceVector{Float64},
+	N::Int64
+)
+	tx = threadIdx().x + blockDim().x * (blockIdx().x - 1)
+	if tx <= N
+		c[tx] = a[tx] - b[tx] 
+	end
+	return
+end
+function equal_to_a_minus_b_kernel!(
+        a::CuDeviceVector{Float64},
+        b::CuDeviceVector{Float64},
+        c::CuDeviceVector{Float64},
+        N::Int64)
+    tx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if tx <= N
+        @inbounds c[tx] = a[tx] - b[tx]
+    end
+    return
+end
+
+
+
 function compute_interaction_and_movement(
 	solver_state::CuPdhcgSolverState,
 	buffer_state::CuBufferState,
 )
-	buffer_state.delta_primal .= buffer_state.next_primal .- solver_state.current_primal_solution
-	buffer_state.delta_dual .= buffer_state.next_dual .- solver_state.current_dual_solution
-	buffer_state.delta_dual_product .= buffer_state.next_dual_product .- solver_state.current_dual_product
-	buffer_state.delta_primal_product .= buffer_state.next_primal_product .- solver_state.current_primal_product
-	buffer_state.delta_primal_obj_product .= buffer_state.next_primal_obj_product .- solver_state.current_primal_obj_product
 
-	primal_dual_interaction = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_dual_product)
-	primal_objective_interaction = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_primal_obj_product)
-	norm_delta_primal = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_primal)
+	# CUDA.@sync begin
+	# 	buffer_state.delta_primal .= buffer_state.next_primal .- solver_state.current_primal_solution
+	# 	buffer_state.delta_dual .= buffer_state.next_dual .- solver_state.current_dual_solution
+	# 	buffer_state.delta_dual_product .= buffer_state.next_dual_product .- solver_state.current_dual_product
+	# 	buffer_state.delta_primal_product .= buffer_state.next_primal_product .- solver_state.current_primal_product
+	# 	buffer_state.delta_primal_obj_product .= buffer_state.next_primal_obj_product .- solver_state.current_primal_obj_product
+	# end
+	ThreadPerBlock = 256
+	function launch!(a, b, c)
+        len = length(c)
+        if len > 0
+            blocks = cld(len, ThreadPerBlock)
+            @cuda threads=ThreadPerBlock blocks=blocks equal_to_a_minus_b_kernel!(a, b, c, len)
+        end
+    end
 
-	interaction = abs.(primal_dual_interaction) + 0.5 * abs.(primal_objective_interaction)
-	norm_delta_dual = CUDA.dot(buffer_state.delta_dual, buffer_state.delta_dual)
+    CUDA.@sync begin
+        launch!(buffer_state.next_primal,
+                solver_state.current_primal_solution,
+                buffer_state.delta_primal)
 
+        launch!(buffer_state.next_dual,
+                solver_state.current_dual_solution,
+                buffer_state.delta_dual)
+
+        launch!(buffer_state.next_dual_product,
+                solver_state.current_dual_product,
+                buffer_state.delta_dual_product)
+
+        launch!(buffer_state.next_primal_product,
+                solver_state.current_primal_product,
+                buffer_state.delta_primal_product)
+
+        launch!(buffer_state.next_primal_obj_product,
+                solver_state.current_primal_obj_product,
+                buffer_state.delta_primal_obj_product)
+    end
+	
+	CUDA.@sync begin
+		primal_dual_interaction = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_dual_product)
+		primal_objective_interaction = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_primal_obj_product)
+		norm_delta_primal = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_primal)
+	end
+	CUDA.@sync begin
+		interaction = abs.(primal_dual_interaction) + 0.5 * abs.(primal_objective_interaction)
+		norm_delta_dual = CUDA.dot(buffer_state.delta_dual, buffer_state.delta_dual)
+	end
 	movement = 0.5 * solver_state.primal_weight * norm_delta_primal + (0.5 / solver_state.primal_weight) * norm_delta_dual
 	return interaction, movement
 end
@@ -450,7 +514,7 @@ function take_step!(
 		)
 		time_dict["Dual algorithm time"] += time() - start_dual_solution_time
 		
-		start_cal_new_primal_weight_time = time()
+		start_cal_new_primal_weight_time = time()	
 		solver_state.cumulative_kkt_passes += 1
 		interaction, movement = compute_interaction_and_movement(
 			solver_state,
@@ -469,6 +533,7 @@ function take_step!(
 			step_size_limit = Inf
 		end
 
+		
 		if step_size <= step_size_limit
 			update_solution_in_solver_state!(
 				solver_state,
@@ -757,12 +822,12 @@ function optimize_gpu(
 
 			### average ###
 			if solver_state.numerical_error || solver_state.solution_weighted_avg.primal_solutions_count == 0 || solver_state.solution_weighted_avg.dual_solutions_count == 0
-				buffer_avg.avg_primal_solution .= copy(solver_state.current_primal_solution)
-				buffer_avg.avg_dual_solution .= copy(solver_state.current_dual_solution)
-				buffer_avg.avg_primal_product .= copy(solver_state.current_primal_product)
-				buffer_avg.avg_dual_product .= copy(solver_state.current_dual_product)
-				buffer_avg.avg_primal_gradient .= copy(buffer_primal_gradient)
-				buffer_avg.avg_primal_obj_product .= copy(solver_state.current_primal_obj_product)
+				buffer_avg.avg_primal_solution .= solver_state.current_primal_solution
+				buffer_avg.avg_dual_solution .= solver_state.current_dual_solution
+				buffer_avg.avg_primal_product .= solver_state.current_primal_product
+				buffer_avg.avg_dual_product .= solver_state.current_dual_product
+				buffer_avg.avg_primal_gradient .= buffer_primal_gradient
+				buffer_avg.avg_primal_obj_product .= solver_state.current_primal_obj_product
 			else
 				compute_average!(solver_state.solution_weighted_avg, buffer_avg, d_problem)
 			end
