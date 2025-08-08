@@ -177,6 +177,30 @@ Update weighted average
 #     )
 #     return
 # end
+function self_add_weighted_diff_kernel!(
+    src::CuDeviceVector{Float64},
+    a ::CuDeviceVector{Float64},
+    weight ::Float64,
+    N::Int64,
+)
+    tid = CUDA.threadIdx().x + (CUDA.blockIdx().x - 1) * CUDA.blockDim().x
+    if tid <= N
+        src[tid] = src[tid] + weight * (a[tid] - src[tid])
+    end
+    return
+end
+
+function launch_self_add_weighted_diff!(
+    src::CuVector{Float64},
+    a ::CuVector{Float64},
+    weight ::Float64,
+)
+    N = length(src)
+    blocks = div(N + ThreadPerBlock - 1, ThreadPerBlock)
+    CUDA.@cuda threads=ThreadPerBlock blocks=blocks self_add_weighted_diff_kernel!(src, a, weight, N)
+    return
+end
+
 function add_to_solution_weighted_average!(
     solution_weighted_avg::CuSolutionWeightedAverage,
     current_primal_solution::CuVector{Float64},
@@ -187,23 +211,30 @@ function add_to_solution_weighted_average!(
     current_primal_obj_product::CuVector{Float64},
 )
     CUDA.@sync begin
-        solution_weighted_avg.avg_primal_solutions .= 
-            solution_weighted_avg.avg_primal_solutions .+ 
-            weight .* (current_primal_solution .- solution_weighted_avg.avg_primal_solutions)
+        # solution_weighted_avg.avg_primal_solutions .= 
+        #     solution_weighted_avg.avg_primal_solutions .+ 
+        #     weight .* (current_primal_solution .- solution_weighted_avg.avg_primal_solutions)
+        # solution_weighted_avg.primal_solutions_count += 1
+        # solution_weighted_avg.avg_dual_solutions .= 
+        #     solution_weighted_avg.avg_dual_solutions .+ 
+        #     weight .* (current_dual_solution .- solution_weighted_avg.avg_dual_solutions)
+        # solution_weighted_avg.dual_solutions_count += 1
+        # solution_weighted_avg.avg_primal_product .= 
+        #     solution_weighted_avg.avg_primal_product .+ 
+        #     weight .* (current_primal_product .- solution_weighted_avg.avg_primal_product)
+        # solution_weighted_avg.avg_dual_product .=
+        #     solution_weighted_avg.avg_dual_product .+ 
+        #     weight .* (current_dual_product .- solution_weighted_avg.avg_dual_product)
+        # solution_weighted_avg.avg_primal_obj_product .= 
+        #     solution_weighted_avg.avg_primal_obj_product .+ 
+        #     weight .* (current_primal_obj_product .- solution_weighted_avg.avg_primal_obj_product)
+        launch_self_add_weighted_diff!(solution_weighted_avg.avg_primal_solutions, current_primal_solution, weight)
         solution_weighted_avg.primal_solutions_count += 1
-        solution_weighted_avg.avg_dual_solutions .= 
-            solution_weighted_avg.avg_dual_solutions .+ 
-            weight .* (current_dual_solution .- solution_weighted_avg.avg_dual_solutions)
+        launch_self_add_weighted_diff!(solution_weighted_avg.avg_dual_solutions, current_dual_solution, weight)
         solution_weighted_avg.dual_solutions_count += 1
-        solution_weighted_avg.avg_primal_product .= 
-            solution_weighted_avg.avg_primal_product .+ 
-            weight .* (current_primal_product .- solution_weighted_avg.avg_primal_product)
-        solution_weighted_avg.avg_dual_product .=
-            solution_weighted_avg.avg_dual_product .+ 
-            weight .* (current_dual_product .- solution_weighted_avg.avg_dual_product)
-        solution_weighted_avg.avg_primal_obj_product .= 
-            solution_weighted_avg.avg_primal_obj_product .+ 
-            weight .* (current_primal_obj_product .- solution_weighted_avg.avg_primal_obj_product)
+        launch_self_add_weighted_diff!(solution_weighted_avg.avg_primal_product, current_primal_product, weight)
+        launch_self_add_weighted_diff!(solution_weighted_avg.avg_dual_product, current_dual_product, weight)
+        launch_self_add_weighted_diff!(solution_weighted_avg.avg_primal_obj_product, current_primal_obj_product, weight)
     end
     return
 end
@@ -240,9 +271,8 @@ function compute_average!(
     # buffer_avg.avg_primal_gradient .+= buffer_avg.avg_primal_obj_product
     CUDA.@sync begin
         N = length(buffer_avg.avg_primal_gradient)
-        threads_per_block = 256
-        blocks = div(N + threads_per_block - 1, threads_per_block)
-        CUDA.@cuda threads=threads_per_block blocks=blocks compute_average_kernel!(
+        blocks = div(N + ThreadPerBlock - 1, ThreadPerBlock)
+        CUDA.@cuda threads=ThreadPerBlock blocks=blocks compute_average_kernel!(
             buffer_avg.avg_primal_gradient,
             problem.objective_vector,
             buffer_avg.avg_dual_product,

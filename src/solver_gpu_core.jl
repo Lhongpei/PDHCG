@@ -391,7 +391,6 @@ function compute_interaction_and_movement(
 	# 	buffer_state.delta_primal_product .= buffer_state.next_primal_product .- solver_state.current_primal_product
 	# 	buffer_state.delta_primal_obj_product .= buffer_state.next_primal_obj_product .- solver_state.current_primal_obj_product
 	# end
-	ThreadPerBlock = 256
 	function launch!(a, b, c)
         len = length(c)
         if len > 0

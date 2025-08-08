@@ -14,7 +14,7 @@ result_df = DataFrame(
 )
 for file in readdir(dataset_dir)
     if endswith(file, ".QPS")
-        qp = PDHCG.readFile(joinpath(dataset_dir, "CONT-050.QPS"))
+        qp = PDHCG.readFile(joinpath(dataset_dir, "CONT-100.QPS"))
         log = PDHCG.pdhcgSolve(qp, gpu_flag=true, warm_up_flag=true, online_precondition_band_dual=nothing, verbose_level=2, time_limit = 600.)
         time_cost = log.solve_time_sec
         obj = log.objective_value
