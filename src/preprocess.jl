@@ -69,7 +69,148 @@ function validate(p::QuadraticProgrammingProblem)
 
     return true
 end
+function validate_gpu(p::QuadraticProgrammingProblem)
+    error_found = false
 
+    # --- shape / length checks (cheap, do on host) ---
+    n_lb = length(p.variable_lower_bound)
+    n_ub = length(p.variable_upper_bound)
+    n_obj = length(p.objective_vector)
+    m_con = size(p.constraint_matrix, 1)
+    n_con = size(p.constraint_matrix, 2)
+
+    if n_lb != n_ub
+        @info "length(variable_lower_bound) = $n_lb != length(variable_upper_bound) = $n_ub"
+        error_found = true
+    end
+    if n_lb != n_obj
+        @info "length(variable_lower_bound) = $n_lb != length(objective_vector) = $n_obj"
+        error_found = true
+    end
+    if m_con != length(p.right_hand_side)
+        @info "size(constraint_matrix,1) = $m_con != length(right_hand_side) = $(length(p.right_hand_side))"
+        error_found = true
+    end
+    if n_con != n_obj
+        @info "size(constraint_matrix,2) = $n_con != length(objective_vector) = $n_obj"
+        error_found = true
+    end
+    # objective_matrix should be square n_obj x n_obj
+    if size(p.objective_matrix) != (n_obj, n_obj)
+        @info "size(objective_matrix) = $(size(p.objective_matrix)) is not ( $n_obj, $n_obj )"
+        error_found = true
+    end
+
+    # --- helper to do GPU-aware reductions and return host Bool/Int ---
+    to_host_bool(x) = Bool(x)           # works if x is scalar CuArray or Number
+    to_host_int(x)  = Int(x)
+
+    # If CUDA available and argument is GPU array, reductions will be performed on device,
+    # and the scalar result will be transferred when wrapped by Bool()/Int().
+    # For CPU arrays the same calls work.
+    #
+    # Note: sum(...) on Bool arrays returns Int-like scalar; any(...) returns Bool.
+
+    # --- bounds Inf checks ---
+    # count of +Inf in lower bounds
+    try
+        n_lb_posinf = to_host_int(sum(p.variable_lower_bound .== Inf))
+    catch
+        # fallback: materialize to CPU then check (should rarely be needed)
+        n_lb_posinf = count(x->x==Inf, Array(p.variable_lower_bound))
+    end
+    if n_lb_posinf > 0
+        @info "variable_lower_bound contains +Inf: count = $n_lb_posinf"
+        error_found = true
+    end
+
+    # count of -Inf in upper bounds
+    try
+        n_ub_neginf = to_host_int(sum(p.variable_upper_bound .== -Inf))
+    catch
+        n_ub_neginf = count(x->x==-Inf, Array(p.variable_upper_bound))
+    end
+    if n_ub_neginf > 0
+        @info "variable_upper_bound contains -Inf: count = $n_ub_neginf"
+        error_found = true
+    end
+
+    # --- NaN in bounds ---
+    try
+        lb_has_nan = to_host_bool(any(isnan, p.variable_lower_bound))
+        ub_has_nan = to_host_bool(any(isnan, p.variable_upper_bound))
+    catch
+        lb_has_nan = any(isnan, Array(p.variable_lower_bound))
+        ub_has_nan = any(isnan, Array(p.variable_upper_bound))
+    end
+    if lb_has_nan || ub_has_nan
+        @info "NaN found in variable bounds of QuadraticProgrammingProblem."
+        error_found = true
+    end
+
+    # --- right hand side finite check ---
+    try
+        rhs_bad = to_host_bool(any(x -> !isfinite(x), p.right_hand_side))
+    catch
+        rhs_bad = any(!isfinite, Array(p.right_hand_side))
+    end
+    if rhs_bad
+        @info "NaN or Inf found in right hand side of QuadraticProgrammingProblem."
+        error_found = true
+    end
+
+    # --- objective vector finite check ---
+    try
+        obj_bad = to_host_bool(any(x -> !isfinite(x), p.objective_vector))
+    catch
+        obj_bad = any(!isfinite, Array(p.objective_vector))
+    end
+    if obj_bad
+        @info "NaN or Inf found in objective vector of QuadraticProgrammingProblem."
+        error_found = true
+    end
+
+    # --- constraint matrix finite check (check nonzeros or all entries) ---
+    # For sparse matrices on GPU the behavior can differ; we attempt a safe approach:
+    try
+        # prefer checking nonzeros if it's a sparse matrix type with nonzeros available
+        if Base.eltype(p.constraint_matrix) <: Number && !(typeof(p.constraint_matrix) <: AbstractSparseMatrix{<:Any})
+            # dense matrix: any non-finite?
+            cm_bad = to_host_bool(any(x -> !isfinite(x), p.constraint_matrix))
+        else
+            # for sparse/different types, convert nonzeros to array and check
+            cm_bad = to_host_bool(any(x -> !isfinite(x), nonzeros(p.constraint_matrix)))
+        end
+    catch
+        # fallback materialize
+        cm_bad = any(!isfinite, Array(nonzeros(p.constraint_matrix)))
+    end
+    if cm_bad
+        @info "NaN or Inf found in constraint matrix of QuadraticProgrammingProblem."
+        error_found = true
+    end
+
+    # --- objective matrix finite check ---
+    try
+        if Base.eltype(p.objective_matrix) <: Number && !(typeof(p.objective_matrix) <: AbstractSparseMatrix{<:Any})
+            om_bad = to_host_bool(any(x -> !isfinite(x), p.objective_matrix))
+        else
+            om_bad = to_host_bool(any(x -> !isfinite(x), nonzeros(p.objective_matrix)))
+        end
+    catch
+        om_bad = any(!isfinite, Array(nonzeros(p.objective_matrix)))
+    end
+    if om_bad
+        @info "NaN or Inf found in objective matrix of QuadraticProgrammingProblem."
+        error_found = true
+    end
+
+    if error_found
+        error("Error found when validating QuadraticProgrammingProblem. See @info for details.")
+    end
+
+    return true
+end
 """
 Returns the l2 norm of each row or column of a matrix. The method rescales
 the sum-of-squares computation by the largest absolute value if nonzero in order

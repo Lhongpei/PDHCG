@@ -166,6 +166,70 @@ function projection!(
 	CUDA.@sync @. primal = clamp(primal, variable_lower_bound, variable_upper_bound)
 end
 
+function primal_kernel1!(
+	current_gradient::CuDeviceVector{Float64},
+	next_primal::CuDeviceVector{Float64},
+	current_primal_solution::CuDeviceVector{Float64},
+	objective_vector::CuDeviceVector{Float64},
+	current_dual_product::CuDeviceVector{Float64},
+	current_primal_obj_product::CuDeviceVector{Float64},
+	last_gradient::CuDeviceVector{Float64},
+	variable_lower_bound::CuDeviceVector{Float64},
+	variable_upper_bound::CuDeviceVector{Float64},
+	alpha::Float64,
+	N::Int64,
+)
+	tid = threadIdx().x + blockDim().x * (blockIdx().x - 1)
+	if tid <= N
+		gradient_cache = current_primal_obj_product[tid] + objective_vector[tid] - current_dual_product[tid]
+		next_primal_cache = current_primal_solution[tid] - alpha * gradient_cache
+		current_gradient[tid] = gradient_cache
+		last_gradient[tid] = gradient_cache
+		next_primal[tid] = clamp(next_primal_cache, variable_lower_bound[tid], variable_upper_bound[tid])
+	end
+	return
+end
+#current_gradient .= current_gradient .+ (primal_weight / step_size) .* (next_primal .- current_primal_solution) .+ problem.objective_vector .- current_dual_product
+function primal_kernel2!(
+	current_gradient::CuDeviceVector{Float64},
+	next_primal::CuDeviceVector{Float64},
+	current_primal_solution::CuDeviceVector{Float64},
+	objective_vector::CuDeviceVector{Float64},
+	current_dual_product::CuDeviceVector{Float64},
+	alpha::Float64,
+	N::Int64,
+)
+	tid = threadIdx().x + blockDim().x * (blockIdx().x - 1)
+	if tid <= N
+		current_gradient[tid] = current_gradient[tid] + alpha * (next_primal[tid] - current_primal_solution[tid]) + objective_vector[tid] - current_dual_product[tid]
+	end
+	return
+end
+# CUDA.copyto!(last_primal, next_primal)
+# CUDA.copyto!(last_gradient, current_gradient)
+# next_primal .= next_primal .- alpha .* current_gradient
+# projection!(next_primal, problem.variable_lower_bound, problem.variable_upper_bound)
+function primal_kernel3!(
+	current_gradient::CuDeviceVector{Float64},
+	next_primal::CuDeviceVector{Float64},
+	last_gradient::CuDeviceVector{Float64},
+	last_primal::CuDeviceVector{Float64},
+	variable_lower_bound::CuDeviceVector{Float64},
+	variable_upper_bound::CuDeviceVector{Float64},
+	alpha::Float64,
+	N::Int64
+)
+	tid = threadIdx().x + blockDim().x * (blockIdx().x - 1)
+	if tid <= N
+		primal_cache = next_primal[tid]
+		gradient_cache = current_gradient[tid] 
+		next_primal_cache = primal_cache - alpha * gradient_cache
+		last_primal[tid] = primal_cache
+		last_gradient[tid] = gradient_cache
+		next_primal[tid] = clamp(next_primal_cache, variable_lower_bound[tid], variable_upper_bound[tid])
+	end
+	return
+end
 function compute_next_primal_solution_gd_BB!(
 	problem::CuQuadraticProgrammingProblem,
 	current_primal_solution::CuArray{Float64, 1},
@@ -188,32 +252,76 @@ function compute_next_primal_solution_gd_BB!(
 	max_CG_iter = 100
 	k = 1
 	alpha = 1.0 / (norm_Q + primal_weight / step_size)
-	CUDA.copyto!(last_primal, current_primal_solution)
-	current_gradient .= current_primal_obj_product .+ problem.objective_vector .- current_dual_product
-	CUDA.copyto!(last_gradient, current_gradient)
-	next_primal .= current_primal_solution .- 1.0 / (norm_Q + primal_weight / step_size) .* current_gradient
-	projection!(next_primal, problem.variable_lower_bound, problem.variable_upper_bound)
+
+	CUDA.@sync begin
+		CUDA.copyto!(last_primal, current_primal_solution)
+		# current_gradient .= current_primal_obj_product .+ problem.objective_vector .- current_dual_product
+		# next_primal .= current_primal_solution .- alpha .* current_gradient
+		@cuda threads=ThreadPerBlock blocks=cld(length(current_primal_solution), ThreadPerBlock) primal_kernel1!(
+			current_gradient,
+			next_primal,
+			current_primal_solution,
+			problem.objective_vector,
+			current_dual_product,
+			current_primal_obj_product,
+			last_gradient,
+			problem.variable_lower_bound,
+			problem.variable_upper_bound,
+			alpha,
+			length(current_primal_solution),
+		)
+	end
+	# CUDA.copyto!(last_gradient, current_gradient)
+	
+	# projection!(next_primal, problem.variable_lower_bound, problem.variable_upper_bound)
 	while k <= max_CG_iter
 		inner_delta_primal .= next_primal .- last_primal
 
-		gg = CUDA.dot(inner_delta_primal, inner_delta_primal)
+		CUDA.@sync begin
+			gg = CUDA.dot(inner_delta_primal, inner_delta_primal)
+			CUDA.CUSPARSE.mv!('N', 1.0, problem.objective_matrix, next_primal, 0.0, current_gradient, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+		end
 		if sqrt(gg) <= min(0.05 * CG_bound, 1e-2) * alpha
 			break
 		end
-		CUDA.CUSPARSE.mv!('N', 1.0, problem.objective_matrix, next_primal, 0.0, current_gradient, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
-		current_gradient .= current_gradient .+ (primal_weight / step_size) .* (next_primal .- current_primal_solution) .+ problem.objective_vector .- current_dual_product
+		primal_step_size = primal_weight / step_size
+		# current_gradient .= current_gradient .+ (primal_weight / step_size) .* (next_primal .- current_primal_solution) .+ problem.objective_vector .- current_dual_product
+		CUDA.@sync begin
+			@cuda threads=ThreadPerBlock blocks=cld(length(current_gradient), ThreadPerBlock) primal_kernel2!(
+				current_gradient,
+				next_primal,
+				current_primal_solution,
+				problem.objective_vector,
+				current_dual_product,
+				primal_step_size,
+				length(current_gradient),
+			)
+		end
 		alpha = gg / CUDA.dot(inner_delta_primal, current_gradient .- last_gradient)
 
-		CUDA.copyto!(last_primal, next_primal)
-		CUDA.copyto!(last_gradient, current_gradient)
-
-		next_primal .= next_primal .- alpha .* current_gradient
-		projection!(next_primal, problem.variable_lower_bound, problem.variable_upper_bound)
+		# CUDA.copyto!(last_primal, next_primal)
+		# CUDA.copyto!(last_gradient, current_gradient)
+		# next_primal .= next_primal .- alpha .* current_gradient
+		# projection!(next_primal, problem.variable_lower_bound, problem.variable_upper_bound)
+		CUDA.@sync begin
+			@cuda threads=ThreadPerBlock blocks=cld(length(next_primal), ThreadPerBlock) primal_kernel3!(
+				current_gradient,
+				next_primal,
+				last_gradient,
+				last_primal,
+				problem.variable_lower_bound,
+				problem.variable_upper_bound,
+				alpha,
+				length(next_primal),
+			)
+		end
 		k += 1
 	end
-	CUDA.CUSPARSE.mv!('N', 1.0, problem.objective_matrix, next_primal, 0.0, next_primal_obj_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
-	CUDA.CUSPARSE.mv!('N', 1.0, problem.constraint_matrix, next_primal, 0.0, next_primal_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
 
+	CUDA.@sync begin
+		CUDA.CUSPARSE.mv!('N', 1.0, problem.objective_matrix, next_primal, 0.0, next_primal_obj_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+		CUDA.CUSPARSE.mv!('N', 1.0, problem.constraint_matrix, next_primal, 0.0, next_primal_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+	end
 	CG_iter = min(k, max_CG_iter)
 	return CG_iter
 end
@@ -556,7 +664,68 @@ end
 
 """
 Main algorithm
-"""
+# """
+# 	#Detect if the input problem is a GPU problem
+# 	if typeof(original_problem) == QuadraticProgrammingProblem
+# 		println("The input problem is a CPU problem, we will convert it to a GPU problem")
+# 		original_problem = qp_cpu_to_gpu(original_problem)
+# 	end
+# 	solving_time_details = Dict{String, Float64}()
+# 	start_time_root = time()
+# 	validate_gpu(original_problem)
+# 	qp_cache = cached_quadratic_program_info(original_problem)
+# 	original_norm_Q = cu_estimate_maximum_singular_value(original_problem.objective_matrix)
+# 	stopkkt_Q = true  
+# 	empty_lb_inf = all(original_problem.variable_lower_bound .> -Inf)
+# 	empty_ub_inf = all(original_problem.variable_upper_bound .< Inf)
+# 	CG_switch = empty_lb_inf && empty_ub_inf
+# 	if original_problem.num_equalities >= 1
+
+# 		G = original_problem.constraint_matrix[1:original_problem.num_equalities, :]
+# 		G_square = G' * G
+# 		q = original_problem.right_hand_side[1:original_problem.num_equalities]
+# 		norm_G = cu_estimate_maximum_singular_value(G_square)
+
+# 		rho = 0.1 * original_norm_Q[1] / (norm_G[1])
+# 		original_problem.objective_matrix = original_problem.objective_matrix .+ rho .* G_square
+# 		original_problem.objective_vector = original_problem.objective_vector .- rho .* G' * q
+# 	end
+function estimate_maximum_singular_value(
+    gmat::CuSparseMatrixCSR{Float64};  # 输入已经在 GPU 上
+    probability_of_failure::Float64 = 0.01,
+    desired_relative_error::Float64 = 0.1,
+    seed::Int64 = 1,
+)
+
+    epsilon = 1.0 - (1.0 - desired_relative_error)^2
+
+    # 初始化随机向量到 GPU
+    rng = MersenneTwister(seed)
+    x = cu(randn(rng, size(gmat, 2)))
+    x ./= norm(x, 2)
+
+    temp = CuArray{Float64}(undef, size(gmat, 1))
+    gmatT = transpose(gmat)  # GPU 上的转置
+
+    number_of_power_iterations = 0
+    num_col = size(gmat, 2)
+
+    # 你的概率函数（可以和 CPU 版一样）
+    power_method_failure_probability(num_col, epsilon, k) = exp(-k * epsilon / num_col)
+
+    # 幂迭代
+    while power_method_failure_probability(num_col, epsilon, number_of_power_iterations) > probability_of_failure
+        mul!(temp, gmat, x)    # temp = A * x
+        mul!(x, gmatT, temp)   # x = A' * temp
+        x ./= norm(x, 2)       # 归一化
+        number_of_power_iterations += 1
+    end
+
+    mul!(temp, gmat, x)
+    max_singular_value = sqrt(dot(x, gmatT * temp))
+
+    return max_singular_value, number_of_power_iterations
+end
 function optimize_gpu(
 	params::PdhcgParameters,
 	original_problem::QuadraticProgrammingProblem;

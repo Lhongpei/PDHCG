@@ -181,11 +181,14 @@ function pdhcgSolve(
     initial_diagonal_precondition_dual::Union{Vector{Float64}, Nothing} = nothing,
 )
     if warm_up_flag
+        warm_up_start_time = time()
         qpw = copy(qp)
         oldstd = stdout
         redirect_stdout(devnull)
         warm_up(qpw, gpu_flag);
         redirect_stdout(oldstd)
+        warm_up_end_time = time()
+        print_timing_banner("Warm-up time", warm_up_end_time - warm_up_start_time)
     end
     restart_params = construct_restart_parameters(
         ADAPTIVE_KKT,    # NO_RESTARTS FIXED_FREQUENCY ADAPTIVE_KKT

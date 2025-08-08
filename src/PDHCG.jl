@@ -52,4 +52,5 @@ include("cpu_to_gpu.jl")
 include("iteration_stats_utils_gpu.jl")
 include("saddle_point_gpu.jl")
 include("solver_gpu_core.jl")
+include("preprocess_gpu.jl")
 end # module PDHCG
