@@ -1,7 +1,7 @@
 using SparseArrays  
 function generate_randomQP_problem(n::Int, seed::Int=1, sparsity::Float64=1e-8)
     Random.seed!(seed)
-    m = Int(0.5 * n)
+    m = Int(n)
 
     # Generate problem data
     P = sprandn(n, n, sparsity)
