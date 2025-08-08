@@ -100,14 +100,14 @@ function cached_quadratic_program_info(qp::QuadraticProgrammingProblem)
     )
 end
 
-function cached_cuquadratic_program_info(qp::CuQuadraticProgrammingProblem)
-    return CachedQuadraticProgramInfo(
-        CUDA.norm(qp.objective_vector, Inf),
-        CUDA.norm(qp.right_hand_side, Inf),
-        CUDA.norm(qp.objective_vector, 2),
-        CUDA.norm(qp.right_hand_side, 2),
-    )
-end
+# function cached_cuquadratic_program_info(qp::CuQuadraticProgrammingProblem)
+#     return CachedQuadraticProgramInfo(
+#         CUDA.norm(qp.objective_vector, Inf),
+#         CUDA.norm(qp.right_hand_side, Inf),
+#         CUDA.norm(qp.objective_vector, 2),
+#         CUDA.norm(qp.right_hand_side, 2),
+#     )
+# end
 
 """
 Check if the algorithm should terminate declaring the optimal solution is found.
