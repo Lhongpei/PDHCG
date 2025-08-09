@@ -1,3 +1,5 @@
 results.csv
 build/*
 PDHCG_sysimage.so
+results_old.csv
+.gitignore
