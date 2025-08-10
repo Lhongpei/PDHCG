@@ -205,6 +205,22 @@ function primal_kernel2!(
 	end
 	return
 end
+function primal_kernel4!(
+	current_gradient::CuDeviceVector{Float64},
+	next_primal::CuDeviceVector{Float64},
+	current_primal_solution::CuDeviceVector{Float64},
+	objective_vector::CuDeviceVector{Float64},
+	current_dual_product::CuDeviceVector{Float64},
+	primal_precondition::CuDeviceVector{Float64},
+	alpha::Float64,
+	N::Int64,
+)
+	tid = threadIdx().x + blockDim().x * (blockIdx().x - 1)
+	if tid <= N
+		current_gradient[tid] = current_gradient[tid] + alpha * (next_primal[tid] - current_primal_solution[tid]) / primal_precondition[tid] + objective_vector[tid] - current_dual_product[tid]
+	end
+	return
+end
 # CUDA.copyto!(last_primal, next_primal)
 # CUDA.copyto!(last_gradient, current_gradient)
 # next_primal .= next_primal .- alpha .* current_gradient
@@ -247,6 +263,7 @@ function compute_next_primal_solution_gd_BB!(
 	next_primal_obj_product::CuArray{Float64, 1},
 	norm_Q::Float64,
 	first_iter::Bool,
+	primal_precondition::Union{Nothing, CuArray{Float64, 1}} = nothing,
 )
 
 	max_CG_iter = 100
@@ -284,18 +301,33 @@ function compute_next_primal_solution_gd_BB!(
 		if sqrt(gg) <= min(0.05 * CG_bound, 1e-2) * alpha
 			break
 		end
-		primal_step_size = primal_weight / step_size
+		inv_primal_step_size = primal_weight / step_size
 		# current_gradient .= current_gradient .+ (primal_weight / step_size) .* (next_primal .- current_primal_solution) .+ problem.objective_vector .- current_dual_product
-		CUDA.@sync begin
-			@cuda threads=ThreadPerBlock blocks=cld(length(current_gradient), ThreadPerBlock) primal_kernel2!(
-				current_gradient,
-				next_primal,
-				current_primal_solution,
-				problem.objective_vector,
-				current_dual_product,
-				primal_step_size,
-				length(current_gradient),
-			)
+		if isnothing(primal_precondition)	
+			CUDA.@sync begin
+				@cuda threads=ThreadPerBlock blocks=cld(length(current_gradient), ThreadPerBlock) primal_kernel2!(
+					current_gradient,
+					next_primal,
+					current_primal_solution,
+					problem.objective_vector,
+					current_dual_product,
+					inv_primal_step_size,
+					length(current_gradient),
+				)
+			end
+		else
+			CUDA.@sync begin
+				@cuda threads=ThreadPerBlock blocks=cld(length(current_gradient), ThreadPerBlock) primal_kernel4!(
+					current_gradient,
+					next_primal,
+					current_primal_solution,
+					problem.objective_vector,
+					current_dual_product,
+					primal_precondition,
+					inv_primal_step_size,
+					length(current_gradient),
+				)
+			end
 		end
 		alpha = gg / CUDA.dot(inner_delta_primal, current_gradient .- last_gradient)
 
@@ -368,12 +400,12 @@ function compute_next_dual_solution_kernel_with_diag_precond!(
 )	
 	tx = threadIdx().x + (blockDim().x * (blockIdx().x - 0x1))
 	if tx <= num_equalities
-		diagonal_precondition[tx] -= (primal_weight * step_size) * (right_hand_side[tx] - current_primal_product[tx]) * (right_hand_side[tx] - next_primal_product[tx]) / (norm_precondition ^ 2 + 1e-8) 
+		# diagonal_precondition[tx] -= (primal_weight * step_size) * (right_hand_side[tx] - current_primal_product[tx]) * (right_hand_side[tx] - next_primal_product[tx]) / (norm_precondition ^ 2 + 1e-8) 
 		next_dual[tx] = current_dual_solution[tx] + diagonal_precondition[tx] * (primal_weight * step_size) * (right_hand_side[tx] - 2 * next_primal_product[tx] + current_primal_product[tx]) 
 		
 		# diagonal_precondition[tx] = max(diagonal_precondition[tx], 0.0)
 	elseif (num_equalities + 1) <= tx <= num_constraints
-		diagonal_precondition[tx] -= (primal_weight * step_size) * (right_hand_side[tx] - current_primal_product[tx]) * (next_dual[tx] > 0.0 ? next_dual[tx] : 0.0) * (right_hand_side[tx] - next_primal_product[tx]) / (norm_precondition ^ 2 + 1e-8)
+		# diagonal_precondition[tx] -= (primal_weight * step_size) * (right_hand_side[tx] - current_primal_product[tx]) * (next_dual[tx] > 0.0 ? next_dual[tx] : 0.0) * (right_hand_side[tx] - next_primal_product[tx]) / (norm_precondition ^ 2 + 1e-8)
 		next_dual[tx] = current_dual_solution[tx] + diagonal_precondition[tx] * (primal_weight * step_size) * (right_hand_side[tx] - 2 * next_primal_product[tx] + current_primal_product[tx])
 		
 		# diagonal_precondition[tx] = max(diagonal_precondition[tx], 0.0)
