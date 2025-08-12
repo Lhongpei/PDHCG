@@ -298,6 +298,9 @@ function compute_next_primal_solution_gd_BB!(
 			gg = CUDA.dot(inner_delta_primal, inner_delta_primal)
 			CUDA.CUSPARSE.mv!('N', 1.0, problem.objective_matrix, next_primal, 0.0, current_gradient, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
 		end
+		CUDA.CUSPARSE.mv!('N', 1.0, problem.constraint_matrix, next_primal.- current_primal_solution, 0.0, next_primal_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+		CUDA.CUSPARSE.mv!('N', 1.0  , problem.constraint_matrix_t, next_primal_product, 1.0, current_gradient, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+		# println("Stepsize & Weight", step_size, " ", primal_weight)
 		if sqrt(gg) <= min(0.05 * CG_bound, 1e-2) * alpha
 			break
 		end
@@ -680,10 +683,12 @@ function take_step!(
 			)
 			done = true
 		end
-
+		
 		first_term = (1 - 1 / (solver_state.total_number_iterations + 1)^(0.3)) * step_size_limit
 		second_term = (1 + 1 / (solver_state.total_number_iterations + 1)^(0.6)) * step_size
 		step_size = min(first_term, second_term)
+		# step_size = max(step_size, 1e-4)
+
 		time_dict["Stepsize&Weight update time"] += time() - start_cal_new_primal_weight_time
 
 	end
@@ -775,6 +780,22 @@ function optimize_gpu(
 	empty_lb_inf = isempty(findall(original_problem.variable_lower_bound .> -Inf))
 	empty_ub_inf = isempty(findall(original_problem.variable_upper_bound .< Inf))
 	CG_switch = empty_lb_inf && empty_ub_inf
+	ts = Dates.format(now(), "HH:MM:SS")
+	if CG_switch
+		printstyled("┌─ "; color=:light_black)
+		printstyled("[$ts] "; color=:cyan)
+		printstyled(rpad("Primal Subproblem Algorithm:", 40); bold=true, color=:bright_green)
+		printstyled("── "; color=:light_black)
+		printstyled("Conjugate Gradient", color=:green)
+		println()
+	else
+		printstyled("┌─ "; color=:light_black)
+		printstyled("[$ts] "; color=:cyan)
+		printstyled(rpad("Primal Subproblem Algorithm:", 40); bold=true, color=:bright_green)
+		printstyled("── "; color=:light_black)
+		printstyled("Project Gradient Descent with BB Stepsize", color=:green)
+		println()
+	end
 	if original_problem.num_equalities >= 1
 
 		G = original_problem.constraint_matrix[1:original_problem.num_equalities, :]
