@@ -722,42 +722,42 @@ Main algorithm
 # 		original_problem.objective_matrix = original_problem.objective_matrix .+ rho .* G_square
 # 		original_problem.objective_vector = original_problem.objective_vector .- rho .* G' * q
 # 	end
-# function estimate_maximum_singular_value(
-#     gmat::CuSparseMatrixCSR{Float64};  # 输入已经在 GPU 上
-#     probability_of_failure::Float64 = 0.01,
-#     desired_relative_error::Float64 = 0.1,
-#     seed::Int64 = 1,
-# )
+function estimate_maximum_singular_value(
+    gmat::CuSparseMatrixCSR{Float64};  # 输入已经在 GPU 上
+    probability_of_failure::Float64 = 0.01,
+    desired_relative_error::Float64 = 0.1,
+    seed::Int64 = 1,
+)
 
-#     epsilon = 1.0 - (1.0 - desired_relative_error)^2
+    epsilon = 1.0 - (1.0 - desired_relative_error)^2
 
-#     # 初始化随机向量到 GPU
-#     rng = MersenneTwister(seed)
-#     x = cu(randn(rng, size(gmat, 2)))
-#     x ./= norm(x, 2)
+    # 初始化随机向量到 GPU
+    rng = MersenneTwister(seed)
+    x = cu(randn(rng, size(gmat, 2)))
+    x ./= norm(x, 2)
 
-#     temp = CuArray{Float64}(undef, size(gmat, 1))
-#     gmatT = transpose(gmat)  # GPU 上的转置
+    temp = CuArray{Float64}(undef, size(gmat, 1))
+    gmatT = transpose(gmat)  # GPU 上的转置
 
-#     number_of_power_iterations = 0
-#     num_col = size(gmat, 2)
+    number_of_power_iterations = 0
+    num_col = size(gmat, 2)
 
-#     # 你的概率函数（可以和 CPU 版一样）
-#     power_method_failure_probability(num_col, epsilon, k) = exp(-k * epsilon / num_col)
+    # 你的概率函数（可以和 CPU 版一样）
+    power_method_failure_probability(num_col, epsilon, k) = exp(-k * epsilon / num_col)
 
-#     # 幂迭代
-#     while power_method_failure_probability(num_col, epsilon, number_of_power_iterations) > probability_of_failure
-#         mul!(temp, gmat, x)    # temp = A * x
-#         mul!(x, gmatT, temp)   # x = A' * temp
-#         x ./= norm(x, 2)       # 归一化
-#         number_of_power_iterations += 1
-#     end
+    # 幂迭代
+    while power_method_failure_probability(num_col, epsilon, number_of_power_iterations) > probability_of_failure
+        mul!(temp, gmat, x)    # temp = A * x
+        mul!(x, gmatT, temp)   # x = A' * temp
+        x ./= norm(x, 2)       # 归一化
+        number_of_power_iterations += 1
+    end
 
-#     mul!(temp, gmat, x)
-#     max_singular_value = sqrt(dot(x, gmatT * temp))
+    mul!(temp, gmat, x)
+    max_singular_value = sqrt(dot(x, gmatT * temp))
 
-#     return max_singular_value, number_of_power_iterations
-# end
+    return max_singular_value, number_of_power_iterations
+end
 function optimize_gpu(
 	params::PdhcgParameters,
 	original_problem::QuadraticProgrammingProblem;

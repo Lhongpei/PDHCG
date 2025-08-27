@@ -5,7 +5,7 @@ import Logging
 import Printf
 import SparseArrays
 import Random
-
+using CUDA
 import GZip
 import QPSReader
 import Statistics
@@ -16,6 +16,7 @@ using Random
 using SparseArrays
 using Dates: now
 using Dates
+using CUDA.CUSPARSE
 const KERNEL_DIR = joinpath(@__DIR__, "kernel/compiled_kernel/")
 const Diagonal = LinearAlgebra.Diagonal
 const diag = LinearAlgebra.diag
@@ -47,7 +48,6 @@ include("saddle_point.jl")
 include("solver_core.jl")
 include("data.jl")
 include("optimizer.jl")
-using CUDA
 include("cpu_to_gpu.jl")
 include("iteration_stats_utils_gpu.jl")
 include("saddle_point_gpu.jl")

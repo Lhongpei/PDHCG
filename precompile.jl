@@ -1,10 +1,10 @@
-ENV["CUDA_VISIBLE_DEVICES"] = "3"
+ENV["CUDA_VISIBLE_DEVICES"] = "1"
 using DataFrames
 using CSV
 include("src/PDHCG.jl")
 # ENV["JULIA_PROJECT"] = "pdhcg_env"
 
-dataset_dir = expanduser("~/QP_datasets/MM_benchmark")
+dataset_dir = expanduser("~/QP_datasets/MM_benchmark_presolved")
 result_df = DataFrame(
     dataset = String[],
     time_cost_sec = Float64[],
@@ -15,7 +15,7 @@ result_df = DataFrame(
 warm_up_flag = true
 for file in readdir(dataset_dir)
     global warm_up_flag
-    if endswith(file, ".QPS")
+    if endswith(file, ".QPS") || endswith(file, ".mps")
         if file == "BOYD1.QPS"
             continue  # Skip this file as it is known to cause issues
         end

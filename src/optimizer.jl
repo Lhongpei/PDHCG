@@ -72,10 +72,7 @@ function _solve(
             initial_diagonal_precondition_primal = initial_diagonal_precondition_primal, 
             initial_diagonal_precondition_dual = initial_diagonal_precondition_dual)
     else
-        if !isnothing(parameters.online_precondition_band)
-            warning("Online preconditioning is currently not supported in CPU version.")
-            parameters.online_precondition_band = nothing
-        end
+
         output = optimize(parameters, qp, initial_primal = initial_primal, initial_dual = initial_dual)
     end
     log = SolveLog()
@@ -232,4 +229,31 @@ function pdhcgSolve(
                         initial_primal = initial_primal, initial_dual = initial_dual, 
                         initial_diagonal_precondition_primal = initial_diagonal_precondition_primal,
                         initial_diagonal_precondition_dual = initial_diagonal_precondition_dual)
+end
+
+function pdhcgSolveFile(
+    filename::String;
+    gpu_flag::Bool = false,
+    warm_up_flag::Bool = false,
+    verbose_level::Int64 = 2,
+    time_limit::Float64 = 3600.0,
+    relat_error_tolerance::Float64 = 1e-6,
+    iteration_limit ::Int64 = Int64(typemax(Int32)),
+    ruiz_rescaling_iters::Int64 = 10,
+    l2_norm_rescaling_flag::Bool = false,
+    pock_chambolle_alpha::Float64 = 1.0,
+    artificial_restart_threshold::Float64 = 0.2,
+    sufficient_reduction::Float64 = 0.2,
+    necessary_reduction::Float64 = 0.8,
+    primal_weight_update_smoothing::Float64 = 0.2,
+    save_flag::Bool = false,
+    saved_name::Union{String, Nothing} = nothing,
+    output_dir::Union{String, Nothing} = nothing,
+)
+    qp = readFile(filename)
+    return pdhcgSolve(qp; gpu_flag, warm_up_flag, verbose_level, time_limit, relat_error_tolerance, 
+        iteration_limit, ruiz_rescaling_iters, l2_norm_rescaling_flag, pock_chambolle_alpha, 
+        artificial_restart_threshold, sufficient_reduction, necessary_reduction, 
+        primal_weight_update_smoothing, save_flag, saved_name, output_dir
+)
 end
