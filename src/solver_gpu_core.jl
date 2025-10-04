@@ -563,11 +563,10 @@ function compute_interaction_and_movement(
 	
 	CUDA.@sync begin
 		primal_dual_interaction = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_dual_product)
-		primal_objective_interaction = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_primal_obj_product)
 		norm_delta_primal = CUDA.dot(buffer_state.delta_primal, buffer_state.delta_primal)
 	end
 	CUDA.@sync begin
-		interaction = abs.(primal_dual_interaction) + 0.5 * abs.(primal_objective_interaction)
+		interaction = abs.(primal_dual_interaction)
 		norm_delta_dual = CUDA.dot(buffer_state.delta_dual, buffer_state.delta_dual)
 	end
 	movement = 0.5 * solver_state.primal_weight * norm_delta_primal + (0.5 / solver_state.primal_weight) * norm_delta_dual
@@ -1257,9 +1256,7 @@ function optimize_gpu(
 				buffer_primal_gradient,
 				solver_state.current_primal_obj_product,
 			)
-			flag_update_CG_bound = false
 			if current_iteration_stats.restart_used != RESTART_CHOICE_NO_RESTART
-				flag_update_CG_bound = true
 				solver_state.primal_weight = compute_new_primal_weight(
 					last_restart_info,
 					solver_state.primal_weight,
@@ -1270,12 +1267,6 @@ function optimize_gpu(
 				#solver_state.step_size = 0.99 * 2 / (norm_Q / solver_state.primal_weight + sqrt(4*norm_A^2 + norm_Q^2 / solver_state.primal_weight^2))
 			end
 			solving_time_details["Restart evaluation time"] += time() - start_restart_time
-
-			if flag_update_CG_bound
-				buffer_state.CG_bound = kkt_err
-			else
-				buffer_state.CG_bound += kkt_err
-			end
 
 		end
 

@@ -395,8 +395,7 @@ function compute_interaction_and_movement(
 
 
     primal_dual_interaction = dot(buffer_state.delta_primal, buffer_state.delta_dual_product)
-    primal_objective_interaction = dot(buffer_state.delta_primal, buffer_state.delta_primal_obj_product)
-    interaction = abs(primal_dual_interaction)+0.5*abs(primal_objective_interaction) 
+    interaction = abs(primal_dual_interaction)
     norm_delta_primal = dot(buffer_state.delta_primal,buffer_state.delta_primal)
     norm_delta_dual = dot(buffer_state.delta_dual,buffer_state.delta_dual)
         
@@ -951,9 +950,7 @@ function optimize(
                 solver_state.current_primal_obj_product,
             )
 
-            flag_update_CG_bound = false
             if current_iteration_stats.restart_used != RESTART_CHOICE_NO_RESTART
-                flag_update_CG_bound = true
                 solver_state.primal_weight = compute_new_primal_weight(
                     last_restart_info,
                     solver_state.primal_weight,
@@ -962,11 +959,6 @@ function optimize(
                 )
             end
 
-            if flag_update_CG_bound
-                buffer_state.CG_bound = kkt_err
-            else
-                buffer_state.CG_bound += kkt_err
-            end
         end
 
         
