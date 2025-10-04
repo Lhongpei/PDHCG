@@ -907,7 +907,7 @@ function optimize_gpu(
 		CUDA.zeros(Float64, primal_size),      # next_primal_obj_product
 		CUDA.zeros(Float64, primal_size),      # delta_next_primal_obj_product
 		CUDA.zeros(Float64, primal_size),      # CG_product,
-		1e-3,                                  # CG_bound
+		1e-5,                                  # CG_bound
 	)
 
 	buffer_avg = CuBufferAvgState(

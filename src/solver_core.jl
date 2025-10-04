@@ -630,7 +630,7 @@ function optimize(
         zeros(Float64, primal_size),      # delta_next_primal_obj_product
         zeros(Float64, primal_size),      # CG_gradient,
         zeros(Float64, primal_size),      # CG_product,
-        1e-3,                             # CG_bound
+        1e-5,                             # CG_bound
     )
 
     buffer_avg = BufferAvgState(
