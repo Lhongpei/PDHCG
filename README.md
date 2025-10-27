@@ -1,20 +1,29 @@
 
-# PDHCG
-The `PDHCG` project provides a Python interface for PDHCG algorithm suggested in [Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming](https://arxiv.org/abs/2405.16160).
 
-# Install
-- set Environment path `export JULIA_PROJECT=pdhcg_env`
-- Install Package:
-    ```shell
-    julia> ]
-    pkg> instantiate
-    ```
+# PDHCG QP Solver 
+This Repo contains the codebase of the paper "A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming".
+## Cite
 
+To cite the contents of this repository, please cite both the paper and this repo, using their respective DOIs.
 
-# Documentation: Julia Interface for PDHCG QP Solver
+https://doi.org/10.1287/ijoc.2024.0983
 
-This document provides a comprehensive overview of a suite of Julia functions designed to interface with the PDHCG quadratic programming solver. These functions offer a high-level API for creating, configuring, and solving QP problems from various sources.
+https://doi.org/10.1287/ijoc.2024.0983.cd
 
+Below is the BibTex for citing this snapshot of the repository.
+
+```
+@misc{pdhcg,
+  author =        {Y. Huang, W. Zhang, H. Li, H. Liu, D. Ge and Y. Ye},
+  publisher =     {INFORMS Journal on Computing},
+  title =         {A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming},
+  year =          {2025},
+  doi =           {10.1287/ijoc.2024.0983.cd},
+  url =           {https://github.com/INFORMSJoC/2024.0983},
+  note =          {Available for download at https://github.com/INFORMSJoC/2024.0983},
+}  
+```
+# Usage
 ## 1. Problem Creation
 
 You can define a `QuadraticProgrammingProblem` in one of three ways: reading from a file, generating a standard problem type, or constructing it directly from matrices and vectors.
