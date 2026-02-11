@@ -3,7 +3,7 @@
 # PDHCG QP Solver 
 This Repo contains the codebase of the paper "A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming".
 ## Notice
-PDHCG is under active development. Please feel free to report any problem!
+This Repo will **NOT** be further maintained. A newer and stronger version of PDHCG will be released soon!
 ## Cite
 
 To cite the contents of this repository, please cite both the paper and this repo, using their respective DOIs.
