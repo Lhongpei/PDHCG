@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "pdhcg"
-version = "0.1.5"
+version = "0.2.0"
 description = "Python bindings for PDHCG, GPU accelerated first order solver for Quadratic Programming"
 readme = "README.md"
 license = { text = "Apache-2.0" }
