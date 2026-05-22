@@ -277,6 +277,65 @@ __global__ void compute_bb_alpha_safeguard_kernel(const double *d_norm_gtg, cons
     *d_alpha = (*d_norm_gtg * *d_norm_gtg) / *d_tmp;
 }
 
+__global__ void compute_bb_alpha_M_kernel(const double *d_stMs, const double *d_tmp, double *d_alpha)
+{
+    *d_alpha = *d_stMs / *d_tmp;
+}
+
+__global__ void scalar_sqrt_copy_kernel(const double *src, double *dst)
+{
+    *dst = sqrt(*src);
+}
+
+__global__ void
+compute_csr_diag_kernel(const int *row_ptr, const int *col_ind, const double *val, double *diag, int num_rows)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_rows)
+    {
+        double sum = 0.0;
+        int start = row_ptr[i];
+        int end = row_ptr[i + 1];
+        for (int k = start; k < end; ++k)
+        {
+            if (col_ind[k] == i)
+                sum += val[k];
+        }
+        diag[i] = sum;
+    }
+}
+
+__global__ void compute_csr_row_sq_norm_kernel(const int *row_ptr, const double *val, double *out, int num_rows)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_rows)
+    {
+        double sum = 0.0;
+        int start = row_ptr[i];
+        int end = row_ptr[i + 1];
+        for (int k = start; k < end; ++k)
+        {
+            double v = val[k];
+            sum += v * v;
+        }
+        out[i] = sum;
+    }
+}
+
+__global__ void
+refresh_inner_precond_kernel(const double *diag_h_static, double inv_tau, double *m_diag, double *m_inv, int n_vars)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_vars)
+    {
+        double m = diag_h_static[i] + inv_tau;
+        if (m <= 0.0)
+            m = 1.0;
+        m_diag[i] = m;
+        m_inv[i] = 1.0 / m;
+    }
+}
+
 __global__ void primal_gradient_descent_kernel_bb_init(const double *dual_product,
                                                        double *gradient,
                                                        double *direction,
@@ -354,6 +413,53 @@ __global__ void primal_bb_final_kernel(const double *current_primal_solution,
         double cur_sol = pdhg_primal_solution[i];
         double last_sol = current_primal_solution[i];
         reflected_primal_solution[i] = 2.0 * cur_sol - last_sol;
+    }
+}
+
+__global__ void primal_gradient_descent_kernel_bb_init_precond(const double *dual_product,
+                                                               double *gradient,
+                                                               double *direction,
+                                                               const double *current_primal_solution,
+                                                               double *pdhg_primal_solution,
+                                                               const double *objective_vector,
+                                                               const double *objective_product,
+                                                               const double *var_lb,
+                                                               const double *var_ub,
+                                                               const double *m_inv,
+                                                               const double stepsize,
+                                                               const int n_vars)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_vars)
+    {
+        double current_grad = objective_product[i] + objective_vector[i] - dual_product[i];
+        double current_primal_sol = current_primal_solution[i];
+        double next_primal_sol = current_primal_sol - stepsize * m_inv[i] * current_grad;
+        next_primal_sol = fmax(var_lb[i], fmin(next_primal_sol, var_ub[i]));
+        pdhg_primal_solution[i] = next_primal_sol;
+        gradient[i] = current_grad;
+        direction[i] = next_primal_sol - current_primal_sol;
+    }
+}
+
+__global__ void primal_bb_update_direction_kernel_precond(double *pdhg_primal_solution,
+                                                          const double *gradient,
+                                                          double *direction,
+                                                          const double *var_lb,
+                                                          const double *var_ub,
+                                                          const double *m_inv,
+                                                          const double *d_alpha,
+                                                          const int n_vars)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_vars)
+    {
+        double alpha = *d_alpha;
+        double cur_sol = pdhg_primal_solution[i];
+        double next_sol = cur_sol - alpha * m_inv[i] * gradient[i];
+        next_sol = fmax(var_lb[i], fmin(next_sol, var_ub[i]));
+        direction[i] = next_sol - cur_sol;
+        pdhg_primal_solution[i] = next_sol;
     }
 }
 

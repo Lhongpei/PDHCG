@@ -70,6 +70,13 @@ typedef struct
     double *gradient;
     double *direction;
     double *scalar_buffer;
+    bool precond_enabled;
+    double *diag_h_static;
+    double *m_diag;
+    double *m_inv;
+    double *Ms_buffer;
+    double cached_inv_tau;
+    double tol_scale;
 } bb_step_size_t;
 
 typedef struct

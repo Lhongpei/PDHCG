@@ -433,8 +433,16 @@ pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_p
             row_perm = (int *)malloc(working_problem->num_constraints * sizeof(int));
             col_perm = (int *)malloc(working_problem->num_variables * sizeof(int));
 
-            generate_random_permutation(working_problem->num_constraints, row_perm);
-            generate_random_permutation(working_problem->num_variables, col_perm);
+            if (params->permute_method == FULL_RANDOM_PERMUTATION)
+            {
+                generate_random_permutation(working_problem->num_variables, col_perm);
+                generate_random_permutation(working_problem->num_constraints, row_perm);
+            }
+            else if (params->permute_method == BLOCK_RANDOM_PERMUTATION)
+            {
+                generate_block_permutation(working_problem->num_variables, params->permute_block_size, col_perm);
+                generate_block_permutation(working_problem->num_constraints, params->permute_block_size, row_perm);
+            }
 
             permuted_problem = permute_problem_return_new(working_problem, row_perm, col_perm);
             working_problem = permuted_problem;
