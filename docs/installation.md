@@ -51,6 +51,9 @@ When enabled, the solver binary automatically detects whether it is launched wit
 
 ## Python Package
 
+!!! note "Multi-GPU support"
+    The Python interface currently supports single-GPU solving only. For multi-GPU distributed solving, build the C++ executable with `-DPDHCG_COMPILE_DISTRIBUTED=ON` and launch it via `mpirun`.
+
 ### From PyPI (Recommended)
 
 ```bash

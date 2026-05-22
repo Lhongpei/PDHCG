@@ -40,6 +40,7 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 | `InnerIterLimit` | int | 1000 | Max iterations for inner CG solver |
 | `InnerInitTol` | float | 1e-3 | Initial tolerance for inner solver |
 | `InnerMinTol` | float | 1e-9 | Minimum tolerance for inner solver |
+| `DiagJacobiPrecond` | bool | True | Use the Jacobi diagonal preconditioner in the inner subproblem. Set to `False` to disable. |
 
 ### Singular Value Estimation
 

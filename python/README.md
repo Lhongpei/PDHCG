@@ -23,6 +23,9 @@ It provides a high-level, Pythonic API for constructing, modifying, and solving 
     - **CUDA 13+**: Uses cuSPARSE **SpMVOp** for improved performance.
     - **CUDA 12.x**: Falls back to the standard **SpMV** API. No manual intervention is required.
 
+!!! note "Multi-GPU support"
+    The Python interface currently supports single-GPU solving only. For multi-GPU distributed solving, build the C++ executable with `-DPDHCG_COMPILE_DISTRIBUTED=ON` and launch it via `mpirun` (see the [main README](../README.md)).
+
 ### Install
 Install from PyPI:
 
@@ -189,6 +192,7 @@ Below is a list of commonly used parameters, their internal keys, and descriptio
 | `InnerIterLimit` | `inner_iter_limit` | int | `1000` | Maximum number of iterations for the inner solver. |
 | `InnerInitTol` | `inner_init_tol` | float | `1e-3` | Initial tolerance for the inner solver. |
 | `InnerMinTol` | `inner_min_tol` | float | `1e-9` | Minimum tolerance for the inner solver. |
+| `DiagJacobiPrecond` | `diag_jacobi_precond` | bool | `True` | Whether to use the Jacobi diagonal preconditioner in the inner subproblem. Set to `False` to disable. |
 
 They can be set in multiple ways:
 
