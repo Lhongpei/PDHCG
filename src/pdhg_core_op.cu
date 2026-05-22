@@ -216,23 +216,65 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
     int inner_solver_iter = 1;
     double initial_alpha = 1.0 / inv_step_size;
 
-    double *d_norm_gtg = state->inner_solver->bb_step_size->scalar_buffer;
-    double *d_tmp = state->inner_solver->bb_step_size->scalar_buffer + 1;
-    double *d_alpha = state->inner_solver->bb_step_size->scalar_buffer + 2;
+    bb_step_size_t *bb = state->inner_solver->bb_step_size;
+    bool precond = bb->precond_enabled;
+
+    double *d_norm_gtg = bb->scalar_buffer;
+    double *d_tmp = bb->scalar_buffer + 1;
+    double *d_alpha = bb->scalar_buffer + 2;
+    double *d_stMs = bb->scalar_buffer + 3;
+
+    if (precond && bb->cached_inv_tau != inv_step_size)
+    {
+        refresh_inner_precond_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+            bb->diag_h_static, inv_step_size, bb->m_diag, bb->m_inv, state->num_variables);
+        bb->cached_inv_tau = inv_step_size;
+
+        double sum_m = 0.0;
+        CUBLAS_CHECK(cublasDasum(state->blas_handle, state->num_variables, bb->m_diag, 1, &sum_m));
+        pdhcg_all_reduce_scalar(state->grid_context, &sum_m, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
+        int n_global = get_global_n(state);
+        if (n_global > 0)
+            bb->tol_scale = sqrt(sum_m / (double)n_global);
+        else
+            bb->tol_scale = 1.0;
+    }
+
+    if (precond)
+        initial_alpha *= bb->tol_scale * bb->tol_scale;
 
     update_obj_product(state, state->current_primal_solution);
-    primal_gradient_descent_kernel_bb_init<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-        state->dual_product,
-        state->inner_solver->bb_step_size->gradient,
-        state->inner_solver->bb_step_size->direction,
-        state->current_primal_solution,
-        state->pdhg_primal_solution,
-        state->objective_vector,
-        state->quadratic_objective_term->primal_obj_product,
-        state->variable_lower_bound,
-        state->variable_upper_bound,
-        initial_alpha,
-        state->num_variables);
+    if (precond)
+    {
+        primal_gradient_descent_kernel_bb_init_precond<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+            state->dual_product,
+            bb->gradient,
+            bb->direction,
+            state->current_primal_solution,
+            state->pdhg_primal_solution,
+            state->objective_vector,
+            state->quadratic_objective_term->primal_obj_product,
+            state->variable_lower_bound,
+            state->variable_upper_bound,
+            bb->m_inv,
+            initial_alpha,
+            state->num_variables);
+    }
+    else
+    {
+        primal_gradient_descent_kernel_bb_init<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+            state->dual_product,
+            bb->gradient,
+            bb->direction,
+            state->current_primal_solution,
+            state->pdhg_primal_solution,
+            state->objective_vector,
+            state->quadratic_objective_term->primal_obj_product,
+            state->variable_lower_bound,
+            state->variable_upper_bound,
+            initial_alpha,
+            state->num_variables);
+    }
 
     cublasSetPointerMode(state->blas_handle, CUBLAS_POINTER_MODE_DEVICE);
 
@@ -241,17 +283,22 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
 
     while (inner_solver_iter < state->inner_solver->iteration_limit)
     {
-        CUBLAS_CHECK(cublasDdot(state->blas_handle,
-                                state->num_variables,
-                                state->inner_solver->bb_step_size->direction,
-                                1,
-                                state->inner_solver->bb_step_size->direction,
-                                1,
-                                d_norm_gtg));
-
-        pdhcg_all_reduce_scalar(state->grid_context, d_norm_gtg, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, true);
-
-        sqrt_scalar_kernel<<<1, 1>>>(d_norm_gtg);
+        if (precond)
+        {
+            element_wise_mul_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                bb->m_diag, bb->direction, bb->Ms_buffer, state->num_variables);
+            CUBLAS_CHECK(
+                cublasDdot(state->blas_handle, state->num_variables, bb->direction, 1, bb->Ms_buffer, 1, d_stMs));
+            pdhcg_all_reduce_scalar(state->grid_context, d_stMs, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, true);
+            scalar_sqrt_copy_kernel<<<1, 1>>>(d_stMs, d_norm_gtg);
+        }
+        else
+        {
+            CUBLAS_CHECK(
+                cublasDdot(state->blas_handle, state->num_variables, bb->direction, 1, bb->direction, 1, d_norm_gtg));
+            pdhcg_all_reduce_scalar(state->grid_context, d_norm_gtg, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, true);
+            sqrt_scalar_kernel<<<1, 1>>>(d_norm_gtg);
+        }
 
         if (inner_solver_iter == 1 || inner_solver_iter % check_frequency == 0)
         {
@@ -267,31 +314,43 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
             state->objective_vector,
             state->dual_product,
             state->quadratic_objective_term->primal_obj_product,
-            state->inner_solver->bb_step_size->gradient,
+            bb->gradient,
             state->inner_solver->primal_buffer,
             inv_step_size,
             state->num_variables);
 
-        CUBLAS_CHECK(cublasDdot(state->blas_handle,
-                                state->num_variables,
-                                state->inner_solver->bb_step_size->direction,
-                                1,
-                                state->inner_solver->primal_buffer,
-                                1,
-                                d_tmp));
+        CUBLAS_CHECK(cublasDdot(
+            state->blas_handle, state->num_variables, bb->direction, 1, state->inner_solver->primal_buffer, 1, d_tmp));
 
         pdhcg_all_reduce_scalar(state->grid_context, d_tmp, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, true);
 
-        compute_bb_alpha_safeguard_kernel<<<1, 1>>>(d_norm_gtg, d_tmp, d_alpha);
+        if (precond)
+        {
+            compute_bb_alpha_M_kernel<<<1, 1>>>(d_stMs, d_tmp, d_alpha);
 
-        primal_bb_update_direction_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-            state->pdhg_primal_solution,
-            state->inner_solver->bb_step_size->gradient,
-            state->inner_solver->bb_step_size->direction,
-            state->variable_lower_bound,
-            state->variable_upper_bound,
-            d_alpha,
-            state->num_variables);
+            primal_bb_update_direction_kernel_precond<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                state->pdhg_primal_solution,
+                bb->gradient,
+                bb->direction,
+                state->variable_lower_bound,
+                state->variable_upper_bound,
+                bb->m_inv,
+                d_alpha,
+                state->num_variables);
+        }
+        else
+        {
+            compute_bb_alpha_safeguard_kernel<<<1, 1>>>(d_norm_gtg, d_tmp, d_alpha);
+
+            primal_bb_update_direction_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                state->pdhg_primal_solution,
+                bb->gradient,
+                bb->direction,
+                state->variable_lower_bound,
+                state->variable_upper_bound,
+                d_alpha,
+                state->num_variables);
+        }
         inner_solver_iter++;
     }
 

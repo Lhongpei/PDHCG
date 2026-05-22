@@ -235,6 +235,7 @@ typedef struct {
   norm_type_t optimality_norm;
   inner_solver_parameters_t inner_solver_parameters;
   bool presolve;
+  bool diag_jacobi_precond;
   partition_method_t partition_method;
   permute_method_t permute_method;
   grid_size_t grid_size;

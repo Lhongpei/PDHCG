@@ -170,6 +170,18 @@ extern "C"
 
     __global__ void compute_bb_alpha_safeguard_kernel(const double *d_norm_gtg, const double *d_tmp, double *d_alpha);
 
+    __global__ void compute_bb_alpha_M_kernel(const double *d_stMs, const double *d_tmp, double *d_alpha);
+
+    __global__ void scalar_sqrt_copy_kernel(const double *src, double *dst);
+
+    __global__ void
+    compute_csr_diag_kernel(const int *row_ptr, const int *col_ind, const double *val, double *diag, int num_rows);
+
+    __global__ void compute_csr_row_sq_norm_kernel(const int *row_ptr, const double *val, double *out, int num_rows);
+
+    __global__ void refresh_inner_precond_kernel(
+        const double *diag_h_static, double inv_tau, double *m_diag, double *m_inv, int n_vars);
+
     __global__ void primal_gradient_descent_kernel_bb_init(const double *dual_product,
                                                            double *gradient,
                                                            double *direction,
@@ -199,6 +211,28 @@ extern "C"
                                                       const double *var_ub,
                                                       const double *d_alpha,
                                                       const int n_vars);
+
+    __global__ void primal_gradient_descent_kernel_bb_init_precond(const double *dual_product,
+                                                                   double *gradient,
+                                                                   double *direction,
+                                                                   const double *current_primal_solution,
+                                                                   double *pdhg_primal_solution,
+                                                                   const double *objective_vector,
+                                                                   const double *objective_product,
+                                                                   const double *var_lb,
+                                                                   const double *var_ub,
+                                                                   const double *m_inv,
+                                                                   const double stepsize,
+                                                                   const int n_vars);
+
+    __global__ void primal_bb_update_direction_kernel_precond(double *pdhg_primal_solution,
+                                                              const double *gradient,
+                                                              double *direction,
+                                                              const double *var_lb,
+                                                              const double *var_ub,
+                                                              const double *m_inv,
+                                                              const double *d_alpha,
+                                                              const int n_vars);
 
     __global__ void primal_bb_final_kernel(const double *current_primal_solution,
                                            const double *pdhg_primal_solution,

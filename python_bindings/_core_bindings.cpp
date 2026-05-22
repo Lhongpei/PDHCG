@@ -296,6 +296,7 @@ static py::dict get_default_params_py()
     d["inner_iter_limit"] = p.inner_solver_parameters.iteration_limit;
     d["inner_init_tol"] = p.inner_solver_parameters.initial_tolerance;
     d["inner_min_tol"] = p.inner_solver_parameters.min_tolerance;
+    d["diag_jacobi_precond"] = p.diag_jacobi_precond;
 
     return d;
 }
@@ -381,6 +382,7 @@ static void parse_params_from_python(py::object params_obj, pdhg_parameters_t *p
     geti("inner_iter_limit", p->inner_solver_parameters.iteration_limit);
     getf("inner_init_tol", p->inner_solver_parameters.initial_tolerance);
     getf("inner_min_tol", p->inner_solver_parameters.min_tolerance);
+    getb("diag_jacobi_precond", p->diag_jacobi_precond);
 
     // presolve
     getb("presolve", p->presolve);

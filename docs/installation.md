@@ -10,7 +10,7 @@
 !!! note "CUDA Version and SpMVOp"
     PDHCG automatically detects your CUDA version at compile time:
 
-    - **CUDA 13+**: Uses cuSPARSE **SpMVOp** (fused SpMV + elementwise operations) for improved performance.
+    - **CUDA 13+**: Uses cuSPARSE **SpMVOp** for improved performance.
     - **CUDA 12.x**: Falls back to the standard **SpMV** API. No manual intervention is required.
 
 ## C++ Executable
@@ -50,6 +50,9 @@ cmake --build build --clean-first
 When enabled, the solver binary automatically detects whether it is launched with multiple MPI ranks and switches to the distributed solver.
 
 ## Python Package
+
+!!! note "Multi-GPU support"
+    The Python interface currently supports single-GPU solving only. For multi-GPU distributed solving, build the C++ executable with `-DPDHCG_COMPILE_DISTRIBUTED=ON` and launch it via `mpirun`.
 
 ### From PyPI (Recommended)
 

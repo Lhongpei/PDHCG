@@ -28,7 +28,7 @@ Where:
 - **GPU Acceleration**: Fully leverages NVIDIA CUDA for extreme-scale QP problems
 - **Flexible Problem Structure**: Supports sparse quadratic terms, low-rank quadratic terms, or both
 - **High Performance**: Competitive with commercial solvers on large-scale problems
-- **SpMVOp Auto-Detection**: Automatically uses cuSPARSE SpMVOp (fused SpMV+elementwise operations) on CUDA 13+ while falling back to standard SpMV on CUDA 12.x
+- **SpMVOp Auto-Detection**: Automatically uses cuSPARSE SpMVOp on CUDA 13+ while falling back to standard SpMV on CUDA 12.x
 - **Multi-GPU Distributed Solving**: Supports parallel solving across multiple GPUs via MPI and NCCL (optional, enabled at compile time)
 
 ## Quick Links

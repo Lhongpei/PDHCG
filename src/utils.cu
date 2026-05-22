@@ -338,8 +338,10 @@ void set_default_parameters(pdhg_parameters_t *params)
     params->inner_solver_parameters.min_tolerance = 1e-9;
 
     params->grid_size.decided = false;
-    params->partition_method = UNIFORM_PARTITION;
+    params->partition_method = NNZ_BALANCE_PARTITION;
     params->permute_method = BLOCK_RANDOM_PERMUTATION;
+
+    params->diag_jacobi_precond = true;
 }
 
 #define PRINT_DIFF_INT(name, current, default_val)                                                                     \

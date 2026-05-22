@@ -122,7 +122,8 @@ pdhcg_presolve_info_t *pdhcg_presolve(const qp_problem_t *original_prob, const p
         return NULL;
 
     info->settings = default_settings();
-    ((Settings *)info->settings)->verbose = false;
+    ((Settings *)info->settings)->verbose = true;
+    ((Settings *)info->settings)->dual_fix = false;
 
     bool has_q = (original_prob->objective_sparse_matrix != NULL);
     bool has_r = (original_prob->objective_lowrank_matrix != NULL);
@@ -165,24 +166,29 @@ pdhcg_presolve_info_t *pdhcg_presolve(const qp_problem_t *original_prob, const p
     }
     else if (has_q)
     {
-        size_t Pnnz = (size_t)original_prob->objective_sparse_matrix_num_nonzeros;
+        size_t Qnnz = (size_t)original_prob->objective_sparse_matrix_num_nonzeros;
         presolver =
-            new_qp_presolver(original_prob->constraint_matrix ? original_prob->constraint_matrix->val : NULL,
-                             original_prob->constraint_matrix ? original_prob->constraint_matrix->col_ind : NULL,
-                             original_prob->constraint_matrix ? original_prob->constraint_matrix->row_ptr : NULL,
-                             m,
-                             n,
-                             nnz,
-                             original_prob->constraint_lower_bound,
-                             original_prob->constraint_upper_bound,
-                             original_prob->variable_lower_bound,
-                             original_prob->variable_upper_bound,
-                             original_prob->objective_vector,
-                             original_prob->objective_sparse_matrix->val,
-                             original_prob->objective_sparse_matrix->col_ind,
-                             original_prob->objective_sparse_matrix->row_ptr,
-                             Pnnz,
-                             info->settings);
+            new_qp_presolver_qr(original_prob->constraint_matrix ? original_prob->constraint_matrix->val : NULL,
+                                original_prob->constraint_matrix ? original_prob->constraint_matrix->col_ind : NULL,
+                                original_prob->constraint_matrix ? original_prob->constraint_matrix->row_ptr : NULL,
+                                m,
+                                n,
+                                nnz,
+                                original_prob->constraint_lower_bound,
+                                original_prob->constraint_upper_bound,
+                                original_prob->variable_lower_bound,
+                                original_prob->variable_upper_bound,
+                                original_prob->objective_vector,
+                                original_prob->objective_sparse_matrix->val,
+                                original_prob->objective_sparse_matrix->col_ind,
+                                original_prob->objective_sparse_matrix->row_ptr,
+                                Qnnz,
+                                NULL, // no low-rank component
+                                NULL,
+                                NULL,
+                                0,
+                                0,
+                                info->settings);
     }
     else
     {

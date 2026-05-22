@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "internal_types.h"
 #include "pdhcg.h"
+#include "pdhcg_kernels.cuh"
 #include "pdhg_core_op.h"
 #include "preconditioner.h"
 #include "solver.h"
@@ -317,14 +318,49 @@ static void initialize_inner_solver(pdhg_solver_state_t *state, const pdhg_param
         case PDHCG_LOW_RANK_Q:
         case PDHCG_LOW_RANK_PLUS_SPARSE_Q:
             state->inner_solver->has_inner_loop = true;
-            state->inner_solver->bb_step_size = (bb_step_size_t *)safe_malloc(sizeof(bb_step_size_t));
+            state->inner_solver->bb_step_size = (bb_step_size_t *)safe_calloc(1, sizeof(bb_step_size_t));
             ALLOC_ZERO(state->inner_solver->bb_step_size->gradient, state->num_variables * sizeof(double));
             ALLOC_ZERO(state->inner_solver->bb_step_size->direction, state->num_variables * sizeof(double));
-            ALLOC_ZERO(state->inner_solver->bb_step_size->scalar_buffer, 3 * sizeof(double))
+            ALLOC_ZERO(state->inner_solver->bb_step_size->scalar_buffer, 4 * sizeof(double));
 
             state->inner_solver->iteration_limit = iteration_limit;
             state->inner_solver->tol = initial_tol;
             state->inner_solver->min_tol = min_tol;
+
+            state->inner_solver->bb_step_size->precond_enabled = params->diag_jacobi_precond;
+            if (params->diag_jacobi_precond)
+            {
+                int n = state->num_variables;
+                ALLOC_ZERO(state->inner_solver->bb_step_size->diag_h_static, n * sizeof(double));
+                ALLOC_ZERO(state->inner_solver->bb_step_size->m_diag, n * sizeof(double));
+                ALLOC_ZERO(state->inner_solver->bb_step_size->m_inv, n * sizeof(double));
+                ALLOC_ZERO(state->inner_solver->bb_step_size->Ms_buffer, n * sizeof(double));
+                state->inner_solver->bb_step_size->cached_inv_tau = -1.0;
+                state->inner_solver->bb_step_size->tol_scale = 1.0;
+
+                if (state->quadratic_objective_term->quad_obj_type == PDHCG_SPARSE_Q ||
+                    state->quadratic_objective_term->quad_obj_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+                {
+                    cu_sparse_matrix_csr_t *Q = state->quadratic_objective_term->objective_sparse_matrix;
+                    compute_csr_diag_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                        Q->row_ptr, Q->col_ind, Q->val, state->inner_solver->bb_step_size->diag_h_static, n);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+
+                if (state->quadratic_objective_term->quad_obj_type == PDHCG_LOW_RANK_Q ||
+                    state->quadratic_objective_term->quad_obj_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+                {
+                    cu_sparse_matrix_csr_t *Rt = state->quadratic_objective_term->objective_lowrank_matrix_t;
+                    double *out = state->inner_solver->bb_step_size->Ms_buffer;
+                    compute_csr_row_sq_norm_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                        Rt->row_ptr, Rt->val, out, n);
+                    CUDA_CHECK(cudaGetLastError());
+                    const double one = 1.0;
+                    CUBLAS_CHECK(cublasDaxpy(
+                        state->blas_handle, n, &one, out, 1, state->inner_solver->bb_step_size->diag_h_static, 1));
+                    CUDA_CHECK(cudaMemset(out, 0, n * sizeof(double)));
+                }
+            }
             break;
         default:
             fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
@@ -805,6 +841,34 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
             CUDA_CHECK(cudaFree(state->quadratic_objective_term->global_primal_obj_product));
 
         free(state->quadratic_objective_term);
+    }
+
+    if (state->inner_solver)
+    {
+        if (state->inner_solver->bb_step_size)
+        {
+            bb_step_size_t *bb = state->inner_solver->bb_step_size;
+            if (bb->gradient)
+                CUDA_CHECK(cudaFree(bb->gradient));
+            if (bb->direction)
+                CUDA_CHECK(cudaFree(bb->direction));
+            if (bb->scalar_buffer)
+                CUDA_CHECK(cudaFree(bb->scalar_buffer));
+            if (bb->diag_h_static)
+                CUDA_CHECK(cudaFree(bb->diag_h_static));
+            if (bb->m_diag)
+                CUDA_CHECK(cudaFree(bb->m_diag));
+            if (bb->m_inv)
+                CUDA_CHECK(cudaFree(bb->m_inv));
+            if (bb->Ms_buffer)
+                CUDA_CHECK(cudaFree(bb->Ms_buffer));
+            free(bb);
+        }
+        if (state->inner_solver->primal_buffer)
+            CUDA_CHECK(cudaFree(state->inner_solver->primal_buffer));
+        if (state->inner_solver->dual_buffer)
+            CUDA_CHECK(cudaFree(state->inner_solver->dual_buffer));
+        free(state->inner_solver);
     }
 
     free(state);

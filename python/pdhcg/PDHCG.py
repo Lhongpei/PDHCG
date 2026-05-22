@@ -61,6 +61,7 @@ _PARAM_ALIAS = {
     "InnerIterLimit": "inner_iter_limit",
     "InnerInitTol": "inner_init_tol",
     "InnerMinTol": "inner_min_tol",
+    "DiagJacobiPrecond": "diag_jacobi_precond",
     # presolve
     "Presolve": "presolve",
 }

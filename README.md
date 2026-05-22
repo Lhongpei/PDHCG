@@ -99,6 +99,7 @@ Solver Parameters:
 | --inner_init_tol | double | Initial tolerance for the inner solver. | 1e-3 |
 | --inner_min_tol | double | Minimum tolerance for the inner solver. | 1e-9 |
 | --presolve | int | Enable (1) or disable (0) presolve. | 1 |
+| --no_diag_precond | flag | Disable the Jacobi diagonal preconditioner used in the inner subproblem (enabled by default). | false |
 
 **Distributed Options** (only available when built with `-DPDHCG_COMPILE_DISTRIBUTED=ON`):
 | Option | Type | Description | Default |

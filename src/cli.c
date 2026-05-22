@@ -169,6 +169,9 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --inner_init_tol     Initial tolerance for the inner solver (default: 1e-3).\n");
     fprintf(stderr, "      --inner_min_tol      Minimum tolerance for the inner solver (default: 1e-9).\n");
     fprintf(stderr, "      --presolve <int>     Enable (1) or disable (0) presolve (default: 1).\n");
+    fprintf(
+        stderr,
+        "      --no_diag_precond    Disable Jacobi diagonal preconditioner for inner subproblem (default: enabled).\n");
 
 #ifdef PDHCG_COMPILE_DISTRIBUTED
     fprintf(stderr, "\nDistributed Options (MPI & NCCL):\n");
@@ -206,6 +209,7 @@ int run_pdhcg(int argc, char *argv[])
                                            {"inner_init_tol", required_argument, 0, 1016},
                                            {"inner_min_tol", required_argument, 0, 1017},
                                            {"presolve", required_argument, 0, 1018},
+                                           {"no_diag_precond", no_argument, 0, 1019},
                                            {0, 0, 0, 0}};
 
     int opt;
@@ -284,6 +288,9 @@ int run_pdhcg(int argc, char *argv[])
                 break;
             case 1018:
                 params.presolve = (atoi(optarg) != 0);
+                break;
+            case 1019:
+                params.diag_jacobi_precond = false;
                 break;
             case '?':
                 return 1;
@@ -376,6 +383,7 @@ int run_d_pdhcg(int argc, char *argv[])
                                            {"inner_init_tol", required_argument, 0, 1016},
                                            {"inner_min_tol", required_argument, 0, 1017},
                                            {"presolve", required_argument, 0, 1018},
+                                           {"no_diag_precond", no_argument, 0, 1019},
                                            {"grid_size", required_argument, 0, 2001},
                                            {"partition_method", required_argument, 0, 2002},
                                            {"permute_method", required_argument, 0, 2003},
@@ -461,6 +469,9 @@ int run_d_pdhcg(int argc, char *argv[])
                 break;
             case 1018:
                 params.presolve = (atoi(optarg) != 0);
+                break;
+            case 1019:
+                params.diag_jacobi_precond = false;
                 break;
             case 2001: // --grid_size r,c
             {
