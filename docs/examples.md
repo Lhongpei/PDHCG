@@ -59,6 +59,45 @@ m = Model(
 m.optimize()
 ```
 
+### Low-Rank with a Middle Matrix D
+
+```python
+import numpy as np
+import scipy.sparse as sp
+from pdhcg import Model
+
+# Minimize 0.5 * x^T (Q + R^T D R) x + c^T x
+# D may be diagonal (1-D), dense (2-D), or scipy.sparse;
+# may also be indefinite. Defaults to identity if omitted.
+
+n = 1000
+r = 10  # rank
+Q = None
+R = np.random.randn(r, n)
+c = np.random.randn(n)
+
+# (a) Weighted least-squares-style: D = diag(w)
+D_diag = np.array([0.5, 1.0, 1.5, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+m = Model(
+    objective_matrix=Q,
+    objective_matrix_low_rank=R,
+    objective_matrix_low_rank_middle=D_diag,
+    objective_vector=c,
+)
+m.optimize()
+
+# (b) Dense (possibly indefinite) D, e.g., from a quasi-Newton compact form
+M = np.random.randn(r, r)
+D_dense = 0.5 * (M + M.T)  # symmetric, no PSD requirement
+m = Model(
+    objective_matrix=Q,
+    objective_matrix_low_rank=R,
+    objective_matrix_low_rank_middle=D_dense,
+    objective_vector=c,
+)
+m.optimize()
+```
+
 ### Warm Starting
 
 ```python

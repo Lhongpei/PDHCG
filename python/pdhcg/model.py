@@ -87,10 +87,13 @@ class Model:
     The quadratic programming problem is defined as:
 
     ```
-    minimize      1/2 x^T (Q + R^T R) x + c^T x
+    minimize      1/2 x^T (Q + R^T D R) x + c^T x
     subject to    l_c <= A x <= u_c
                   l_v <= x <= u_v
     ```
+
+    where D is an optional rank-by-rank middle matrix; if omitted, D defaults to
+    the identity, recovering the standard Q + R^T R formulation.
 
     Solver Parameters:
         Parameters can be set via the `Params` attribute or `setParam()` method.
@@ -115,6 +118,7 @@ class Model:
         constraint_upper_bound: Optional[ArrayLike] = None,
         objective_matrix: Optional[Union[np.ndarray, sp.spmatrix]] = None,
         objective_matrix_low_rank: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+        objective_matrix_low_rank_middle: Optional[ArrayLike] = None,
         variable_lower_bound: Optional[ArrayLike] = None,
         variable_upper_bound: Optional[ArrayLike] = None,
         objective_constant: float = 0.0,
@@ -129,6 +133,9 @@ class Model:
             constraint_upper_bound: Upper bounds for the linear constraints.
             objective_matrix: Quadratic coefficients of the objective function (Q).
             objective_matrix_low_rank: Low-rank quadratic coefficients of the objective (R).
+            objective_matrix_low_rank_middle: Optional middle matrix D in Q + R^T D R.
+                Accepts a 1-D array of length `rank` (treated as diag(D)) or a
+                2-D `rank` x `rank` symmetric array. Defaults to identity.
             variable_lower_bound: Lower bounds for the decision variables.
             variable_upper_bound: Upper bounds for the decision variables.
             objective_constant: Constant term in the objective function.
@@ -197,6 +204,7 @@ class Model:
         self.setObjectiveConstant(objective_constant)
         self.setObjectiveMatrix(objective_matrix)
         self.setObjectiveMatrixLowRank(objective_matrix_low_rank)
+        self.setObjectiveMatrixLowRankMiddle(objective_matrix_low_rank_middle)
         self.setConstraintMatrix(constraint_matrix)
         self.setConstraintLowerBound(constraint_lower_bound)
         self.setConstraintUpperBound(constraint_upper_bound)
@@ -298,6 +306,56 @@ class Model:
         else:
             self.R = _as_dense_f64_c(R_like)
 
+        self._clear_solution_cache()
+
+    def setObjectiveMatrixLowRankMiddle(
+        self, D_like: Optional[Union[np.ndarray, sp.spmatrix, ArrayLike]]
+    ) -> None:
+        """
+        Overwrite the middle matrix D in Q + R^T D R.
+
+        Accepts any of:
+          - None -> D = I (identity, original behavior).
+          - 1-D array of length `rank` -> diagonal D.
+          - 2-D `rank` x `rank` numpy array -> dense (symmetric) D.
+          - scipy.sparse `rank` x `rank` matrix -> sparse D.
+
+        The backend's `preprocess_qp_problem` inspects the nonzero pattern and
+        picks either a diagonal or a dense runtime representation.
+        """
+        if D_like is None:
+            self.D = None
+            self._clear_solution_cache()
+            return
+        if getattr(self, "R", None) is None:
+            raise ValueError(
+                "setObjectiveMatrixLowRankMiddle: D is only meaningful when R is set; "
+                "call setObjectiveMatrixLowRank first."
+            )
+        rank = int(self.R.shape[0])
+        if sp.issparse(D_like):
+            if D_like.shape != (rank, rank):
+                raise ValueError(
+                    f"setObjectiveMatrixLowRankMiddle: sparse D shape {D_like.shape} must be ({rank}, {rank})"
+                )
+            self.D = _as_csr_f64_i32(D_like)
+        else:
+            d_arr = _as_dense_f64_c(D_like)
+            if d_arr.ndim == 1:
+                if d_arr.size != rank:
+                    raise ValueError(
+                        f"setObjectiveMatrixLowRankMiddle: diag D length {d_arr.size} must equal rank {rank}"
+                    )
+            elif d_arr.ndim == 2:
+                if d_arr.shape != (rank, rank):
+                    raise ValueError(
+                        f"setObjectiveMatrixLowRankMiddle: dense D shape {d_arr.shape} must be ({rank}, {rank})"
+                    )
+            else:
+                raise ValueError(
+                    f"setObjectiveMatrixLowRankMiddle: D must be 1D, 2D, or scipy.sparse; got ndim={d_arr.ndim}"
+                )
+            self.D = d_arr
         self._clear_solution_cache()
 
     def setConstraintMatrix(self, A_like: ArrayLike) -> None:
@@ -518,6 +576,7 @@ class Model:
             params=self._params,
             primal_start=self._primal_start,
             dual_start=self._dual_start,
+            D=getattr(self, "D", None),
         )
         # solutions
         self._x = np.asarray(info.get("X")) if info.get("X") is not None else None

@@ -37,6 +37,39 @@ limitations under the License.
 #include "distributed_types.h"
 #endif
 
+static void apply_lowrank_middle(pdhg_solver_state_t *state)
+{
+    quadratic_objective_term_t *qot = state->quadratic_objective_term;
+    int rank = qot->num_rank_lowrank_obj;
+    if (qot->lowrank_middle_type == 0 || rank <= 0)
+        return;
+
+    if (qot->lowrank_middle_type == 1)
+    {
+        int nb = (rank + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        element_wise_mul_inplace_kernel<<<nb, THREADS_PER_BLOCK>>>(qot->Rx_product, qot->d_middle_diag, rank);
+        return;
+    }
+
+    cublasPointerMode_t prev_mode;
+    CUBLAS_CHECK(cublasGetPointerMode(state->blas_handle, &prev_mode));
+    CUBLAS_CHECK(cublasSetPointerMode(state->blas_handle, CUBLAS_POINTER_MODE_HOST));
+    CUBLAS_CHECK(cublasDsymv(state->blas_handle,
+                             CUBLAS_FILL_MODE_LOWER,
+                             rank,
+                             &HOST_ONE,
+                             qot->d_middle_dense,
+                             rank,
+                             qot->Rx_product,
+                             1,
+                             &HOST_ZERO,
+                             qot->Rx_buffer,
+                             1));
+    CUBLAS_CHECK(cublasSetPointerMode(state->blas_handle, prev_mode));
+    CUDA_CHECK(
+        cudaMemcpyAsync(qot->Rx_product, qot->Rx_buffer, (size_t)rank * sizeof(double), cudaMemcpyDeviceToDevice));
+}
+
 void update_obj_product(pdhg_solver_state_t *state, double *primal_solution)
 {
     switch (state->quadratic_objective_term->quad_obj_type)
@@ -83,6 +116,8 @@ void update_obj_product(pdhg_solver_state_t *state, double *primal_solution)
                                    PDHCG_SCOPE_ROW,
                                    0);
 
+            apply_lowrank_middle(state);
+
             pdhcg_spmv_execute(state->sparse_handle,
                                state->quadratic_objective_term->spmv_ctx_Rt,
                                &HOST_ONE,
@@ -119,6 +154,8 @@ void update_obj_product(pdhg_solver_state_t *state, double *primal_solution)
                                    PDHCG_OP_SUM,
                                    PDHCG_SCOPE_ROW,
                                    0);
+
+            apply_lowrank_middle(state);
 
             pdhcg_spmv_execute(state->sparse_handle,
                                state->quadratic_objective_term->spmv_ctx_Rt,

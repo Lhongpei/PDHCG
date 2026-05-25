@@ -9,8 +9,9 @@ import numpy as np
 import scipy.sparse as sp
 from pdhcg import Model
 
-# Example: minimize 0.5 * x'(Q + R'R)x + c'x
+# Example: minimize 0.5 * x'(Q + R^T D R)x + c'x
 # subject to l <= A x <= u,  lb <= x <= ub
+# (D defaults to identity, i.e. 0.5 * x'(Q + R^T R)x + c'x.)
 
 # 1. Define Standard QP terms
 Q = sp.csc_matrix([[1.0, -1.0], [-1.0, 2.0]])
@@ -20,16 +21,20 @@ c = np.array([-2.0, -6.0])
 # This adds 0.5 * ||Rx||^2 to the objective
 R = sp.csc_matrix([[1.0, 0.0]])
 
-# 3. Define Constraints
+# 3. (Optional) Middle matrix D for R^T D R; 1-D = diag, 2-D = dense, sparse OK.
+# D = np.array([2.5])
+
+# 4. Define Constraints
 A = sp.csc_matrix([[1.0, 1.0], [-1.0, 2.0], [2.0, 1.0]])
 l = np.array([-np.inf, -np.inf, -np.inf])
 u = np.array([2.0, 2.0, 3.0])
 lb = np.zeros(2)
 ub = np.array([np.inf, np.inf])
 
-# 4. Create QP model with Low-Rank term (R)
+# 5. Create QP model with Low-Rank term (R) and optional middle D
 m = Model(objective_matrix=Q,
           objective_matrix_low_rank=R,
+          # objective_matrix_low_rank_middle=D,
           objective_vector=c,
           constraint_matrix=A,
           constraint_lower_bound=l,
@@ -56,7 +61,7 @@ The `Model` class is the core interface for defining QP problems. The problem fo
 
 $$
 \begin{aligned}
-\min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top R) x + c^\top x \\
+\min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top D R) x + c^\top x \\
 \text{s.t.} \quad & \ell_c \le Ax \le u_c, \\
                   & \ell_v \le x \le u_v.
 \end{aligned}
@@ -69,7 +74,8 @@ $$
 ### Optional Parameters
 
 - `objective_matrix` ($Q$): Sparse quadratic coefficients
-- `objective_matrix_low_rank` ($R$): Low-rank quadratic component (stores $R$, objective gets $R^\top R$)
+- `objective_matrix_low_rank` ($R$): Low-rank quadratic factor of shape $(k, n)$
+- `objective_matrix_low_rank_middle` ($D$, $k\times k$): Middle matrix in $R^\top D R$. 1-D array → diagonal $D$; 2-D array → dense symmetric $D$; scipy sparse → sparse $D$. May be indefinite. Defaults to identity
 - `constraint_matrix` ($A$): Linear constraint matrix
 - `constraint_lower_bound` ($\ell_c$): Constraint lower bounds
 - `constraint_upper_bound` ($u_c$): Constraint upper bounds

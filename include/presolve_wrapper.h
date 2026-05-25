@@ -80,7 +80,9 @@ extern "C"
                                            const int *Pp,
                                            size_t Pnnz);
 
-    /* Presolve QP in QR format: P = Q + RR^T */
+    /* Presolve QP in QR format: P = Q + R^T R.
+     * Note: PSQP does not support the optional middle matrix D from
+     * Q + R^T D R; the solver auto-disables presolve when D != I. */
     PDHCG_PresolvedData *pdhcg_presolve_qr(const double *Ax,
                                            const int *Ai,
                                            const int *Ap,

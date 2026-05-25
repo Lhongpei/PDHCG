@@ -62,6 +62,12 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
     new_prob->objective_lowrank_matrix = deepcopy_csr_component(
         prob->objective_lowrank_matrix, prob->num_rank_lowrank_obj, prob->objective_lowrank_matrix_num_nonzeros);
 
+    new_prob->objective_lowrank_middle_matrix =
+        deepcopy_csr_component(prob->objective_lowrank_middle_matrix,
+                               prob->num_rank_lowrank_obj,
+                               prob->objective_lowrank_middle_matrix_num_nonzeros);
+    new_prob->objective_lowrank_middle_matrix_num_nonzeros = prob->objective_lowrank_middle_matrix_num_nonzeros;
+
     if (prob->primal_start)
     {
         new_prob->primal_start = safe_malloc(var_bytes);
@@ -394,6 +400,57 @@ processed_qp_problem_t *preprocess_qp_problem(const qp_problem_t *raw_problem)
     processed->objective_sparse_matrix = raw_problem->objective_sparse_matrix;
     processed->objective_lowrank_matrix = raw_problem->objective_lowrank_matrix;
 
+    processed->objective_lowrank_middle_kind = PDHCG_D_NONE;
+    processed->objective_lowrank_middle_diag = NULL;
+    processed->objective_lowrank_middle_dense = NULL;
+    {
+        CsrComponent *D_csr = raw_problem->objective_lowrank_middle_matrix;
+        int D_nnz = raw_problem->objective_lowrank_middle_matrix_num_nonzeros;
+        int k = raw_problem->num_rank_lowrank_obj;
+        if (D_csr && D_csr->row_ptr && D_nnz > 0 && k > 0)
+        {
+            bool diag_only = true;
+            for (int r = 0; r < k && diag_only; ++r)
+            {
+                for (int j = D_csr->row_ptr[r]; j < D_csr->row_ptr[r + 1]; ++j)
+                {
+                    if (D_csr->col_ind[j] != r)
+                    {
+                        diag_only = false;
+                        break;
+                    }
+                }
+            }
+
+            if (diag_only)
+            {
+                processed->objective_lowrank_middle_kind = PDHCG_D_DIAG;
+                processed->objective_lowrank_middle_diag = (double *)safe_calloc(k, sizeof(double));
+                for (int r = 0; r < k; ++r)
+                {
+                    for (int j = D_csr->row_ptr[r]; j < D_csr->row_ptr[r + 1]; ++j)
+                    {
+                        processed->objective_lowrank_middle_diag[r] = D_csr->val[j];
+                    }
+                }
+            }
+            else
+            {
+                processed->objective_lowrank_middle_kind = PDHCG_D_DENSE;
+                size_t rank2 = (size_t)k * (size_t)k;
+                processed->objective_lowrank_middle_dense = (double *)safe_calloc(rank2, sizeof(double));
+                for (int r = 0; r < k; ++r)
+                {
+                    for (int j = D_csr->row_ptr[r]; j < D_csr->row_ptr[r + 1]; ++j)
+                    {
+                        int c = D_csr->col_ind[j];
+                        processed->objective_lowrank_middle_dense[(size_t)r * (size_t)k + (size_t)c] = D_csr->val[j];
+                    }
+                }
+            }
+        }
+    }
+
     if ((!raw_problem->objective_sparse_matrix || raw_problem->objective_sparse_matrix_num_nonzeros == 0) &&
         (!raw_problem->objective_lowrank_matrix || raw_problem->objective_lowrank_matrix_num_nonzeros == 0))
     {
@@ -443,6 +500,11 @@ void free_processed_qp_problem(processed_qp_problem_t *processed)
         free(processed->diagonal_quad_objective);
         processed->diagonal_quad_objective = NULL;
     }
+
+    free(processed->objective_lowrank_middle_diag);
+    processed->objective_lowrank_middle_diag = NULL;
+    free(processed->objective_lowrank_middle_dense);
+    processed->objective_lowrank_middle_dense = NULL;
 
     free(processed);
 }

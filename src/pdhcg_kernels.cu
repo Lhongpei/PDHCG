@@ -322,6 +322,61 @@ __global__ void compute_csr_row_sq_norm_kernel(const int *row_ptr, const double 
     }
 }
 
+__global__ void element_wise_mul_inplace_kernel(double *__restrict__ x, const double *__restrict__ d, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        x[i] *= d[i];
+    }
+}
+
+__global__ void compute_csr_row_sq_norm_weighted_kernel(
+    const int *row_ptr, const int *col_ind, const double *val, const double *weights, double *out, int num_rows)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_rows)
+    {
+        double sum = 0.0;
+        int start = row_ptr[i];
+        int end = row_ptr[i + 1];
+        for (int k = start; k < end; ++k)
+        {
+            double v = val[k];
+            sum += weights[col_ind[k]] * v * v;
+        }
+        out[i] = sum;
+    }
+}
+
+__global__ void compute_csr_row_quad_form_dense_kernel(const int *row_ptr,
+                                                       const int *col_ind,
+                                                       const double *val,
+                                                       const double *D_dense,
+                                                       int rank,
+                                                       double *out,
+                                                       int num_rows)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_rows)
+    {
+        int start = row_ptr[i];
+        int end = row_ptr[i + 1];
+        double sum = 0.0;
+        for (int ka = start; ka < end; ++ka)
+        {
+            int ra = col_ind[ka];
+            double va = val[ka];
+            const double *Drow = D_dense + (size_t)ra * (size_t)rank;
+            for (int kb = start; kb < end; ++kb)
+            {
+                sum += va * val[kb] * Drow[col_ind[kb]];
+            }
+        }
+        out[i] = sum;
+    }
+}
+
 __global__ void
 refresh_inner_precond_kernel(const double *diag_h_static, double inv_tau, double *m_diag, double *m_inv, int n_vars)
 {

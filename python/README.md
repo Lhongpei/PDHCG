@@ -60,8 +60,9 @@ import numpy as np
 import scipy.sparse as sp
 from pdhcg import Model, PDHCG
 
-# Example: minimize 0.5 * x'Qx + 0.5 * ||Rx||^2 + c'x
+# Example: minimize 0.5 * x'(Q + R^T D R)x + c'x
 # subject to l <= A x <= u,  lb <= x <= ub
+# (D defaults to identity, recovering 0.5 * x'Qx + 0.5 * ||Rx||^2.)
 
 # 1. Define Standard QP terms
 Q = sp.csc_matrix([[1.0, -1.0], [-1.0, 2.0]])
@@ -72,16 +73,21 @@ c = np.array([-2.0, -6.0])
 # This effectively adds 0.5 * (x1)^2 to the objective
 R = sp.csc_matrix([[1.0, 0.0]])
 
-# 3. Define Constraints
+# 3. (Optional) Middle matrix D. Pass a 1-D numpy array for a diagonal D,
+# a 2-D array for dense D, or a scipy.sparse matrix. Omit to use D = I.
+# D = np.array([2.5])
+
+# 4. Define Constraints
 A = sp.csc_matrix([[1.0, 1.0], [-1.0, 2.0], [2.0, 1.0]])
 l = np.array([-np.inf, -np.inf, -np.inf])
 u = np.array([2.0, 2.0, 3.0])
 lb = np.zeros(2)
 ub = np.array([np.inf, np.inf])
 
-# 4. Create QP model with Low-Rank term
+# 5. Create QP model with Low-Rank term
 m = Model(objective_matrix=Q,
-          objective_matrix_low_rank=R,  # <--- Pass R here
+          objective_matrix_low_rank=R,                # <--- Pass R here
+          # objective_matrix_low_rank_middle=D,      # <--- and optionally D
           objective_vector=c,
           constraint_matrix=A,
           constraint_lower_bound=l,
@@ -112,7 +118,7 @@ print("Dual solution:", m.Pi)
 The `Model` class represents a quadratic programming problem of the form:
 
 $$
-\min \frac{1}{2} x^\top (Q + R^\top R) x + c^\top x + c_0 \quad
+\min \frac{1}{2} x^\top (Q + R^\top D R) x + c^\top x + c_0 \quad
 \text{s.t.} \; \ell \le A x \le u, \quad
 \text{lb} \le x \le \text{ub}.
 $$
@@ -121,6 +127,7 @@ $$
 
 - **objective_matrix** (`Q`, optional): Quadratic part of the objective function. Both dense (`numpy.ndarray`) and sparse (`scipy.sparse.csr_matrix`) inputs are supported.
 - **objective_matrix_low_rank** (`R`, optional): Low-rank factor matrix in the quadratic objective term. Both dense (`numpy.ndarray`) and sparse (`scipy.sparse.csr_matrix`) inputs are supported.
+- **objective_matrix_low_rank_middle** (`D`, optional): Middle matrix in $R^\top D R$, $\text{rank}\times\text{rank}$. Accepts a 1-D numpy array (diagonal $D$), a 2-D numpy array (dense symmetric $D$), or a scipy sparse matrix. May be indefinite — useful for quasi-Newton updates, kernel-based formulations, and weighted least squares. Defaults to identity, recovering $R^\top R$.
 - **objective_vector** (`c`): Linear part of the objective function.
 - **constraint_matrix** (`A`): Coefficient matrix for the constraints. Both dense (`numpy.ndarray`) and sparse (`scipy.sparse.csr_matrix`) inputs are supported.
 - **constraint_lower_bound** (`l`): Lower bounds for each constraint. Use `-np.inf` or `None` for no lower bound.

@@ -7,6 +7,7 @@ qp_problem_t *create_qp_problem(
     const double *objective_c,
     const matrix_desc_t *Q_desc,
     const matrix_desc_t *R_desc,
+    const matrix_desc_t *D_desc,
     const matrix_desc_t *A_desc,
     const double *con_lb, const double *con_ub,
     const double *var_lb, const double *var_ub,
@@ -14,7 +15,8 @@ qp_problem_t *create_qp_problem(
 );
 ```
 
-Creates a QP problem from matrix descriptors.
+Creates a QP problem of the form
+`min 0.5 * x^T (Q + R^T D R) x + c^T x` subject to `con_lb <= A x <= con_ub` and `var_lb <= x <= var_ub`.
 
 **Parameters:**
 
@@ -22,7 +24,8 @@ Creates a QP problem from matrix descriptors.
 |-----------|-------------|
 | `objective_c` | Linear objective coefficients (size n) |
 | `Q_desc` | Sparse quadratic matrix descriptor (can be NULL) |
-| `R_desc` | Low-rank quadratic matrix descriptor (can be NULL) |
+| `R_desc` | Low-rank factor descriptor, shape `k x n` (can be NULL) |
+| `D_desc` | Middle matrix in `R^T D R`, shape `k x k` (can be NULL). |
 | `A_desc` | Constraint matrix descriptor |
 | `con_lb` | Constraint lower bounds (size m) |
 | `con_ub` | Constraint upper bounds (size m) |

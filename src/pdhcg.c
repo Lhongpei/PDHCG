@@ -34,6 +34,7 @@ volatile sig_atomic_t g_pdhcg_cancel_request = 0;
 qp_problem_t *create_qp_problem(const double *objective_c,
                                 const matrix_desc_t *Q_desc,
                                 const matrix_desc_t *R_desc,
+                                const matrix_desc_t *D_desc,
                                 const matrix_desc_t *A_desc,
                                 const double *con_lb,
                                 const double *con_ub,
@@ -313,6 +314,68 @@ qp_problem_t *create_qp_problem(const double *objective_c,
         prob->objective_lowrank_matrix_num_nonzeros = 0;
     }
 
+    prob->objective_lowrank_middle_matrix = NULL;
+    prob->objective_lowrank_middle_matrix_num_nonzeros = 0;
+    if (D_desc)
+    {
+        int k = prob->num_rank_lowrank_obj;
+        if (k <= 0)
+        {
+            fprintf(stderr, "[interface] D matrix ignored: problem has no low-rank component.\n");
+        }
+        else if (D_desc->m != k || D_desc->n != k)
+        {
+            fprintf(stderr, "[interface] D matrix shape (%d, %d) must be (%d, %d).\n", D_desc->m, D_desc->n, k, k);
+            qp_problem_free(prob);
+            return NULL;
+        }
+        else
+        {
+            prob->objective_lowrank_middle_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
+            int *rp = NULL, *ci = NULL;
+            double *vv = NULL;
+            int nnz = 0;
+            int rc = 0;
+            switch (D_desc->fmt)
+            {
+                case matrix_dense:
+                    rc = dense_to_csr(D_desc, &rp, &ci, &vv, &nnz);
+                    break;
+                case matrix_csc:
+                    rc = csc_to_csr(D_desc, &rp, &ci, &vv, &nnz);
+                    break;
+                case matrix_coo:
+                    rc = coo_to_csr(D_desc, &rp, &ci, &vv, &nnz);
+                    break;
+                case matrix_csr:
+                    nnz = D_desc->data.csr.nnz;
+                    rp = (int *)safe_malloc((size_t)(k + 1) * sizeof(int));
+                    ci = (int *)safe_malloc((size_t)nnz * sizeof(int));
+                    vv = (double *)safe_malloc((size_t)nnz * sizeof(double));
+                    memcpy(rp, D_desc->data.csr.row_ptr, (size_t)(k + 1) * sizeof(int));
+                    memcpy(ci, D_desc->data.csr.col_ind, (size_t)nnz * sizeof(int));
+                    memcpy(vv, D_desc->data.csr.vals, (size_t)nnz * sizeof(double));
+                    break;
+                default:
+                    rc = -1;
+                    fprintf(stderr, "[interface] D matrix: unsupported format %d.\n", D_desc->fmt);
+                    break;
+            }
+            if (rc != 0)
+            {
+                free(rp);
+                free(ci);
+                free(vv);
+                qp_problem_free(prob);
+                return NULL;
+            }
+            prob->objective_lowrank_middle_matrix->row_ptr = rp;
+            prob->objective_lowrank_middle_matrix->col_ind = ci;
+            prob->objective_lowrank_middle_matrix->val = vv;
+            prob->objective_lowrank_middle_matrix_num_nonzeros = nnz;
+        }
+    }
+
     // default fill values
     prob->objective_constant = objective_constant ? *objective_constant : 0.0;
     fill_or_copy(&prob->objective_vector, prob->num_variables, objective_c, 0.0);
@@ -358,6 +421,8 @@ void qp_problem_free(qp_problem_t *prob)
     free(prob->constraint_upper_bound);
     free(prob->primal_start);
     free(prob->dual_start);
+    csr_component_free(prob->objective_lowrank_middle_matrix);
+    free(prob->objective_lowrank_middle_matrix);
     memset(prob, 0, sizeof(*prob));
     free(prob);
 }

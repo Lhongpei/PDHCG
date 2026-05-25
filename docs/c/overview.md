@@ -46,9 +46,9 @@ int main() {
     double var_lb[] = {0.0, 0.0};
     double var_ub[] = {1e30, 1e30};
 
-    // Create problem
+    // Create problem (NULL for Q, R, and D -> linear problem)
     qp_problem_t *prob = create_qp_problem(
-        c, NULL, NULL, &A_desc,
+        c, NULL, NULL, NULL, &A_desc,
         con_lb, con_ub, var_lb, var_ub, NULL
     );
 
@@ -95,6 +95,7 @@ qp_problem_t *create_qp_problem(
     const double *objective_c,
     const matrix_desc_t *Q_desc,
     const matrix_desc_t *R_desc,
+    const matrix_desc_t *D_desc,
     const matrix_desc_t *A_desc,
     const double *con_lb, const double *con_ub,
     const double *var_lb, const double *var_ub,
@@ -102,7 +103,9 @@ qp_problem_t *create_qp_problem(
 );
 ```
 
-Creates a QP problem from matrix descriptors. The `Q_desc` (sparse quadratic) and `R_desc` (low-rank quadratic) are optional (pass `NULL` if not needed).
+Creates a QP problem of the form
+`min 0.5 * x^T (Q + R^T D R) x + c^T x  s.t.  con_lb <= A x <= con_ub,  var_lb <= x <= var_ub`
+from matrix descriptors. `Q_desc` (sparse quadratic), `R_desc` (low-rank factor, shape `k x n`), and `D_desc` (rank-by-rank middle matrix in `R^T D R`) are all optional — pass `NULL` to omit any of them. `D_desc` defaults to identity, recovering the standard `Q + R^T R` formulation; it may be diagonal, sparse, dense, or indefinite, and the runtime auto-detects the cheapest representation.
 
 ### Setting Start Values
 

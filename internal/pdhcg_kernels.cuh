@@ -32,6 +32,8 @@ extern "C"
     __global__ void
     element_wise_mul_kernel(const double *__restrict__ A, const double *__restrict__ B, double *__restrict__ C, int n);
 
+    __global__ void element_wise_mul_inplace_kernel(double *__restrict__ x, const double *__restrict__ d, int n);
+
     // ======================================================================
     // Advanced Metrics & Reduced Costs
     // ======================================================================
@@ -178,6 +180,17 @@ extern "C"
     compute_csr_diag_kernel(const int *row_ptr, const int *col_ind, const double *val, double *diag, int num_rows);
 
     __global__ void compute_csr_row_sq_norm_kernel(const int *row_ptr, const double *val, double *out, int num_rows);
+
+    __global__ void compute_csr_row_sq_norm_weighted_kernel(
+        const int *row_ptr, const int *col_ind, const double *val, const double *weights, double *out, int num_rows);
+
+    __global__ void compute_csr_row_quad_form_dense_kernel(const int *row_ptr,
+                                                           const int *col_ind,
+                                                           const double *val,
+                                                           const double *D_dense,
+                                                           int rank,
+                                                           double *out,
+                                                           int num_rows);
 
     __global__ void refresh_inner_precond_kernel(
         const double *diag_h_static, double inv_tau, double *m_diag, double *m_inv, int n_vars);

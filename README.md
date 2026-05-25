@@ -12,15 +12,19 @@ For a detailed explanation of the methodology, please refer to our papers: [A Re
 
 ## Problem Formulation
 
-PDHCG solves convex quadratic programs in the following form, which allows a flexibile input of convex quadratic objective matrix, a sparse component and a low-rank component:
+PDHCG solves convex quadratic programs in the following form, which allows a flexible input of the quadratic objective matrix as a sparse component plus a structured low-rank component:
 
 ```math
 \begin{aligned}
-\min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top R) x + c^\top x \\
+\min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top D R) x + c^\top x \\
 \text{s.t.} \quad & \ell_c \le Ax \le u_c, \\
                   & \ell_v \le x \le u_v.
 \end{aligned}
 ```
+
+- $Q$ is the sparse symmetric quadratic component (optional).
+- $R \in \mathbb{R}^{k\times n}$ is a tall low-rank factor (optional, $k$ = rank).
+- $D \in \mathbb{R}^{k\times k}$ is an optional middle matrix that scales / weights / signs the low-rank term. When omitted it defaults to the identity, recovering the standard $Q + R^\top R$ formulation. $D$ may be **diagonal, sparse, dense, or indefinite** — the backend auto-detects the cheapest runtime representation.
 
 
 ## Installation (C++ Executable)
@@ -139,8 +143,9 @@ import numpy as np
 import scipy.sparse as sp
 from pdhcg import Model
 
-# Example: minimize 0.5 * x'(Q + R'R)x + c'x
+# Example: minimize 0.5 * x'(Q + R^T D R)x + c'x
 # subject to l <= A x <= u,  lb <= x <= ub
+# (D defaults to identity, recovering the classic Q + R^T R form.)
 
 # 1. Define Standard QP terms
 Q = sp.csc_matrix([[1.0, -1.0], [-1.0, 2.0]])
@@ -151,16 +156,22 @@ c = np.array([-2.0, -6.0])
 # This adds 0.5 * (x1)^2 to the objective
 R = sp.csc_matrix([[1.0, 0.0]])
 
-# 3. Define Constraints
+# 3. (Optional) Middle matrix D in 0.5 * x^T R^T D R x. Pass a 1-D array
+# for a diagonal D, a 2-D array for dense D, or a scipy.sparse matrix.
+# Omit entirely (or pass None) to use D = identity.
+# D = np.array([2.5])  # e.g., weight the low-rank term by 2.5
+
+# 4. Define Constraints
 A = sp.csc_matrix([[1.0, 1.0], [-1.0, 2.0], [2.0, 1.0]])
 l = np.array([-np.inf, -np.inf, -np.inf])
 u = np.array([2.0, 2.0, 3.0])
 lb = np.zeros(2)
 ub = np.array([np.inf, np.inf])
 
-# 4. Create QP model with Low-Rank term (R), where Q and R are both optional.
+# 5. Create QP model. Q, R and D are all optional.
 m = Model(objective_matrix=Q,
           objective_matrix_low_rank=R,
+          # objective_matrix_low_rank_middle=D,  # uncomment to use D
           objective_vector=c,
           constraint_matrix=A,
           constraint_lower_bound=l,

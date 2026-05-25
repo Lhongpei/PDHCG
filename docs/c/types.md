@@ -129,6 +129,9 @@ typedef struct {
   CsrComponent *objective_lowrank_matrix;
   int objective_lowrank_matrix_num_nonzeros;
 
+  CsrComponent *objective_lowrank_middle_matrix;
+  int objective_lowrank_middle_matrix_num_nonzeros;
+
   double *constraint_lower_bound;
   double *constraint_upper_bound;
 
