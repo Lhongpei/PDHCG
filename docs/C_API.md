@@ -10,9 +10,10 @@ The C API involves two main functions:
 ```c
 qp_problem_t *create_qp_problem(
     const double *objective_c,           // objective vector (length n)
-    const matrix_desc_t *Q_desc,         // quadratic sparse matrix (n×n)
-    const matrix_desc_t *R_desc,         // quadratic low-rank matrix (n×m)
-    const matrix_desc_t *A_desc,         // constraint matrix (m×n)
+    const matrix_desc_t *Q_desc,         // sparse quadratic matrix (n x n)
+    const matrix_desc_t *R_desc,         // low-rank factor (k x n)
+    const matrix_desc_t *D_desc,         // middle matrix in R^T D R (k x k)
+    const matrix_desc_t *A_desc,         // constraint matrix (m x n)
     const double *con_lb,                // constraint lower bounds (length m)
     const double *con_ub,                // constraint upper bounds (length m)
     const double *var_lb,                // variable lower bounds (length n)
@@ -26,10 +27,13 @@ pdhcg_result_t* solve_qp_problem(
 );
 ```
 
+The objective minimized is `0.5 * x^T (Q + R^T D R) x + c^T x + c0`. `Q`, `R`, and `D` are all optional; `D` defaults to identity, recovering the standard `Q + R^T R` form.
+
 `create_qp_problem` parameters:
 - `objective_c`: Objective vector. If `NULL`, defaults to all zeros.
-- `Q_desc`: Matrix descriptor. Supports `matrix_dense`, `matrix_csr`, `matrix_csc`, `matrix_coo`.
-- `R_desc`: Matrix descriptor. Supports `matrix_dense`, `matrix_csr`, `matrix_csc`, `matrix_coo`.
+- `Q_desc`: Matrix descriptor. Supports `matrix_dense`, `matrix_csr`, `matrix_csc`, `matrix_coo`. Pass `NULL` to omit.
+- `R_desc`: Matrix descriptor for the low-rank factor (shape `k x n`). Same supported formats. Pass `NULL` to omit.
+- `D_desc`: Matrix descriptor for the middle matrix in `R^T D R` (shape `k x k`). Same supported formats. May be diagonal, sparse, dense, or indefinite — the runtime auto-detects the cheapest representation in `preprocess_qp_problem`. Pass `NULL` for `D = I`.
 - `A_desc`: Matrix descriptor. Supports `matrix_dense`, `matrix_csr`, `matrix_csc`, `matrix_coo`.
 - `con_lb`: Constraint lower bounds. If `NULL`, defaults to all `-INFINITY`.
 - `con_ub`: Constraint upper bounds. If `NULL`, defaults to all `+INFINITY`.
@@ -103,11 +107,13 @@ int main() {
     double ub[2] = {INFINITY, INFINITY};
 
     // 6. Build the QP problem
-    // Note: We pass NULL for R_desc (low-rank factor) and objective_constant
+    // Note: We pass NULL for R_desc (low-rank factor), D_desc (middle matrix),
+    // and objective_constant.
     qp_problem_t* prob = create_qp_problem(
         c,          // objective_c
         &Q_desc,    // Q_desc
         NULL,       // R_desc
+        NULL,       // D_desc (NULL -> D = I)
         &A_desc,    // A_desc
         l,          // con_lb
         u,          // con_ub

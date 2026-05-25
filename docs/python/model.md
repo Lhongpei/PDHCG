@@ -13,6 +13,7 @@
         - setObjectiveConstant
         - setObjectiveMatrix
         - setObjectiveMatrixLowRank
+        - setObjectiveMatrixLowRankMiddle
         - setConstraintMatrix
         - setConstraintLowerBound
         - setConstraintUpperBound

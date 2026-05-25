@@ -4,11 +4,11 @@ PDHCG-II is a high-performance, GPU-accelerated implementation of the Primal-Dua
 
 ## Problem Formulation
 
-PDHCG solves convex quadratic programs in the following form:
+PDHCG solves quadratic programs in the following form:
 
 $$
 \begin{aligned}
-\min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top R) x + c^\top x \\
+\min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top D R) x + c^\top x \\
 \text{s.t.} \quad & \ell_c \le Ax \le u_c, \\
                   & \ell_v \le x \le u_v.
 \end{aligned}
@@ -16,8 +16,9 @@ $$
 
 Where:
 
-- $Q$ is a sparse positive semi-definite matrix (optional)
-- $R$ is a low-rank matrix such that $R^\top R$ represents a low-rank component (optional)
+- $Q$ is a sparse symmetric matrix (optional)
+- $R \in \mathbb{R}^{k\times n}$ is a low-rank factor of rank $k$ (optional)
+- $D \in \mathbb{R}^{k\times k}$ is an optional middle matrix; defaults to the identity, recovering the standard $Q + R^\top R$ form. May be diagonal, sparse, dense, or indefinite — the backend auto-detects the cheapest representation
 - $A$ is the constraint matrix
 - $c$ is the linear objective vector
 - $\ell_c, u_c$ are constraint bounds
@@ -26,7 +27,7 @@ Where:
 ## Key Features
 
 - **GPU Acceleration**: Fully leverages NVIDIA CUDA for extreme-scale QP problems
-- **Flexible Problem Structure**: Supports sparse quadratic terms, low-rank quadratic terms, or both
+- **Flexible Problem Structure**: Supports sparse, low-rank, and middle-weighted low-rank ($R^\top D R$) quadratic terms — alone or combined
 - **High Performance**: Competitive with commercial solvers on large-scale problems
 - **SpMVOp Auto-Detection**: Automatically uses cuSPARSE SpMVOp on CUDA 13+ while falling back to standard SpMV on CUDA 12.x
 - **Multi-GPU Distributed Solving**: Supports parallel solving across multiple GPUs via MPI and NCCL (optional, enabled at compile time)
