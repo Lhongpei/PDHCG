@@ -502,12 +502,20 @@ double get_vector_inf_norm(cublasHandle_t handle, int n, const double *x_d)
 {
     if (n <= 0)
         return 0.0;
-    int index;
 
-    cublasIdamax(handle, n, x_d, 1, &index);
-    double max_val;
+    int index = 1;
 
+    CUBLAS_CHECK(cublasIdamax(handle, n, x_d, 1, &index));
+
+    if (index < 1 || index > n)
+        return 0.0;
+
+    double max_val = 0.0;
     CUDA_CHECK(cudaMemcpy(&max_val, x_d + (index - 1), sizeof(double), cudaMemcpyDeviceToHost));
+
+    if (!isfinite(max_val))
+        return INFINITY;
+
     return fabs(max_val);
 }
 

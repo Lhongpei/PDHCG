@@ -840,8 +840,50 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
         if (state->quadratic_objective_term->global_primal_obj_product)
             CUDA_CHECK(cudaFree(state->quadratic_objective_term->global_primal_obj_product));
 
+        if (state->quadratic_objective_term->vec_Rx_prod)
+            cusparseDestroyDnVec(state->quadratic_objective_term->vec_Rx_prod);
+        if (state->quadratic_objective_term->vec_primal_obj_prod &&
+            state->quadratic_objective_term->vec_primal_obj_prod !=
+                state->quadratic_objective_term->vec_global_primal_obj_prod)
+        {
+            cusparseDestroyDnVec(state->quadratic_objective_term->vec_primal_obj_prod);
+        }
+        if (state->quadratic_objective_term->vec_global_primal_obj_prod)
+            cusparseDestroyDnVec(state->quadratic_objective_term->vec_global_primal_obj_prod);
+        if (state->quadratic_objective_term->vec_primal_obj_prod ==
+            state->quadratic_objective_term->vec_global_primal_obj_prod)
+        {
+            state->quadratic_objective_term->vec_primal_obj_prod = nullptr;
+        }
+        state->quadratic_objective_term->vec_global_primal_obj_prod = nullptr;
+        if (state->quadratic_objective_term->spmv_ctx_Q)
+            pdhcg_spmv_ctx_destroy(state->quadratic_objective_term->spmv_ctx_Q);
+        if (state->quadratic_objective_term->spmv_ctx_R)
+            pdhcg_spmv_ctx_destroy(state->quadratic_objective_term->spmv_ctx_R);
+        if (state->quadratic_objective_term->spmv_ctx_Rt)
+            pdhcg_spmv_ctx_destroy(state->quadratic_objective_term->spmv_ctx_Rt);
+
         free(state->quadratic_objective_term);
     }
+
+    if (state->vec_primal_sol)
+        cusparseDestroyDnVec(state->vec_primal_sol);
+    if (state->vec_dual_sol)
+        cusparseDestroyDnVec(state->vec_dual_sol);
+    if (state->vec_primal_prod)
+        cusparseDestroyDnVec(state->vec_primal_prod);
+    if (state->vec_dual_prod)
+        cusparseDestroyDnVec(state->vec_dual_prod);
+
+    if (state->spmv_ctx_A)
+        pdhcg_spmv_ctx_destroy(state->spmv_ctx_A);
+    if (state->spmv_ctx_At)
+        pdhcg_spmv_ctx_destroy(state->spmv_ctx_At);
+
+    if (state->blas_handle)
+        cublasDestroy(state->blas_handle);
+    if (state->sparse_handle)
+        cusparseDestroy(state->sparse_handle);
 
     if (state->inner_solver)
     {

@@ -33,6 +33,8 @@ extern "C"
         void *buffer;
         void *descr;
         void *plan;
+        int num_rows;
+        int num_nonzeros;
     } pdhcg_spmv_ctx_t;
 
     bool pdhcg_use_spmvop_by_default(void);

@@ -103,7 +103,14 @@ extern "C" pdhcg_spmv_ctx_t *pdhcg_spmv_ctx_create(cusparseHandle_t sparse_handl
     pdhcg_spmv_ctx_t *ctx = (pdhcg_spmv_ctx_t *)safe_calloc(1, sizeof(pdhcg_spmv_ctx_t));
     ctx->vec_x = vec_x;
     ctx->vec_y = vec_y;
+    ctx->num_rows = num_rows;
+    ctx->num_nonzeros = num_nonzeros;
     size_t buffer_size = 0;
+
+    if (num_nonzeros == 0)
+    {
+        return ctx;
+    }
 
     CUSPARSE_CHECK(cusparseCreateCsr(&ctx->mat,
                                      num_rows,
@@ -133,6 +140,12 @@ extern "C" void pdhcg_spmv_ctx_destroy(pdhcg_spmv_ctx_t *ctx)
     if (ctx == NULL)
         return;
 
+    if (ctx->num_nonzeros == 0)
+    {
+        free(ctx);
+        return;
+    }
+
 #if PDHCG_USE_SPMVOP
     if (ctx->descr)
         CUSPARSE_CHECK(cusparseSpMVOp_destroyDescr((cusparseSpMVOpDescr_t)ctx->descr));
@@ -155,6 +168,22 @@ extern "C" void pdhcg_spmv_execute(cusparseHandle_t sparse_handle,
                                    const double *x,
                                    double *y)
 {
+    (void)alpha;
+    (void)x;
+    if (ctx->num_nonzeros == 0)
+    {
+        double beta_host = (beta != NULL) ? *beta : 0.0;
+        if (beta_host == 0.0)
+        {
+            CUDA_CHECK(cudaMemset(y, 0, (size_t)ctx->num_rows * sizeof(double)));
+        }
+        else if (beta_host != 1.0)
+        {
+            CUDA_CHECK(cudaMemset(y, 0, (size_t)ctx->num_rows * sizeof(double)));
+        }
+        return;
+    }
+
     CUSPARSE_CHECK(cusparseDnVecSetValues(ctx->vec_x, (void *)x));
     CUSPARSE_CHECK(cusparseDnVecSetValues(ctx->vec_y, y));
 
