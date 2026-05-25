@@ -493,7 +493,8 @@ static py::dict solve_once(py::object Q,
                            double zero_tolerance = 0.0,
                            py::object params = py::none(),
                            py::object primal_start = py::none(),
-                           py::object dual_start = py::none())
+                           py::object dual_start = py::none(),
+                           py::object D = py::none())
 {
     static std::once_flag cuda_init_flag;
     std::call_once(cuda_init_flag, []() { cudaFree(0); });
@@ -554,8 +555,75 @@ static py::dict solve_once(py::object Q,
     const matrix_desc_t *r_desc_ptr = R.is_none() ? nullptr : &view_r.desc;
     const matrix_desc_t *a_desc_ptr = A.is_none() ? nullptr : &view_a.desc;
 
+    PyMatrixView view_d;
+    std::vector<int32_t> d_diag_rp, d_diag_ci;
+    std::vector<double> d_diag_vv;
+    const matrix_desc_t *d_desc_ptr = nullptr;
+    if (D && !D.is_none())
+    {
+        if (R.is_none())
+        {
+            throw std::invalid_argument("D was provided but R is None; D is only meaningful with a low-rank R.");
+        }
+        int rank = view_r.desc.m;
+        bool is_1d = false;
+        if (py::isinstance<py::array>(D))
+        {
+            py::array d_arr = py::cast<py::array>(D);
+            if (d_arr.ndim() == 1)
+                is_1d = true;
+        }
+        if (is_1d)
+        {
+            /* Build a CSR diag(d) directly. */
+            py::array_t<double, py::array::c_style | py::array::forcecast> d64(py::cast<py::array>(D));
+            if ((int)d64.size() != rank)
+            {
+                throw std::invalid_argument("D (diag) length " + std::to_string((int)d64.size()) + " must equal rank " +
+                                            std::to_string(rank));
+            }
+            const double *p = d64.data();
+            d_diag_rp.reserve(rank + 1);
+            d_diag_ci.reserve(rank);
+            d_diag_vv.reserve(rank);
+            int nz = 0;
+            d_diag_rp.push_back(0);
+            for (int i = 0; i < rank; ++i)
+            {
+                if (p[i] != 0.0)
+                {
+                    d_diag_ci.push_back(i);
+                    d_diag_vv.push_back(p[i]);
+                    ++nz;
+                }
+                d_diag_rp.push_back(nz);
+            }
+            view_d.desc.m = rank;
+            view_d.desc.n = rank;
+            view_d.desc.fmt = matrix_csr;
+            view_d.desc.zero_tolerance = 0.0;
+            view_d.desc.data.csr.nnz = (int)d_diag_vv.size();
+            view_d.desc.data.csr.row_ptr = d_diag_rp.data();
+            view_d.desc.data.csr.col_ind = d_diag_ci.data();
+            view_d.desc.data.csr.vals = d_diag_vv.data();
+            d_desc_ptr = &view_d.desc;
+        }
+        else
+        {
+            view_d = get_matrix_from_python(D, 0.0);
+            if (view_d.desc.m != rank || view_d.desc.n != rank)
+            {
+                throw std::invalid_argument("D shape (" + std::to_string(view_d.desc.m) + ", " +
+                                            std::to_string(view_d.desc.n) + ") must be (" + std::to_string(rank) +
+                                            ", " + std::to_string(rank) + ")");
+            }
+            view_a.keep.owners.insert(view_a.keep.owners.end(), view_d.keep.owners.begin(), view_d.keep.owners.end());
+            d_desc_ptr = &view_d.desc;
+        }
+    }
+
     qp_problem_t *prob =
-        create_qp_problem(c_ptr, q_desc_ptr, r_desc_ptr, a_desc_ptr, l_ptr, u_ptr, lb_ptr, ub_ptr, c0_ptr);
+        create_qp_problem(c_ptr, q_desc_ptr, r_desc_ptr, d_desc_ptr, a_desc_ptr, l_ptr, u_ptr, lb_ptr, ub_ptr, c0_ptr);
     if (!prob)
     {
         throw std::runtime_error("create_qp_problem failed.");
@@ -668,5 +736,6 @@ PYBIND11_MODULE(_pdhcg_core, m)
           py::arg("zero_tolerance") = 0.0,
           py::arg("params") = py::none(),
           py::arg("primal_start") = py::none(),
-          py::arg("dual_start") = py::none());
+          py::arg("dual_start") = py::none(),
+          py::arg("D") = py::none());
 }

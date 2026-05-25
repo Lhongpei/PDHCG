@@ -60,6 +60,11 @@ typedef struct
     cusparseDnVecDescr_t vec_RRx_prod;
     int num_rank_lowrank_obj;
 
+    int lowrank_middle_type;
+    double *d_middle_diag;
+    double *d_middle_dense;
+    double *Rx_buffer;
+
     // Buffer for Distributed Version
     double *global_primal_obj_product;
     cusparseDnVecDescr_t vec_global_primal_obj_prod;
@@ -194,6 +199,13 @@ typedef struct
     grid_context_t *grid_context;
 } pdhg_solver_state_t;
 
+typedef enum
+{
+    PDHCG_D_NONE = 0,
+    PDHCG_D_DIAG = 1,
+    PDHCG_D_DENSE = 2
+} lowrank_middle_kind_t;
+
 typedef struct
 {
     int num_variables;
@@ -212,6 +224,10 @@ typedef struct
 
     CsrComponent *objective_lowrank_matrix;
     int objective_lowrank_matrix_num_nonzeros;
+
+    lowrank_middle_kind_t objective_lowrank_middle_kind;
+    double *objective_lowrank_middle_diag;
+    double *objective_lowrank_middle_dense;
 
     double *diagonal_quad_objective;
 

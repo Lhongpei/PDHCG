@@ -328,6 +328,29 @@ qp_problem_t *partition_qp_problem(const qp_problem_t *global_qp,
                                                           global_qp->objective_lowrank_matrix,
                                                           &loc->objective_lowrank_matrix_num_nonzeros);
 
+    loc->objective_lowrank_middle_matrix = NULL;
+    loc->objective_lowrank_middle_matrix_num_nonzeros = 0;
+    if (global_qp->objective_lowrank_middle_matrix && loc->num_rank_lowrank_obj > 0 &&
+        global_qp->objective_lowrank_middle_matrix_num_nonzeros > 0)
+    {
+        int k = loc->num_rank_lowrank_obj;
+        int nnz = global_qp->objective_lowrank_middle_matrix_num_nonzeros;
+        loc->objective_lowrank_middle_matrix_num_nonzeros = nnz;
+        loc->objective_lowrank_middle_matrix = (CsrComponent *)malloc(sizeof(CsrComponent));
+        loc->objective_lowrank_middle_matrix->row_ptr = (int *)malloc((size_t)(k + 1) * sizeof(int));
+        loc->objective_lowrank_middle_matrix->col_ind = (int *)malloc((size_t)nnz * sizeof(int));
+        loc->objective_lowrank_middle_matrix->val = (double *)malloc((size_t)nnz * sizeof(double));
+        memcpy(loc->objective_lowrank_middle_matrix->row_ptr,
+               global_qp->objective_lowrank_middle_matrix->row_ptr,
+               (size_t)(k + 1) * sizeof(int));
+        memcpy(loc->objective_lowrank_middle_matrix->col_ind,
+               global_qp->objective_lowrank_middle_matrix->col_ind,
+               (size_t)nnz * sizeof(int));
+        memcpy(loc->objective_lowrank_middle_matrix->val,
+               global_qp->objective_lowrank_middle_matrix->val,
+               (size_t)nnz * sizeof(double));
+    }
+
     loc->objective_vector = copy_slice(global_qp->objective_vector, n_start, loc->num_variables);
     loc->variable_lower_bound = copy_slice(global_qp->variable_lower_bound, n_start, loc->num_variables);
     loc->variable_upper_bound = copy_slice(global_qp->variable_upper_bound, n_start, loc->num_variables);
@@ -391,6 +414,24 @@ rescale_info_t *partition_rescale_info(rescale_info_t *global_info,
     loc_processed->objective_lowrank_matrix = loc_lp->objective_lowrank_matrix;
     loc_processed->quad_type = global_processed->quad_type;
 
+    loc_processed->objective_lowrank_middle_kind = global_processed->objective_lowrank_middle_kind;
+    loc_processed->objective_lowrank_middle_diag = NULL;
+    loc_processed->objective_lowrank_middle_dense = NULL;
+    if (global_processed->objective_lowrank_middle_kind == PDHCG_D_DIAG &&
+        global_processed->objective_lowrank_middle_diag && loc_lp->num_rank_lowrank_obj > 0)
+    {
+        size_t bytes = (size_t)loc_lp->num_rank_lowrank_obj * sizeof(double);
+        loc_processed->objective_lowrank_middle_diag = (double *)malloc(bytes);
+        memcpy(loc_processed->objective_lowrank_middle_diag, global_processed->objective_lowrank_middle_diag, bytes);
+    }
+    else if (global_processed->objective_lowrank_middle_kind == PDHCG_D_DENSE &&
+             global_processed->objective_lowrank_middle_dense && loc_lp->num_rank_lowrank_obj > 0)
+    {
+        size_t bytes = (size_t)loc_lp->num_rank_lowrank_obj * (size_t)loc_lp->num_rank_lowrank_obj * sizeof(double);
+        loc_processed->objective_lowrank_middle_dense = (double *)malloc(bytes);
+        memcpy(loc_processed->objective_lowrank_middle_dense, global_processed->objective_lowrank_middle_dense, bytes);
+    }
+
     if (global_processed->quad_type == PDHCG_DIAG_Q && global_processed->diagonal_quad_objective != NULL)
     {
         loc_processed->diagonal_quad_objective =
@@ -432,6 +473,11 @@ size_t get_qp_problem_size(const qp_problem_t *qp)
     ADD_CSR_SIZE(qp->constraint_matrix, qp->num_constraints, qp->constraint_matrix_num_nonzeros);
     ADD_CSR_SIZE(qp->objective_sparse_matrix, qp->num_variables, qp->objective_sparse_matrix_num_nonzeros);
     ADD_CSR_SIZE(qp->objective_lowrank_matrix, qp->num_rank_lowrank_obj, qp->objective_lowrank_matrix_num_nonzeros);
+
+    size += sizeof(int);
+    ADD_CSR_SIZE(qp->objective_lowrank_middle_matrix,
+                 qp->num_rank_lowrank_obj,
+                 qp->objective_lowrank_middle_matrix_num_nonzeros);
 
     size += sizeof(int) * 2;
     if (qp->primal_start)
@@ -486,6 +532,11 @@ void serialize_qp_problem_to_ptr(const qp_problem_t *qp, char **ptr_ref)
     S_CSR(qp->constraint_matrix, qp->num_constraints, qp->constraint_matrix_num_nonzeros);
     S_CSR(qp->objective_sparse_matrix, qp->num_variables, qp->objective_sparse_matrix_num_nonzeros);
     S_CSR(qp->objective_lowrank_matrix, qp->num_rank_lowrank_obj, qp->objective_lowrank_matrix_num_nonzeros);
+
+    S_COPY(qp->objective_lowrank_middle_matrix_num_nonzeros, int);
+    S_CSR(qp->objective_lowrank_middle_matrix,
+          qp->num_rank_lowrank_obj,
+          qp->objective_lowrank_middle_matrix_num_nonzeros);
 
     int has_primal = (qp->primal_start != NULL);
     int has_dual = (qp->dual_start != NULL);
@@ -546,6 +597,12 @@ qp_problem_t *deserialize_qp_problem_from_ptr(const char **ptr_ref)
     D_CSR(qp->constraint_matrix, qp->num_constraints, qp->constraint_matrix_num_nonzeros);
     D_CSR(qp->objective_sparse_matrix, qp->num_variables, qp->objective_sparse_matrix_num_nonzeros);
     D_CSR(qp->objective_lowrank_matrix, qp->num_rank_lowrank_obj, qp->objective_lowrank_matrix_num_nonzeros);
+
+    D_VAL(qp->objective_lowrank_middle_matrix_num_nonzeros, int);
+    qp->objective_lowrank_middle_matrix = NULL;
+    D_CSR(qp->objective_lowrank_middle_matrix,
+          qp->num_rank_lowrank_obj,
+          qp->objective_lowrank_middle_matrix_num_nonzeros);
 
     int has_primal, has_dual;
     D_VAL(has_primal, int);

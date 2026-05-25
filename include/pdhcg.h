@@ -24,10 +24,12 @@ extern "C"
 {
 #endif
 
-    // create an qp_problem_t from a matrix descriptor
+    // create an qp_problem_t from matrix descriptors.
+    // pass NULL for the default D = I.
     qp_problem_t *create_qp_problem(const double *objective_c,
                                     const matrix_desc_t *Q_desc,
                                     const matrix_desc_t *R_desc,
+                                    const matrix_desc_t *D_desc,
                                     const matrix_desc_t *A_desc,
                                     const double *con_lb,
                                     const double *con_ub,

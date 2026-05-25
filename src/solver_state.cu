@@ -192,6 +192,25 @@ static void initialize_lowrank_component_obj(pdhg_solver_state_t *state, const p
                               state->quadratic_objective_term->objective_lowrank_matrix_t->val,
                               state->quadratic_objective_term->vec_Rx_prod,
                               state->quadratic_objective_term->vec_primal_obj_prod);
+
+    state->quadratic_objective_term->lowrank_middle_type = (int)problem->objective_lowrank_middle_kind;
+    state->quadratic_objective_term->d_middle_diag = NULL;
+    state->quadratic_objective_term->d_middle_dense = NULL;
+    state->quadratic_objective_term->Rx_buffer = NULL;
+
+    int rank = problem->num_rank_lowrank_obj;
+    if (problem->objective_lowrank_middle_kind == PDHCG_D_DIAG && rank > 0)
+    {
+        ALLOC_AND_COPY(state->quadratic_objective_term->d_middle_diag,
+                       problem->objective_lowrank_middle_diag,
+                       (size_t)rank * sizeof(double));
+    }
+    else if (problem->objective_lowrank_middle_kind == PDHCG_D_DENSE && rank > 0)
+    {
+        size_t bytes = (size_t)rank * (size_t)rank * sizeof(double);
+        ALLOC_AND_COPY(state->quadratic_objective_term->d_middle_dense, problem->objective_lowrank_middle_dense, bytes);
+        ALLOC_ZERO(state->quadratic_objective_term->Rx_buffer, (size_t)rank * sizeof(double));
+    }
 }
 
 static void initialize_quadratic_obj_term(pdhg_solver_state_t *state, const processed_qp_problem_t *problem)
@@ -352,8 +371,29 @@ static void initialize_inner_solver(pdhg_solver_state_t *state, const pdhg_param
                 {
                     cu_sparse_matrix_csr_t *Rt = state->quadratic_objective_term->objective_lowrank_matrix_t;
                     double *out = state->inner_solver->bb_step_size->Ms_buffer;
-                    compute_csr_row_sq_norm_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-                        Rt->row_ptr, Rt->val, out, n);
+                    int mtype = state->quadratic_objective_term->lowrank_middle_type;
+                    if (mtype == 1)
+                    {
+                        compute_csr_row_sq_norm_weighted_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                            Rt->row_ptr, Rt->col_ind, Rt->val, state->quadratic_objective_term->d_middle_diag, out, n);
+                    }
+                    else if (mtype == 2)
+                    {
+                        int rank = state->quadratic_objective_term->num_rank_lowrank_obj;
+                        compute_csr_row_quad_form_dense_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                            Rt->row_ptr,
+                            Rt->col_ind,
+                            Rt->val,
+                            state->quadratic_objective_term->d_middle_dense,
+                            rank,
+                            out,
+                            n);
+                    }
+                    else
+                    {
+                        compute_csr_row_sq_norm_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                            Rt->row_ptr, Rt->val, out, n);
+                    }
                     CUDA_CHECK(cudaGetLastError());
                     const double one = 1.0;
                     CUBLAS_CHECK(cublasDaxpy(
@@ -862,6 +902,13 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
             pdhcg_spmv_ctx_destroy(state->quadratic_objective_term->spmv_ctx_R);
         if (state->quadratic_objective_term->spmv_ctx_Rt)
             pdhcg_spmv_ctx_destroy(state->quadratic_objective_term->spmv_ctx_Rt);
+
+        if (state->quadratic_objective_term->d_middle_diag)
+            CUDA_CHECK(cudaFree(state->quadratic_objective_term->d_middle_diag));
+        if (state->quadratic_objective_term->d_middle_dense)
+            CUDA_CHECK(cudaFree(state->quadratic_objective_term->d_middle_dense));
+        if (state->quadratic_objective_term->Rx_buffer)
+            CUDA_CHECK(cudaFree(state->quadratic_objective_term->Rx_buffer));
 
         free(state->quadratic_objective_term);
     }
