@@ -349,6 +349,33 @@ extern "C"
                                                                const double *__restrict__ variable_upper_bound,
                                                                int n_vars);
 
+    __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
+                                               const int *__restrict__ start_idx,
+                                               const int *__restrict__ v_dim,
+                                               int num_blocks);
+
+    __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_residual,
+                                                      const double *__restrict__ objective_vector,
+                                                      const double *__restrict__ dual_product,
+                                                      const double *__restrict__ variable_rescaling,
+                                                      const int *__restrict__ start_idx,
+                                                      const int *__restrict__ v_dim,
+                                                      int num_blocks);
+
+    __global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,
+                                               const double *__restrict__ objective_vector,
+                                               const double *__restrict__ dual_product,
+                                               const int *__restrict__ start_idx,
+                                               const int *__restrict__ v_dim,
+                                               int num_blocks);
+
+    __global__ void recompute_reflected_at_cone_kernel(double *__restrict__ reflected_primal,
+                                                       const double *__restrict__ pdhg_primal,
+                                                       const double *__restrict__ current_primal,
+                                                       const int *__restrict__ start_idx,
+                                                       const int *__restrict__ v_dim,
+                                                       int num_blocks);
+
 #ifdef __cplusplus
 }
 #endif

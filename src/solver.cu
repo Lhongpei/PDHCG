@@ -38,6 +38,30 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
 
     print_initial_info(input_params, original_problem);
 
+    qp_problem_t *transformed = NULL;
+    if (original_problem->num_quadratic_constraints > 0)
+    {
+        transformed = qcqp_to_socp_qp(original_problem);
+        if (!transformed)
+        {
+            fprintf(stderr, "Error: QCQP -> SOCP transformation failed; cannot solve.\n");
+            return NULL;
+        }
+        if (params->verbose >= 1)
+        {
+            fprintf(stderr,
+                    "[QCQP] %d quadratic constraint(s) reformulated as %d "
+                    "rotated SOC block(s); extended problem: %d vars, "
+                    "%d rows, %d nnz.\n",
+                    original_problem->num_quadratic_constraints,
+                    transformed->num_cone_blocks,
+                    transformed->num_variables,
+                    transformed->num_constraints,
+                    transformed->constraint_matrix_num_nonzeros);
+        }
+        original_problem = transformed;
+    }
+
     pdhcg_presolve_info_t *presolve_info = NULL;
     const qp_problem_t *working_problem = original_problem;
     bool working_problem_needs_free = false;
@@ -156,9 +180,46 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
     {
         qp_problem_free((qp_problem_t *)working_problem);
     }
+
+    if (transformed && result && result->primal_solution)
+    {
+        int n_orig = transformed->num_original_variables;
+        int m_ext = transformed->num_constraints;
+        int m_orig = m_ext - (transformed->num_variables - n_orig - 2 * transformed->num_cone_blocks);
+
+        if (n_orig > 0 && n_orig < result->num_variables)
+        {
+            double *new_primal = (double *)safe_malloc((size_t)n_orig * sizeof(double));
+            memcpy(new_primal, result->primal_solution, (size_t)n_orig * sizeof(double));
+            free(result->primal_solution);
+            result->primal_solution = new_primal;
+            result->num_variables = n_orig;
+
+            if (result->reduced_cost)
+            {
+                double *new_rc = (double *)safe_malloc((size_t)n_orig * sizeof(double));
+                memcpy(new_rc, result->reduced_cost, (size_t)n_orig * sizeof(double));
+                free(result->reduced_cost);
+                result->reduced_cost = new_rc;
+            }
+        }
+        if (m_orig > 0 && m_orig < result->num_constraints && result->dual_solution)
+        {
+            double *new_dual = (double *)safe_malloc((size_t)m_orig * sizeof(double));
+            memcpy(new_dual, result->dual_solution, (size_t)m_orig * sizeof(double));
+            free(result->dual_solution);
+            result->dual_solution = new_dual;
+            result->num_constraints = m_orig;
+        }
+    }
+
     pdhg_final_log(result, params);
     pdhg_solver_state_free(state);
     pdhcg_presolve_info_free(presolve_info);
+    if (transformed)
+    {
+        qp_problem_free(transformed);
+    }
     CUDA_CHECK(cudaGetLastError());
     return result;
 }

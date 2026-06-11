@@ -184,7 +184,9 @@ double compute_xQx(pdhg_solver_state_t *state, double *primal_sol, double *prima
 
 void lp_primal_update(pdhg_solver_state_t *state, double step_size)
 {
-    if (state->is_this_major_iteration || ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0)
+    bool force_major_for_cone = state->num_cone_blocks > 0;
+    if (state->is_this_major_iteration || force_major_for_cone ||
+        ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0)
     {
         compute_lp_next_pdhg_primal_solution_major_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
             state->current_primal_solution,
@@ -477,6 +479,23 @@ void pdhg_update(pdhg_solver_state_t *state)
             fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
             exit(EXIT_FAILURE);
     }
+
+    if (state->num_cone_blocks > 0)
+    {
+        int threads = THREADS_PER_BLOCK;
+        int blocks = (state->num_cone_blocks + threads - 1) / threads;
+        project_rotated_soc_kernel<<<blocks, threads>>>(state->pdhg_primal_solution,
+                                                        state->cone_block_start_idx_d,
+                                                        state->cone_block_v_dim_d,
+                                                        state->num_cone_blocks);
+        recompute_reflected_at_cone_kernel<<<blocks, threads>>>(state->reflected_primal_solution,
+                                                                state->pdhg_primal_solution,
+                                                                state->current_primal_solution,
+                                                                state->cone_block_start_idx_d,
+                                                                state->cone_block_v_dim_d,
+                                                                state->num_cone_blocks);
+    }
+
     state->inner_solver->total_count++;
 
     pdhcg_spmv_execute(state->sparse_handle,
@@ -760,6 +779,19 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
             state->constraint_upper_bound_finite_val,
             state->num_constraints,
             state->num_variables);
+
+        if (state->num_cone_blocks > 0)
+        {
+            int threads = THREADS_PER_BLOCK;
+            int blocks = (state->num_cone_blocks + threads - 1) / threads;
+            compute_cone_dual_residual_kernel<<<blocks, threads>>>(state->dual_residual,
+                                                                   state->objective_vector,
+                                                                   state->dual_product,
+                                                                   state->variable_rescaling,
+                                                                   state->cone_block_start_idx_d,
+                                                                   state->cone_block_v_dim_d,
+                                                                   state->num_cone_blocks);
+        }
     }
     else if (state->problem_type == CONVEX_QP)
     {
@@ -839,6 +871,18 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
     state->primal_objective_value = (state->primal_objective_value + half_xQx) /
             (state->constraint_bound_rescaling * state->objective_vector_rescaling) +
         state->objective_constant;
+
+    if (state->num_cone_blocks > 0)
+    {
+        int threads = THREADS_PER_BLOCK;
+        int blocks = (state->num_cone_blocks + threads - 1) / threads;
+        set_cone_dual_slack_kernel<<<blocks, threads>>>(state->dual_slack,
+                                                        state->objective_vector,
+                                                        state->dual_product,
+                                                        state->cone_block_start_idx_d,
+                                                        state->cone_block_v_dim_d,
+                                                        state->num_cone_blocks);
+    }
 
     double base_dual_objective;
     CUBLAS_CHECK(cublasDdot(state->blas_handle,

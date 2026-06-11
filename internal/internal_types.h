@@ -197,6 +197,11 @@ typedef struct
     problem_type_t problem_type;
     inner_solver_t *inner_solver;
     grid_context_t *grid_context;
+
+    int num_cone_blocks;
+    int *cone_block_start_idx_d;
+    int *cone_block_v_dim_d;
+    int num_original_variables;
 } pdhg_solver_state_t;
 
 typedef enum

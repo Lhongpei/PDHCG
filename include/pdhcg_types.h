@@ -85,6 +85,16 @@ extern "C"
         double *constraint_lower_bound;
         double *constraint_upper_bound;
 
+        int num_quadratic_constraints;
+        int *quadratic_constraint_row_indices;
+        CsrComponent **quadratic_constraint_matrices;
+        int *quadratic_constraint_matrix_num_nonzeros;
+
+        int num_cone_blocks;
+        int *cone_block_start_idx;
+        int *cone_block_v_dim;
+        int num_original_variables;
+
         double *primal_start;
         double *dual_start;
 

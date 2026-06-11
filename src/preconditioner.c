@@ -87,6 +87,42 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
         new_prob->dual_start = NULL;
     }
 
+    new_prob->num_quadratic_constraints = prob->num_quadratic_constraints;
+    new_prob->quadratic_constraint_row_indices = NULL;
+    new_prob->quadratic_constraint_matrices = NULL;
+    new_prob->quadratic_constraint_matrix_num_nonzeros = NULL;
+    if (prob->num_quadratic_constraints > 0)
+    {
+        int K = prob->num_quadratic_constraints;
+        new_prob->quadratic_constraint_row_indices = safe_malloc(K * sizeof(int));
+        new_prob->quadratic_constraint_matrix_num_nonzeros = safe_malloc(K * sizeof(int));
+        new_prob->quadratic_constraint_matrices = safe_malloc(K * sizeof(CsrComponent *));
+        memcpy(new_prob->quadratic_constraint_row_indices, prob->quadratic_constraint_row_indices, K * sizeof(int));
+        memcpy(new_prob->quadratic_constraint_matrix_num_nonzeros,
+               prob->quadratic_constraint_matrix_num_nonzeros,
+               K * sizeof(int));
+        for (int i = 0; i < K; ++i)
+        {
+            new_prob->quadratic_constraint_matrices[i] =
+                deepcopy_csr_component(prob->quadratic_constraint_matrices[i],
+                                       prob->num_variables,
+                                       prob->quadratic_constraint_matrix_num_nonzeros[i]);
+        }
+    }
+
+    new_prob->num_cone_blocks = prob->num_cone_blocks;
+    new_prob->num_original_variables = prob->num_original_variables;
+    new_prob->cone_block_start_idx = NULL;
+    new_prob->cone_block_v_dim = NULL;
+    if (prob->num_cone_blocks > 0)
+    {
+        int K = prob->num_cone_blocks;
+        new_prob->cone_block_start_idx = safe_malloc(K * sizeof(int));
+        new_prob->cone_block_v_dim = safe_malloc(K * sizeof(int));
+        memcpy(new_prob->cone_block_start_idx, prob->cone_block_start_idx, K * sizeof(int));
+        memcpy(new_prob->cone_block_v_dim, prob->cone_block_v_dim, K * sizeof(int));
+    }
+
     return new_prob;
 }
 
@@ -212,6 +248,12 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
+        if (problem->num_original_variables > 0)
+        {
+            for (int i = problem->num_original_variables; i < num_vars; ++i)
+                var_rescale[i] = 1.0;
+        }
+
         scale_problem(problem, con_rescale, var_rescale);
         for (int i = 0; i < num_vars; ++i)
             cum_variable_rescaling[i] *= var_rescale[i];
@@ -264,6 +306,12 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
         var_rescale[i] = (var_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(var_rescale[i]);
     for (int i = 0; i < num_cons; ++i)
         con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
+
+    if (problem->num_original_variables > 0)
+    {
+        for (int i = problem->num_original_variables; i < num_vars; ++i)
+            var_rescale[i] = 1.0;
+    }
 
     scale_problem(problem, con_rescale, var_rescale);
     for (int i = 0; i < num_vars; ++i)

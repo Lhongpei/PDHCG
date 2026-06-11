@@ -384,6 +384,16 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     fill_or_copy(&prob->constraint_lower_bound, prob->num_constraints, con_lb, -INFINITY);
     fill_or_copy(&prob->constraint_upper_bound, prob->num_constraints, con_ub, INFINITY);
 
+    prob->num_quadratic_constraints = 0;
+    prob->quadratic_constraint_row_indices = NULL;
+    prob->quadratic_constraint_matrices = NULL;
+    prob->quadratic_constraint_matrix_num_nonzeros = NULL;
+
+    prob->num_cone_blocks = 0;
+    prob->cone_block_start_idx = NULL;
+    prob->cone_block_v_dim = NULL;
+    prob->num_original_variables = 0;
+
     return prob;
 }
 
@@ -423,6 +433,19 @@ void qp_problem_free(qp_problem_t *prob)
     free(prob->dual_start);
     csr_component_free(prob->objective_lowrank_middle_matrix);
     free(prob->objective_lowrank_middle_matrix);
+    if (prob->quadratic_constraint_matrices)
+    {
+        for (int i = 0; i < prob->num_quadratic_constraints; ++i)
+        {
+            csr_component_free(prob->quadratic_constraint_matrices[i]);
+            free(prob->quadratic_constraint_matrices[i]);
+        }
+        free(prob->quadratic_constraint_matrices);
+    }
+    free(prob->quadratic_constraint_row_indices);
+    free(prob->quadratic_constraint_matrix_num_nonzeros);
+    free(prob->cone_block_start_idx);
+    free(prob->cone_block_v_dim);
     memset(prob, 0, sizeof(*prob));
     free(prob);
 }

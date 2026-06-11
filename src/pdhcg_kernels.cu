@@ -749,3 +749,155 @@ __global__ void compute_and_rescale_reduced_cost_qp_kernel(double *__restrict__ 
         reduced_cost[i] = rc;
     }
 }
+
+__global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
+                                           const int *__restrict__ start_idx,
+                                           const int *__restrict__ v_dim,
+                                           int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    const double INV_SQRT2 = 0.7071067811865475;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+    double *v = primal_solution + start;
+    double *sptr = primal_solution + start + k;
+    double *tptr = primal_solution + start + k + 1;
+
+    double s = *sptr;
+    double t = *tptr;
+    double w = (s - t) * INV_SQRT2;
+    double z = (s + t) * INV_SQRT2;
+
+    double sumsq = w * w;
+    for (int m = 0; m < k; ++m)
+        sumsq += v[m] * v[m];
+    double r = sqrt(sumsq);
+
+    if (r <= z)
+    {
+        return;
+    }
+    if (r <= -z)
+    {
+        for (int m = 0; m < k; ++m)
+            v[m] = 0.0;
+        *sptr = 0.0;
+        *tptr = 0.0;
+        return;
+    }
+
+    double scale = (z + r) / (2.0 * r);
+    for (int m = 0; m < k; ++m)
+        v[m] *= scale;
+    w *= scale;
+    double z_new = scale * r;
+
+    *sptr = (z_new + w) * INV_SQRT2;
+    *tptr = (z_new - w) * INV_SQRT2;
+}
+
+__global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_residual,
+                                                  const double *__restrict__ objective_vector,
+                                                  const double *__restrict__ dual_product,
+                                                  const double *__restrict__ variable_rescaling,
+                                                  const int *__restrict__ start_idx,
+                                                  const int *__restrict__ v_dim,
+                                                  int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    const double INV_SQRT2 = 0.7071067811865475;
+    const int K_MAX = 16;
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+
+    double v[K_MAX];
+    double r_s, r_t;
+    for (int m = 0; m < k; ++m)
+        v[m] = objective_vector[start + m] - dual_product[start + m];
+    r_s = objective_vector[start + k] - dual_product[start + k];
+    r_t = objective_vector[start + k + 1] - dual_product[start + k + 1];
+
+    double w = (r_s - r_t) * INV_SQRT2;
+    double z = (r_s + r_t) * INV_SQRT2;
+    double sumsq = w * w;
+    for (int m = 0; m < k; ++m)
+        sumsq += v[m] * v[m];
+    double r_norm = sqrt(sumsq);
+
+    double p_v[K_MAX];
+    double p_s, p_t;
+    if (r_norm <= z)
+    {
+        for (int m = 0; m < k; ++m)
+            p_v[m] = v[m];
+        p_s = r_s;
+        p_t = r_t;
+    }
+    else if (r_norm <= -z)
+    {
+        for (int m = 0; m < k; ++m)
+            p_v[m] = 0.0;
+        p_s = 0.0;
+        p_t = 0.0;
+    }
+    else
+    {
+        double scale = (z + r_norm) / (2.0 * r_norm);
+        for (int m = 0; m < k; ++m)
+            p_v[m] = scale * v[m];
+        double w_new = scale * w;
+        double z_new = scale * r_norm;
+        p_s = (z_new + w_new) * INV_SQRT2;
+        p_t = (z_new - w_new) * INV_SQRT2;
+    }
+
+    for (int m = 0; m < k; ++m)
+        dual_residual[start + m] = (v[m] - p_v[m]) * variable_rescaling[start + m];
+    dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k];
+    dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1];
+}
+
+__global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,
+                                           const double *__restrict__ objective_vector,
+                                           const double *__restrict__ dual_product,
+                                           const int *__restrict__ start_idx,
+                                           const int *__restrict__ v_dim,
+                                           int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+    for (int m = 0; m < k + 2; ++m)
+    {
+        int idx = start + m;
+        dual_slack[idx] = objective_vector[idx] - dual_product[idx];
+    }
+}
+
+__global__ void recompute_reflected_at_cone_kernel(double *__restrict__ reflected_primal,
+                                                   const double *__restrict__ pdhg_primal,
+                                                   const double *__restrict__ current_primal,
+                                                   const int *__restrict__ start_idx,
+                                                   const int *__restrict__ v_dim,
+                                                   int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+    for (int m = 0; m < k + 2; ++m)
+    {
+        int idx = start + m;
+        reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+    }
+}

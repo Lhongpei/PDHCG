@@ -734,6 +734,32 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
                                                state->vec_dual_sol,
                                                state->vec_dual_prod);
 
+    state->num_cone_blocks = working_problem->num_cone_blocks;
+    state->num_original_variables = working_problem->num_original_variables;
+    state->cone_block_start_idx_d = NULL;
+    state->cone_block_v_dim_d = NULL;
+    if (state->num_cone_blocks > 0)
+    {
+        size_t cb = (size_t)state->num_cone_blocks * sizeof(int);
+        ALLOC_AND_COPY(state->cone_block_start_idx_d, working_problem->cone_block_start_idx, cb);
+        ALLOC_AND_COPY(state->cone_block_v_dim_d, working_problem->cone_block_v_dim, cb);
+
+        const double *scaled_ub = rescale_info->scaled_problem->variable_upper_bound;
+        for (int i = 0; i < state->num_cone_blocks; ++i)
+        {
+            int t_idx = working_problem->cone_block_start_idx[i] + working_problem->cone_block_v_dim[i] + 1;
+            double t_val = scaled_ub[t_idx];
+            for (int which = 0; which < 4; ++which)
+            {
+                double *dst = (which == 0       ? state->initial_primal_solution
+                                   : which == 1 ? state->current_primal_solution
+                                   : which == 2 ? state->pdhg_primal_solution
+                                                : state->reflected_primal_solution);
+                CUDA_CHECK(cudaMemcpy(dst + t_idx, &t_val, sizeof(double), cudaMemcpyHostToDevice));
+            }
+        }
+    }
+
     initialize_quadratic_obj_term(state, rescale_info->processed_problem);
     initialize_quadratic_term_information(state, params);
     initialize_inner_solver(state, params);
@@ -959,6 +985,11 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
             CUDA_CHECK(cudaFree(state->inner_solver->dual_buffer));
         free(state->inner_solver);
     }
+
+    if (state->cone_block_start_idx_d)
+        CUDA_CHECK(cudaFree(state->cone_block_start_idx_d));
+    if (state->cone_block_v_dim_d)
+        CUDA_CHECK(cudaFree(state->cone_block_v_dim_d));
 
     free(state);
 }

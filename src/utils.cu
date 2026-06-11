@@ -405,6 +405,17 @@ void print_initial_info(const pdhg_parameters_t *params, const qp_problem_t *pro
            problem->num_constraints,
            problem->num_variables,
            problem->constraint_matrix_num_nonzeros);
+    if (problem->num_quadratic_constraints > 0)
+    {
+        long total_q_nnz = 0;
+        for (int i = 0; i < problem->num_quadratic_constraints; ++i)
+        {
+            total_q_nnz += problem->quadratic_constraint_matrix_num_nonzeros[i];
+        }
+        printf("         + %d quadratic constraint(s), %ld Q-nnz total\n",
+               problem->num_quadratic_constraints,
+               total_q_nnz);
+    }
 
     printf("settings:\n");
     printf("  iter_limit         : %d\n", params->termination_criteria.iteration_limit);
