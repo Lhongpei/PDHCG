@@ -790,7 +790,6 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
                                                                    state->objective_vector,
                                                                    state->dual_product,
                                                                    state->variable_rescaling,
-                                                                   state->objective_vector_rescaling,
                                                                    state->cone_block_start_idx_d,
                                                                    state->cone_block_v_dim_d,
                                                                    state->num_cone_blocks);
@@ -820,6 +819,19 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
             state->step_size / state->primal_weight,
             state->num_constraints,
             state->num_variables);
+
+        if (state->num_cone_blocks > 0)
+        {
+            int threads = THREADS_PER_BLOCK;
+            int blocks = (state->num_cone_blocks + threads - 1) / threads;
+            compute_cone_dual_residual_kernel<<<blocks, threads>>>(state->dual_residual,
+                                                                   state->objective_vector,
+                                                                   state->dual_product,
+                                                                   state->variable_rescaling,
+                                                                   state->cone_block_start_idx_d,
+                                                                   state->cone_block_v_dim_d,
+                                                                   state->num_cone_blocks);
+        }
     }
 
     if (optimality_norm == NORM_TYPE_L_INF)
