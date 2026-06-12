@@ -788,6 +788,7 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
                                                                    state->objective_vector,
                                                                    state->dual_product,
                                                                    state->variable_rescaling,
+                                                                   state->objective_vector_rescaling,
                                                                    state->cone_block_start_idx_d,
                                                                    state->cone_block_v_dim_d,
                                                                    state->num_cone_blocks);

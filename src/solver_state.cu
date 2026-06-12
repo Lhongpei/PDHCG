@@ -744,11 +744,10 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
         ALLOC_AND_COPY(state->cone_block_start_idx_d, working_problem->cone_block_start_idx, cb);
         ALLOC_AND_COPY(state->cone_block_v_dim_d, working_problem->cone_block_v_dim, cb);
 
-        const double *scaled_ub = rescale_info->scaled_problem->variable_upper_bound;
+        double t_val = rescale_info->con_bound_rescale;
         for (int i = 0; i < state->num_cone_blocks; ++i)
         {
             int t_idx = working_problem->cone_block_start_idx[i] + working_problem->cone_block_v_dim[i] + 1;
-            double t_val = scaled_ub[t_idx];
             for (int which = 0; which < 4; ++which)
             {
                 double *dst = (which == 0       ? state->initial_primal_solution

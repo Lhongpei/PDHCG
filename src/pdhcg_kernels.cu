@@ -804,6 +804,7 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
                                                   const double *__restrict__ objective_vector,
                                                   const double *__restrict__ dual_product,
                                                   const double *__restrict__ variable_rescaling,
+                                                  const double objective_vector_rescaling,
                                                   const int *__restrict__ start_idx,
                                                   const int *__restrict__ v_dim,
                                                   int num_blocks)
@@ -858,10 +859,11 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
         p_t = (z_new - w_new) * INV_SQRT2;
     }
 
+    const double inv_obj = 1.0 / objective_vector_rescaling;
     for (int m = 0; m < k; ++m)
-        dual_residual[start + m] = (v[m] - p_v[m]) * variable_rescaling[start + m];
-    dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k];
-    dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1];
+        dual_residual[start + m] = (v[m] - p_v[m]) * variable_rescaling[start + m] * inv_obj;
+    dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k] * inv_obj;
+    dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1] * inv_obj;
 }
 
 __global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,

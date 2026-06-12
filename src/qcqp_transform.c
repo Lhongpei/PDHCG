@@ -118,8 +118,8 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     }
 
     long n_ext = (long)n_orig + total_v + 2L * K;
-    long m_ext = (long)m_orig + total_v;
-    long nnz_ext = (long)orig->constraint_matrix_num_nonzeros + K + 2L * total_v;
+    long m_ext = (long)m_orig + total_v + K;
+    long nnz_ext = (long)orig->constraint_matrix_num_nonzeros + K + 2L * total_v + K;
     if (n_ext > INT32_MAX || m_ext > INT32_MAX || nnz_ext > INT32_MAX)
     {
         fprintf(stderr, "[qcqp_to_socp_qp] extended problem size overflows int32.\n");
@@ -156,11 +156,11 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
                 out->variable_upper_bound[idx] = INFINITY;
                 idx++;
             }
-            out->variable_lower_bound[idx] = 0.0;
+            out->variable_lower_bound[idx] = -INFINITY;
             out->variable_upper_bound[idx] = INFINITY;
             idx++;
-            out->variable_lower_bound[idx] = 1.0;
-            out->variable_upper_bound[idx] = 1.0;
+            out->variable_lower_bound[idx] = -INFINITY;
+            out->variable_upper_bound[idx] = INFINITY;
             idx++;
         }
     }
@@ -176,10 +176,15 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
         out->constraint_lower_bound[row] = rhs;
         out->constraint_upper_bound[row] = rhs;
     }
-    for (long r = m_orig; r < m_ext; ++r)
+    for (long r = m_orig; r < m_orig + total_v; ++r)
     {
         out->constraint_lower_bound[r] = 0.0;
         out->constraint_upper_bound[r] = 0.0;
+    }
+    for (long r = m_orig + total_v; r < m_ext; ++r)
+    {
+        out->constraint_lower_bound[r] = 1.0;
+        out->constraint_upper_bound[r] = 1.0;
     }
 
     int *qc_row_to_block = (int *)safe_malloc(m_orig * sizeof(int));
@@ -207,6 +212,11 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
             row_ptr_ext[extra_row + 1] = 2;
             extra_row++;
         }
+    }
+    for (int i = 0; i < K; ++i)
+    {
+        row_ptr_ext[extra_row + 1] = 1;
+        extra_row++;
     }
     for (long r = 1; r <= m_ext; ++r)
         row_ptr_ext[r] += row_ptr_ext[r - 1];
@@ -245,6 +255,14 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
             val_ext[dst] = 1.0;
             extra_row++;
         }
+    }
+    for (int i = 0; i < K; ++i)
+    {
+        int t_col = out->cone_block_start_idx[i] + out->cone_block_v_dim[i] + 1;
+        int dst = row_ptr_ext[extra_row];
+        col_ind_ext[dst] = t_col;
+        val_ext[dst] = 1.0;
+        extra_row++;
     }
 
     out->constraint_matrix->row_ptr = row_ptr_ext;
