@@ -813,45 +813,39 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
         return;
 
     const double INV_SQRT2 = 0.7071067811865475;
-    const int K_MAX = 16;
     int start = start_idx[blk];
     int k = v_dim[blk];
 
-    double v[K_MAX];
-    double r_s, r_t;
-    for (int m = 0; m < k; ++m)
-        v[m] = objective_vector[start + m] - dual_product[start + m];
-    r_s = objective_vector[start + k] - dual_product[start + k];
-    r_t = objective_vector[start + k + 1] - dual_product[start + k + 1];
-
+    double r_s = objective_vector[start + k] - dual_product[start + k];
+    double r_t = objective_vector[start + k + 1] - dual_product[start + k + 1];
     double w = (r_s - r_t) * INV_SQRT2;
     double z = (r_s + r_t) * INV_SQRT2;
+
     double sumsq = w * w;
     for (int m = 0; m < k; ++m)
-        sumsq += v[m] * v[m];
+    {
+        double v_m = objective_vector[start + m] - dual_product[start + m];
+        sumsq += v_m * v_m;
+    }
     double r_norm = sqrt(sumsq);
 
-    double p_v[K_MAX];
-    double p_s, p_t;
+    double v_factor, p_s, p_t;
     if (r_norm <= z)
     {
-        for (int m = 0; m < k; ++m)
-            p_v[m] = v[m];
+        v_factor = 0.0;
         p_s = r_s;
         p_t = r_t;
     }
     else if (r_norm <= -z)
     {
-        for (int m = 0; m < k; ++m)
-            p_v[m] = 0.0;
+        v_factor = 1.0;
         p_s = 0.0;
         p_t = 0.0;
     }
     else
     {
         double scale = (z + r_norm) / (2.0 * r_norm);
-        for (int m = 0; m < k; ++m)
-            p_v[m] = scale * v[m];
+        v_factor = 1.0 - scale;
         double w_new = scale * w;
         double z_new = scale * r_norm;
         p_s = (z_new + w_new) * INV_SQRT2;
@@ -859,7 +853,10 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
     }
 
     for (int m = 0; m < k; ++m)
-        dual_residual[start + m] = (v[m] - p_v[m]) * variable_rescaling[start + m];
+    {
+        double v_m = objective_vector[start + m] - dual_product[start + m];
+        dual_residual[start + m] = v_m * v_factor * variable_rescaling[start + m];
+    }
     dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k];
     dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1];
 }

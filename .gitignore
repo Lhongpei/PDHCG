@@ -65,3 +65,4 @@ test/*
 *.pyc
 *.tar.gz
 docs/README.md
+build_cu132/*
