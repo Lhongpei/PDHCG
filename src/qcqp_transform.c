@@ -15,9 +15,11 @@ You may obtain a copy of the License at
 #include <stdlib.h>
 #include <string.h>
 
-static int extract_diag_psd(const CsrComponent *Q, int n, int nnz_max, int *out_cols, double *out_vals)
+static int
+extract_diag_signed(const CsrComponent *Q, int n, int nnz_max, int *out_cols, double *out_vals, int *sign_out)
 {
     int count = 0;
+    int sign = 0;
     for (int row = 0; row < n; ++row)
     {
         int start = Q->row_ptr[row];
@@ -28,17 +30,21 @@ static int extract_diag_psd(const CsrComponent *Q, int n, int nnz_max, int *out_
             double val = Q->val[k];
             if (col != row)
                 return -1;
-            if (val < 0.0)
-                return -1;
             if (val == 0.0)
                 continue;
+            int s = (val > 0.0) ? +1 : -1;
+            if (sign == 0)
+                sign = s;
+            else if (sign != s)
+                return -1;
             if (count >= nnz_max)
                 return -1;
             out_cols[count] = col;
-            out_vals[count] = val;
+            out_vals[count] = (val > 0.0) ? val : -val;
             count++;
         }
     }
+    *sign_out = sign;
     return count;
 }
 
@@ -59,6 +65,8 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     int *block_k = (int *)safe_malloc(K * sizeof(int));
     int **block_cols = (int **)safe_malloc(K * sizeof(int *));
     double **block_sqrt = (double **)safe_malloc(K * sizeof(double *));
+    int *block_flip = (int *)safe_calloc(K, sizeof(int));
+    double *block_b = (double *)safe_malloc(K * sizeof(double));
     long total_v = 0;
     for (int i = 0; i < K; ++i)
     {
@@ -66,12 +74,13 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
         int nnz = orig->quadratic_constraint_matrix_num_nonzeros[i];
         int *cols = (int *)safe_malloc((nnz > 0 ? nnz : 1) * sizeof(int));
         double *qjj = (double *)safe_malloc((nnz > 0 ? nnz : 1) * sizeof(double));
-        int k = extract_diag_psd(Q, n_orig, nnz, cols, qjj);
+        int sign = 0;
+        int k = extract_diag_signed(Q, n_orig, nnz, cols, qjj, &sign);
         if (k < 0)
         {
             fprintf(stderr,
-                    "[qcqp_to_socp_qp] Q_%d is non-diagonal or non-PSD; "
-                    "Phase 2A fast path requires diagonal PSD Q.\n",
+                    "[qcqp_to_socp_qp] Q_%d is non-diagonal or has mixed signs; "
+                    "diagonal PSD (or all-NSD with >= sense) required.\n",
                     i);
             free(cols);
             free(qjj);
@@ -83,38 +92,78 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
             free(block_k);
             free(block_cols);
             free(block_sqrt);
+            free(block_flip);
+            free(block_b);
             return NULL;
         }
+
+        int row = orig->quadratic_constraint_row_indices[i];
+        double lhs = orig->constraint_lower_bound[row];
+        double rhs = orig->constraint_upper_bound[row];
+        int flip = 0;
+        double b_eff = 0.0;
+        if (sign >= 0)
+        {
+            if (isfinite(lhs) || !isfinite(rhs))
+            {
+                fprintf(stderr,
+                        "[qcqp_to_socp_qp] QC row %d (Q PSD) requires one-sided <= "
+                        "(lhs=-inf, rhs finite); got lhs=%.3g rhs=%.3g.\n",
+                        row,
+                        lhs,
+                        rhs);
+                free(cols);
+                free(qjj);
+                for (int j = 0; j < i; ++j)
+                {
+                    free(block_cols[j]);
+                    free(block_sqrt[j]);
+                }
+                free(block_k);
+                free(block_cols);
+                free(block_sqrt);
+                free(block_flip);
+                free(block_b);
+                return NULL;
+            }
+            b_eff = rhs;
+        }
+        else
+        {
+            if (!isfinite(lhs) || isfinite(rhs))
+            {
+                fprintf(stderr,
+                        "[qcqp_to_socp_qp] QC row %d (Q NSD) requires one-sided >= "
+                        "(lhs finite, rhs=+inf); got lhs=%.3g rhs=%.3g.\n",
+                        row,
+                        lhs,
+                        rhs);
+                free(cols);
+                free(qjj);
+                for (int j = 0; j < i; ++j)
+                {
+                    free(block_cols[j]);
+                    free(block_sqrt[j]);
+                }
+                free(block_k);
+                free(block_cols);
+                free(block_sqrt);
+                free(block_flip);
+                free(block_b);
+                return NULL;
+            }
+            flip = 1;
+            b_eff = -lhs;
+        }
+
         for (int m = 0; m < k; ++m)
             qjj[m] = sqrt(2.0 * qjj[m]);
         block_k[i] = k;
         block_cols[i] = cols;
         block_sqrt[i] = qjj;
+        block_flip[i] = flip;
+        block_b[i] = b_eff;
         total_v += k;
-    }
-
-    for (int i = 0; i < K; ++i)
-    {
-        int row = orig->quadratic_constraint_row_indices[i];
-        double lhs = orig->constraint_lower_bound[row];
-        double rhs = orig->constraint_upper_bound[row];
-        if (isfinite(lhs))
-        {
-            fprintf(stderr,
-                    "[qcqp_to_socp_qp] QC row %d has finite lower bound "
-                    "(%.3g); Phase 2A requires one-sided <= constraints.\n",
-                    row,
-                    lhs);
-            goto fail_free_blocks;
-        }
-        if (!isfinite(rhs))
-        {
-            fprintf(stderr,
-                    "[qcqp_to_socp_qp] QC row %d has +inf upper bound; "
-                    "quadratic <= constraint requires finite rhs.\n",
-                    row);
-            goto fail_free_blocks;
-        }
     }
 
     long n_ext = (long)n_orig + total_v + 2L * K;
@@ -172,9 +221,8 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     for (int i = 0; i < K; ++i)
     {
         int row = orig->quadratic_constraint_row_indices[i];
-        double rhs = orig->constraint_upper_bound[row];
-        out->constraint_lower_bound[row] = rhs;
-        out->constraint_upper_bound[row] = rhs;
+        out->constraint_lower_bound[row] = block_b[i];
+        out->constraint_upper_bound[row] = block_b[i];
     }
     for (long r = m_orig; r < m_orig + total_v; ++r)
     {
@@ -226,13 +274,14 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
         int dst = row_ptr_ext[r];
         int s = A_orig->row_ptr[r];
         int e = A_orig->row_ptr[r + 1];
+        int blk = qc_row_to_block[r];
+        double scale = (blk >= 0 && block_flip[blk]) ? -1.0 : 1.0;
         for (int k = s; k < e; ++k)
         {
             col_ind_ext[dst] = A_orig->col_ind[k];
-            val_ext[dst] = A_orig->val[k];
+            val_ext[dst] = scale * A_orig->val[k];
             dst++;
         }
-        int blk = qc_row_to_block[r];
         if (blk >= 0)
         {
             int s_col = out->cone_block_start_idx[blk] + out->cone_block_v_dim[blk];
@@ -357,6 +406,8 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     free(block_k);
     free(block_cols);
     free(block_sqrt);
+    free(block_flip);
+    free(block_b);
 
     return out;
 
@@ -369,5 +420,7 @@ fail_free_blocks:
     free(block_k);
     free(block_cols);
     free(block_sqrt);
+    free(block_flip);
+    free(block_b);
     return NULL;
 }

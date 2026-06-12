@@ -216,7 +216,9 @@ void lp_primal_update(pdhg_solver_state_t *state, double step_size)
 
 void diag_q_primal_update(pdhg_solver_state_t *state, double step_size)
 {
-    if (state->is_this_major_iteration || ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0)
+    bool force_major_for_cone = state->num_cone_blocks > 0;
+    if (state->is_this_major_iteration ||
+        ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0 || force_major_for_cone)
     {
         compute_diagonal_q_next_pdhg_primal_solution_major_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
             state->current_primal_solution,
