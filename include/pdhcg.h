@@ -40,7 +40,7 @@ extern "C"
     // Set up initial primal and dual solution for an qp_problem_t
     void set_start_values(qp_problem_t *prob, const double *primal, const double *dual);
 
-    qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig_qcqp, soc_formulation_t formulation);
+    qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig_qcqp, cone_type_t default_type);
 
     // solve the LP problem using PDHG
     pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters_t *params);

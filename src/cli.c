@@ -296,9 +296,9 @@ int run_pdhcg(int argc, char *argv[])
                 break;
             case 1020:
                 if (strcmp(optarg, "rotated") == 0)
-                    params.soc_formulation = SOC_ROTATED;
+                    params.default_cone_type = CONE_ROTATED_SOC;
                 else if (strcmp(optarg, "standard") == 0)
-                    params.soc_formulation = SOC_STANDARD;
+                    params.default_cone_type = CONE_STANDARD_SOC;
                 else
                 {
                     fprintf(stderr, "Error: soc_form must be 'rotated' or 'standard'\n");

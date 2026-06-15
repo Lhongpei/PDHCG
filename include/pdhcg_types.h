@@ -62,9 +62,19 @@ extern "C"
 
     typedef enum
     {
-        SOC_ROTATED = 0,
-        SOC_STANDARD = 1
-    } soc_formulation_t;
+        CONE_ROTATED_SOC = 0,
+        CONE_STANDARD_SOC = 1,
+        /* CONE_EXPONENTIAL = 2, */
+        NUM_CONE_TYPES = 2
+    } cone_type_t;
+
+    typedef struct
+    {
+        int num_cones;
+        int *start_idx;    /* [num_cones] */
+        int *v_dim;        /* [num_cones] */
+        cone_type_t *type; /* [num_cones] */
+    } cone_blocks_t;
 
     typedef struct
     {
@@ -96,10 +106,7 @@ extern "C"
         CsrComponent **quadratic_constraint_matrices;
         int *quadratic_constraint_matrix_num_nonzeros;
 
-        int num_cone_blocks;
-        int *cone_block_start_idx;
-        int *cone_block_v_dim;
-        soc_formulation_t soc_formulation;
+        cone_blocks_t cones;
         int num_original_variables;
 
         double *primal_start;
@@ -172,7 +179,7 @@ extern "C"
         inner_solver_parameters_t inner_solver_parameters;
         bool presolve;
         bool diag_jacobi_precond;
-        soc_formulation_t soc_formulation;
+        cone_type_t default_cone_type;
         partition_method_t partition_method;
         permute_method_t permute_method;
         grid_size_t grid_size;

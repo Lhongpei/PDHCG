@@ -110,18 +110,20 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
         }
     }
 
-    new_prob->num_cone_blocks = prob->num_cone_blocks;
-    new_prob->soc_formulation = prob->soc_formulation;
+    new_prob->cones.num_cones = prob->cones.num_cones;
     new_prob->num_original_variables = prob->num_original_variables;
-    new_prob->cone_block_start_idx = NULL;
-    new_prob->cone_block_v_dim = NULL;
-    if (prob->num_cone_blocks > 0)
+    new_prob->cones.start_idx = NULL;
+    new_prob->cones.v_dim = NULL;
+    new_prob->cones.type = NULL;
+    if (prob->cones.num_cones > 0)
     {
-        int K = prob->num_cone_blocks;
-        new_prob->cone_block_start_idx = safe_malloc(K * sizeof(int));
-        new_prob->cone_block_v_dim = safe_malloc(K * sizeof(int));
-        memcpy(new_prob->cone_block_start_idx, prob->cone_block_start_idx, K * sizeof(int));
-        memcpy(new_prob->cone_block_v_dim, prob->cone_block_v_dim, K * sizeof(int));
+        int K = prob->cones.num_cones;
+        new_prob->cones.start_idx = safe_malloc(K * sizeof(int));
+        new_prob->cones.v_dim = safe_malloc(K * sizeof(int));
+        new_prob->cones.type = safe_malloc(K * sizeof(cone_type_t));
+        memcpy(new_prob->cones.start_idx, prob->cones.start_idx, K * sizeof(int));
+        memcpy(new_prob->cones.v_dim, prob->cones.v_dim, K * sizeof(int));
+        memcpy(new_prob->cones.type, prob->cones.type, K * sizeof(cone_type_t));
     }
 
     return new_prob;
@@ -249,14 +251,14 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-        if (problem->num_cone_blocks > 0)
+        if (problem->cones.num_cones > 0)
         {
-            if (problem->soc_formulation == SOC_STANDARD)
+            for (int blk = 0; blk < problem->cones.num_cones; ++blk)
             {
-                for (int blk = 0; blk < problem->num_cone_blocks; ++blk)
+                if (problem->cones.type[blk] == CONE_STANDARD_SOC)
                 {
-                    int s = problem->cone_block_start_idx[blk];
-                    int len = problem->cone_block_v_dim[blk] + 2;
+                    int s = problem->cones.start_idx[blk];
+                    int len = problem->cones.v_dim[blk] + 2;
                     double sum_log = 0.0;
                     for (int i = 0; i < len; ++i)
                         sum_log += log(var_rescale[s + i]);
@@ -325,14 +327,14 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
     for (int i = 0; i < num_cons; ++i)
         con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-    if (problem->num_cone_blocks > 0)
+    if (problem->cones.num_cones > 0)
     {
-        if (problem->soc_formulation == SOC_STANDARD)
+        for (int blk = 0; blk < problem->cones.num_cones; ++blk)
         {
-            for (int blk = 0; blk < problem->num_cone_blocks; ++blk)
+            if (problem->cones.type[blk] == CONE_STANDARD_SOC)
             {
-                int s = problem->cone_block_start_idx[blk];
-                int len = problem->cone_block_v_dim[blk] + 2;
+                int s = problem->cones.start_idx[blk];
+                int len = problem->cones.v_dim[blk] + 2;
                 double sum_log = 0.0;
                 for (int i = 0; i < len; ++i)
                     sum_log += log(var_rescale[s + i]);

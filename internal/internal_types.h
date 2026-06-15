@@ -188,8 +188,8 @@ typedef struct
     cusparseDnVecDescr_t vec_primal_prod;
     cusparseDnVecDescr_t vec_dual_prod;
 
-    double *ones_primal_d;
-    double *ones_dual_d;
+    double *ones_primal;
+    double *ones_dual;
 
     double feasibility_polishing_time;
     int feasibility_iteration;
@@ -199,15 +199,30 @@ typedef struct
     grid_context_t *grid_context;
 
     int num_cone_blocks;
-    int *cone_block_start_idx_d;
-    int *cone_block_v_dim_d;
-    soc_formulation_t soc_formulation;
-    double *cone_warm_start_primal_d;
-    double *cone_warm_start_dual_d;
-    int cone_max_v_dim;
-    int num_small_cones;
+    int *cone_start_idx; /* [num_cone_blocks], permuted by bucket */
+    int *cone_v_dim;     /* [num_cone_blocks], permuted by bucket */
+    double *cone_warm_start_primal;
+    double *cone_warm_start_dual;
+    struct cone_bucket_s *cone_buckets; /* [num_cone_buckets] */
+    int num_cone_buckets;
     int num_original_variables;
 } pdhg_solver_state_t;
+
+typedef enum
+{
+    PROJ_METHOD_THREAD = 0, /* 1 thread / cone */
+    PROJ_METHOD_WARP = 1,   /* 1 warp / cone (32 threads) */
+    /* PROJ_METHOD_BLOCK = 2, */
+    NUM_PROJ_METHODS = 2
+} cone_proj_method_t;
+
+typedef struct cone_bucket_s
+{
+    cone_type_t type;
+    cone_proj_method_t method;
+    int offset; /* start within permuted cone arrays */
+    int count;  /* number of cones in this bucket */
+} cone_bucket_t;
 
 typedef enum
 {

@@ -389,9 +389,10 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->quadratic_constraint_matrices = NULL;
     prob->quadratic_constraint_matrix_num_nonzeros = NULL;
 
-    prob->num_cone_blocks = 0;
-    prob->cone_block_start_idx = NULL;
-    prob->cone_block_v_dim = NULL;
+    prob->cones.num_cones = 0;
+    prob->cones.start_idx = NULL;
+    prob->cones.v_dim = NULL;
+    prob->cones.type = NULL;
     prob->num_original_variables = 0;
 
     return prob;
@@ -444,8 +445,9 @@ void qp_problem_free(qp_problem_t *prob)
     }
     free(prob->quadratic_constraint_row_indices);
     free(prob->quadratic_constraint_matrix_num_nonzeros);
-    free(prob->cone_block_start_idx);
-    free(prob->cone_block_v_dim);
+    free(prob->cones.start_idx);
+    free(prob->cones.v_dim);
+    free(prob->cones.type);
     memset(prob, 0, sizeof(*prob));
     free(prob);
 }

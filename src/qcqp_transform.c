@@ -48,7 +48,7 @@ extract_diag_signed(const CsrComponent *Q, int n, int nnz_max, int *out_cols, do
     return count;
 }
 
-qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, soc_formulation_t formulation)
+qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type)
 {
     if (!orig)
         return NULL;
@@ -61,7 +61,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, soc_formulation_t formul
     int n_orig = orig->num_variables;
     int m_orig = orig->num_constraints;
     int K = orig->num_quadratic_constraints;
-    const bool is_std = (formulation == SOC_STANDARD);
+    const bool is_std = (default_type == CONE_STANDARD_SOC);
     const double SQRT2 = 1.4142135623730951;
 
     int *block_k = (int *)safe_malloc(K * sizeof(int));
@@ -191,18 +191,19 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, soc_formulation_t formul
     memcpy(out->variable_lower_bound, orig->variable_lower_bound, n_orig * sizeof(double));
     memcpy(out->variable_upper_bound, orig->variable_upper_bound, n_orig * sizeof(double));
 
-    out->num_cone_blocks = K;
-    out->cone_block_start_idx = (int *)safe_malloc(K * sizeof(int));
-    out->cone_block_v_dim = (int *)safe_malloc(K * sizeof(int));
-    out->soc_formulation = formulation;
+    out->cones.num_cones = K;
+    out->cones.start_idx = (int *)safe_malloc(K * sizeof(int));
+    out->cones.v_dim = (int *)safe_malloc(K * sizeof(int));
+    out->cones.type = (cone_type_t *)safe_malloc(K * sizeof(cone_type_t));
     out->num_original_variables = n_orig;
     {
         long idx = n_orig;
         for (int i = 0; i < K; ++i)
         {
             int k = block_k[i];
-            out->cone_block_start_idx[i] = (int)idx;
-            out->cone_block_v_dim[i] = k;
+            out->cones.start_idx[i] = (int)idx;
+            out->cones.v_dim[i] = k;
+            out->cones.type[i] = default_type;
             for (int m = 0; m < k; ++m)
             {
                 out->variable_lower_bound[idx] = -INFINITY;
@@ -294,7 +295,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, soc_formulation_t formul
         }
         if (blk >= 0)
         {
-            int aux0 = out->cone_block_start_idx[blk] + out->cone_block_v_dim[blk];
+            int aux0 = out->cones.start_idx[blk] + out->cones.v_dim[blk];
             col_ind_ext[dst] = aux0;
             val_ext[dst] = 1.0;
             dst++;
@@ -309,7 +310,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, soc_formulation_t formul
     extra_row = m_orig;
     for (int i = 0; i < K; ++i)
     {
-        int v_start = out->cone_block_start_idx[i];
+        int v_start = out->cones.start_idx[i];
         for (int m = 0; m < block_k[i]; ++m)
         {
             int dst = row_ptr_ext[extra_row];
@@ -323,7 +324,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, soc_formulation_t formul
     }
     for (int i = 0; i < K; ++i)
     {
-        int aux0 = out->cone_block_start_idx[i] + out->cone_block_v_dim[i];
+        int aux0 = out->cones.start_idx[i] + out->cones.v_dim[i];
         int dst = row_ptr_ext[extra_row];
         if (is_std)
         {

@@ -41,7 +41,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
     qp_problem_t *transformed = NULL;
     if (original_problem->num_quadratic_constraints > 0)
     {
-        transformed = qcqp_to_socp_qp(original_problem, params->soc_formulation);
+        transformed = qcqp_to_socp_qp(original_problem, params->default_cone_type);
         if (!transformed)
         {
             fprintf(stderr, "Error: QCQP -> SOCP transformation failed; cannot solve.\n");
@@ -49,13 +49,13 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
         }
         if (params->verbose >= 1)
         {
-            const char *form_name = (params->soc_formulation == SOC_STANDARD) ? "standard" : "rotated";
+            const char *form_name = (params->default_cone_type == CONE_STANDARD_SOC) ? "standard" : "rotated";
             fprintf(stderr,
                     "[QCQP] %d quadratic constraint(s) reformulated as %d "
                     "%s SOC block(s); extended problem: %d vars, "
                     "%d rows, %d nnz.\n",
                     original_problem->num_quadratic_constraints,
-                    transformed->num_cone_blocks,
+                    transformed->cones.num_cones,
                     form_name,
                     transformed->num_variables,
                     transformed->num_constraints,
@@ -187,7 +187,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
     {
         int n_orig = transformed->num_original_variables;
         int m_ext = transformed->num_constraints;
-        int m_orig = m_ext - (transformed->num_variables - n_orig - 2 * transformed->num_cone_blocks);
+        int m_orig = m_ext - (transformed->num_variables - n_orig - 2 * transformed->cones.num_cones);
 
         if (n_orig > 0 && n_orig < result->num_variables)
         {
