@@ -1630,6 +1630,1005 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
     dual_residual[start + k + 1] = (r_z - p_z) * variable_rescaling[start + k + 1];
 }
 
+__global__ void project_rotated_soc_warp_kernel(double *__restrict__ primal_solution,
+                                                const double *__restrict__ variable_rescaling,
+                                                double *__restrict__ warm_start,
+                                                const int *__restrict__ start_idx,
+                                                const int *__restrict__ v_dim,
+                                                int num_blocks)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int blk = tid >> 5;
+    int lane = tid & 31;
+    if (blk >= num_blocks)
+        return;
+
+    const double INV_SQRT2 = 0.7071067811865475;
+    const unsigned MASK = 0xffffffffu;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+
+    double s_val = primal_solution[start + k];
+    double t_val = primal_solution[start + k + 1];
+    double w = (s_val - t_val) * INV_SQRT2;
+    double z = (s_val + t_val) * INV_SQRT2;
+
+    double d_s = variable_rescaling[start + k];
+    double d_t = variable_rescaling[start + k + 1];
+    double d_st = sqrt(d_s * d_t);
+
+    int my_diff = 0;
+    for (int m = lane; m < k; m += 32)
+    {
+        if (variable_rescaling[start + m] != d_st)
+            my_diff = 1;
+    }
+    for (int o = 16; o > 0; o >>= 1)
+        my_diff |= __shfl_xor_sync(MASK, my_diff, o);
+
+    if (my_diff == 0)
+    {
+        double my_sumsq = (lane == 0) ? w * w : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double v_m = primal_solution[start + m];
+            my_sumsq += v_m * v_m;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sumsq += __shfl_xor_sync(MASK, my_sumsq, o);
+        double r = sqrt(my_sumsq);
+        if (r <= z)
+            return;
+        if (r <= -z)
+        {
+            for (int m = lane; m < k; m += 32)
+                primal_solution[start + m] = 0.0;
+            if (lane == 0)
+            {
+                primal_solution[start + k] = 0.0;
+                primal_solution[start + k + 1] = 0.0;
+            }
+            return;
+        }
+        double scale = (z + r) / (2.0 * r);
+        for (int m = lane; m < k; m += 32)
+            primal_solution[start + m] *= scale;
+        double w_new = scale * w;
+        double z_new = scale * r;
+        if (lane == 0)
+        {
+            primal_solution[start + k] = (z_new + w_new) * INV_SQRT2;
+            primal_solution[start + k + 1] = (z_new - w_new) * INV_SQRT2;
+        }
+        return;
+    }
+
+    double my_inv = (lane == 0) ? w * w : 0.0;
+    double my_pos = (lane == 0) ? w * w : 0.0;
+    for (int m = lane; m < k; m += 32)
+    {
+        double dh = variable_rescaling[start + m] / d_st;
+        double v_m = primal_solution[start + m];
+        my_inv += (v_m / dh) * (v_m / dh);
+        my_pos += (v_m * dh) * (v_m * dh);
+    }
+    for (int o = 16; o > 0; o >>= 1)
+    {
+        my_inv += __shfl_xor_sync(MASK, my_inv, o);
+        my_pos += __shfl_xor_sync(MASK, my_pos, o);
+    }
+    double r_inv = sqrt(my_inv);
+    if (r_inv <= z)
+        return;
+    double r_pos = sqrt(my_pos);
+    if (r_pos <= -z)
+    {
+        for (int m = lane; m < k; m += 32)
+            primal_solution[start + m] = 0.0;
+        if (lane == 0)
+        {
+            primal_solution[start + k] = 0.0;
+            primal_solution[start + k + 1] = 0.0;
+        }
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double my_sum = (lane == 0) ? (w / (1.0 + 2.0 * hi)) * (w / (1.0 + 2.0 * hi)) : 0.0;
+            for (int m = lane; m < k; m += 32)
+            {
+                double dh = variable_rescaling[start + m] / d_st;
+                double dh2 = dh * dh;
+                double tt = primal_solution[start + m] * dh / (dh2 + 2.0 * hi);
+                my_sum += tt * tt;
+            }
+            for (int o = 16; o > 0; o >>= 1)
+                my_sum += __shfl_xor_sync(MASK, my_sum, o);
+            double zt_hi = z / (1.0 - 2.0 * hi);
+            double f_hi = my_sum - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double my_sum = (lane == 0) ? (w / (1.0 + 2.0 * warm_lam)) * (w / (1.0 + 2.0 * warm_lam)) : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double dh = variable_rescaling[start + m] / d_st;
+            double dh2 = dh * dh;
+            double tt = primal_solution[start + m] * dh / (dh2 + 2.0 * warm_lam);
+            my_sum += tt * tt;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sum += __shfl_xor_sync(MASK, my_sum, o);
+        double zt = z / (1.0 - 2.0 * warm_lam);
+        double f = my_sum - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            double w_new = w / (1.0 + 2.0 * warm_lam);
+            double z_new = z / (1.0 - 2.0 * warm_lam);
+            for (int m = lane; m < k; m += 32)
+            {
+                double dh = variable_rescaling[start + m] / d_st;
+                double dh2 = dh * dh;
+                primal_solution[start + m] = primal_solution[start + m] * dh2 / (dh2 + 2.0 * warm_lam);
+            }
+            if (lane == 0)
+            {
+                primal_solution[start + k] = (z_new + w_new) * INV_SQRT2;
+                primal_solution[start + k + 1] = (z_new - w_new) * INV_SQRT2;
+            }
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double my_sum = (lane == 0) ? (w / (1.0 + 2.0 * lam)) * (w / (1.0 + 2.0 * lam)) : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double dh = variable_rescaling[start + m] / d_st;
+            double dh2 = dh * dh;
+            double tt = primal_solution[start + m] * dh / (dh2 + 2.0 * lam);
+            my_sum += tt * tt;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sum += __shfl_xor_sync(MASK, my_sum, o);
+        double zt = z / (1.0 - 2.0 * lam);
+        double f = my_sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    if (lane == 0)
+        warm_start[blk] = lam;
+
+    double w_new = w / (1.0 + 2.0 * lam);
+    double z_new = z / (1.0 - 2.0 * lam);
+    for (int m = lane; m < k; m += 32)
+    {
+        double dh = variable_rescaling[start + m] / d_st;
+        double dh2 = dh * dh;
+        primal_solution[start + m] = primal_solution[start + m] * dh2 / (dh2 + 2.0 * lam);
+    }
+    if (lane == 0)
+    {
+        primal_solution[start + k] = (z_new + w_new) * INV_SQRT2;
+        primal_solution[start + k + 1] = (z_new - w_new) * INV_SQRT2;
+    }
+}
+
+__global__ void compute_cone_dual_residual_warp_kernel(double *__restrict__ dual_residual,
+                                                       const double *__restrict__ objective_vector,
+                                                       const double *__restrict__ dual_product,
+                                                       const double *__restrict__ variable_rescaling,
+                                                       double *__restrict__ warm_start,
+                                                       const int *__restrict__ start_idx,
+                                                       const int *__restrict__ v_dim,
+                                                       int num_blocks)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int blk = tid >> 5;
+    int lane = tid & 31;
+    if (blk >= num_blocks)
+        return;
+
+    const double INV_SQRT2 = 0.7071067811865475;
+    const unsigned MASK = 0xffffffffu;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+
+    double r_s = objective_vector[start + k] - dual_product[start + k];
+    double r_t = objective_vector[start + k + 1] - dual_product[start + k + 1];
+    double r_w = (r_s - r_t) * INV_SQRT2;
+    double r_z = (r_s + r_t) * INV_SQRT2;
+
+    double d_s = variable_rescaling[start + k];
+    double d_t = variable_rescaling[start + k + 1];
+    double d_st = sqrt(d_s * d_t);
+
+    int my_diff = 0;
+    for (int m = lane; m < k; m += 32)
+    {
+        if (variable_rescaling[start + m] != d_st)
+            my_diff = 1;
+    }
+    for (int o = 16; o > 0; o >>= 1)
+        my_diff |= __shfl_xor_sync(MASK, my_diff, o);
+
+    if (my_diff == 0)
+    {
+        double my_sumsq = (lane == 0) ? r_w * r_w : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            my_sumsq += rc_m * rc_m;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sumsq += __shfl_xor_sync(MASK, my_sumsq, o);
+        double r_norm = sqrt(my_sumsq);
+
+        double v_factor, p_s, p_t;
+        if (r_norm <= r_z)
+        {
+            v_factor = 0.0;
+            p_s = r_s;
+            p_t = r_t;
+        }
+        else if (r_norm <= -r_z)
+        {
+            v_factor = 1.0;
+            p_s = 0.0;
+            p_t = 0.0;
+        }
+        else
+        {
+            double scale = (r_z + r_norm) / (2.0 * r_norm);
+            v_factor = 1.0 - scale;
+            double w_new = scale * r_w;
+            double z_new = scale * r_norm;
+            p_s = (z_new + w_new) * INV_SQRT2;
+            p_t = (z_new - w_new) * INV_SQRT2;
+        }
+
+        for (int m = lane; m < k; m += 32)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            dual_residual[start + m] = rc_m * v_factor * variable_rescaling[start + m];
+        }
+        if (lane == 0)
+        {
+            dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k];
+            dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1];
+        }
+        return;
+    }
+
+    double my_inv = (lane == 0) ? r_w * r_w : 0.0;
+    double my_pos = (lane == 0) ? r_w * r_w : 0.0;
+    for (int m = lane; m < k; m += 32)
+    {
+        double e_m = d_st / variable_rescaling[start + m];
+        double rc_m = objective_vector[start + m] - dual_product[start + m];
+        my_inv += (rc_m / e_m) * (rc_m / e_m);
+        my_pos += (rc_m * e_m) * (rc_m * e_m);
+    }
+    for (int o = 16; o > 0; o >>= 1)
+    {
+        my_inv += __shfl_xor_sync(MASK, my_inv, o);
+        my_pos += __shfl_xor_sync(MASK, my_pos, o);
+    }
+    double r_inv = sqrt(my_inv);
+    double r_pos = sqrt(my_pos);
+
+    if (r_inv <= r_z)
+    {
+        for (int m = lane; m < k; m += 32)
+            dual_residual[start + m] = 0.0;
+        if (lane == 0)
+        {
+            dual_residual[start + k] = 0.0;
+            dual_residual[start + k + 1] = 0.0;
+        }
+        return;
+    }
+    if (r_pos <= -r_z)
+    {
+        for (int m = lane; m < k; m += 32)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            dual_residual[start + m] = rc_m * variable_rescaling[start + m];
+        }
+        if (lane == 0)
+        {
+            dual_residual[start + k] = r_s * variable_rescaling[start + k];
+            dual_residual[start + k + 1] = r_t * variable_rescaling[start + k + 1];
+        }
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (r_z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double my_sum = (lane == 0) ? (r_w / (1.0 + 2.0 * hi)) * (r_w / (1.0 + 2.0 * hi)) : 0.0;
+            for (int m = lane; m < k; m += 32)
+            {
+                double e_m = d_st / variable_rescaling[start + m];
+                double e_m2 = e_m * e_m;
+                double rc_m = objective_vector[start + m] - dual_product[start + m];
+                double tt = rc_m * e_m / (e_m2 + 2.0 * hi);
+                my_sum += tt * tt;
+            }
+            for (int o = 16; o > 0; o >>= 1)
+                my_sum += __shfl_xor_sync(MASK, my_sum, o);
+            double zt_hi = r_z / (1.0 - 2.0 * hi);
+            double f_hi = my_sum - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double my_sum = (lane == 0) ? (r_w / (1.0 + 2.0 * warm_lam)) * (r_w / (1.0 + 2.0 * warm_lam)) : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double e_m = d_st / variable_rescaling[start + m];
+            double e_m2 = e_m * e_m;
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            double tt = rc_m * e_m / (e_m2 + 2.0 * warm_lam);
+            my_sum += tt * tt;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sum += __shfl_xor_sync(MASK, my_sum, o);
+        double zt = r_z / (1.0 - 2.0 * warm_lam);
+        double f = my_sum - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            double p_w_w = r_w / (1.0 + 2.0 * warm_lam);
+            double p_z_w = r_z / (1.0 - 2.0 * warm_lam);
+            double p_s_w = (p_z_w + p_w_w) * INV_SQRT2;
+            double p_t_w = (p_z_w - p_w_w) * INV_SQRT2;
+            for (int m = lane; m < k; m += 32)
+            {
+                double e_m = d_st / variable_rescaling[start + m];
+                double e_m2 = e_m * e_m;
+                double rc_m = objective_vector[start + m] - dual_product[start + m];
+                double p_m = rc_m * e_m2 / (e_m2 + 2.0 * warm_lam);
+                dual_residual[start + m] = (rc_m - p_m) * variable_rescaling[start + m];
+            }
+            if (lane == 0)
+            {
+                dual_residual[start + k] = (r_s - p_s_w) * variable_rescaling[start + k];
+                dual_residual[start + k + 1] = (r_t - p_t_w) * variable_rescaling[start + k + 1];
+            }
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double my_sum = (lane == 0) ? (r_w / (1.0 + 2.0 * lam)) * (r_w / (1.0 + 2.0 * lam)) : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double e_m = d_st / variable_rescaling[start + m];
+            double e_m2 = e_m * e_m;
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            double tt = rc_m * e_m / (e_m2 + 2.0 * lam);
+            my_sum += tt * tt;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sum += __shfl_xor_sync(MASK, my_sum, o);
+        double zt = r_z / (1.0 - 2.0 * lam);
+        double f = my_sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    if (lane == 0)
+        warm_start[blk] = lam;
+
+    double p_w = r_w / (1.0 + 2.0 * lam);
+    double p_z = r_z / (1.0 - 2.0 * lam);
+    double p_s = (p_z + p_w) * INV_SQRT2;
+    double p_t = (p_z - p_w) * INV_SQRT2;
+
+    for (int m = lane; m < k; m += 32)
+    {
+        double e_m = d_st / variable_rescaling[start + m];
+        double e_m2 = e_m * e_m;
+        double rc_m = objective_vector[start + m] - dual_product[start + m];
+        double p_m = rc_m * e_m2 / (e_m2 + 2.0 * lam);
+        dual_residual[start + m] = (rc_m - p_m) * variable_rescaling[start + m];
+    }
+    if (lane == 0)
+    {
+        dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k];
+        dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1];
+    }
+}
+
+__global__ void project_standard_soc_warp_kernel(double *__restrict__ primal_solution,
+                                                 const double *__restrict__ variable_rescaling,
+                                                 double *__restrict__ warm_start,
+                                                 const int *__restrict__ start_idx,
+                                                 const int *__restrict__ v_dim,
+                                                 int num_blocks)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int blk = tid >> 5;
+    int lane = tid & 31;
+    if (blk >= num_blocks)
+        return;
+
+    const unsigned MASK = 0xffffffffu;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+
+    double w = primal_solution[start + k];
+    double z = primal_solution[start + k + 1];
+
+    double d_z = variable_rescaling[start + k + 1];
+    double dhat_w = variable_rescaling[start + k] / d_z;
+    double dhat_w2 = dhat_w * dhat_w;
+
+    int my_diff = (lane == 0 && dhat_w != 1.0) ? 1 : 0;
+    for (int m = lane; m < k; m += 32)
+    {
+        if (variable_rescaling[start + m] != d_z)
+            my_diff = 1;
+    }
+    for (int o = 16; o > 0; o >>= 1)
+        my_diff |= __shfl_xor_sync(MASK, my_diff, o);
+
+    if (my_diff == 0)
+    {
+        double my_sumsq = (lane == 0) ? w * w : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double v_m = primal_solution[start + m];
+            my_sumsq += v_m * v_m;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sumsq += __shfl_xor_sync(MASK, my_sumsq, o);
+        double r = sqrt(my_sumsq);
+        if (r <= z)
+            return;
+        if (r <= -z)
+        {
+            for (int m = lane; m < k; m += 32)
+                primal_solution[start + m] = 0.0;
+            if (lane == 0)
+            {
+                primal_solution[start + k] = 0.0;
+                primal_solution[start + k + 1] = 0.0;
+            }
+            return;
+        }
+        double scale = (z + r) / (2.0 * r);
+        for (int m = lane; m < k; m += 32)
+            primal_solution[start + m] *= scale;
+        if (lane == 0)
+        {
+            primal_solution[start + k] = scale * w;
+            primal_solution[start + k + 1] = scale * r;
+        }
+        return;
+    }
+
+    double my_inv = (lane == 0) ? (w / dhat_w) * (w / dhat_w) : 0.0;
+    double my_pos = (lane == 0) ? (w * dhat_w) * (w * dhat_w) : 0.0;
+    for (int m = lane; m < k; m += 32)
+    {
+        double dh = variable_rescaling[start + m] / d_z;
+        double v_m = primal_solution[start + m];
+        my_inv += (v_m / dh) * (v_m / dh);
+        my_pos += (v_m * dh) * (v_m * dh);
+    }
+    for (int o = 16; o > 0; o >>= 1)
+    {
+        my_inv += __shfl_xor_sync(MASK, my_inv, o);
+        my_pos += __shfl_xor_sync(MASK, my_pos, o);
+    }
+    double r_inv = sqrt(my_inv);
+    if (r_inv <= z)
+        return;
+    double r_pos = sqrt(my_pos);
+    if (r_pos <= -z)
+    {
+        for (int m = lane; m < k; m += 32)
+            primal_solution[start + m] = 0.0;
+        if (lane == 0)
+        {
+            primal_solution[start + k] = 0.0;
+            primal_solution[start + k + 1] = 0.0;
+        }
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double my_sum =
+                (lane == 0) ? (w * dhat_w / (dhat_w2 + 2.0 * hi)) * (w * dhat_w / (dhat_w2 + 2.0 * hi)) : 0.0;
+            for (int m = lane; m < k; m += 32)
+            {
+                double dh = variable_rescaling[start + m] / d_z;
+                double dh2 = dh * dh;
+                double tt = primal_solution[start + m] * dh / (dh2 + 2.0 * hi);
+                my_sum += tt * tt;
+            }
+            for (int o = 16; o > 0; o >>= 1)
+                my_sum += __shfl_xor_sync(MASK, my_sum, o);
+            double zt_hi = z / (1.0 - 2.0 * hi);
+            double f_hi = my_sum - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double my_sum =
+            (lane == 0) ? (w * dhat_w / (dhat_w2 + 2.0 * warm_lam)) * (w * dhat_w / (dhat_w2 + 2.0 * warm_lam)) : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double dh = variable_rescaling[start + m] / d_z;
+            double dh2 = dh * dh;
+            double tt = primal_solution[start + m] * dh / (dh2 + 2.0 * warm_lam);
+            my_sum += tt * tt;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sum += __shfl_xor_sync(MASK, my_sum, o);
+        double zt = z / (1.0 - 2.0 * warm_lam);
+        double f = my_sum - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            for (int m = lane; m < k; m += 32)
+            {
+                double dh = variable_rescaling[start + m] / d_z;
+                double dh2 = dh * dh;
+                primal_solution[start + m] = primal_solution[start + m] * dh2 / (dh2 + 2.0 * warm_lam);
+            }
+            if (lane == 0)
+            {
+                primal_solution[start + k + 1] = z / (1.0 - 2.0 * warm_lam);
+                primal_solution[start + k] = w * dhat_w2 / (dhat_w2 + 2.0 * warm_lam);
+            }
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double my_sum = (lane == 0) ? (w * dhat_w / (dhat_w2 + 2.0 * lam)) * (w * dhat_w / (dhat_w2 + 2.0 * lam)) : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double dh = variable_rescaling[start + m] / d_z;
+            double dh2 = dh * dh;
+            double tt = primal_solution[start + m] * dh / (dh2 + 2.0 * lam);
+            my_sum += tt * tt;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sum += __shfl_xor_sync(MASK, my_sum, o);
+        double zt = z / (1.0 - 2.0 * lam);
+        double f = my_sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    if (lane == 0)
+        warm_start[blk] = lam;
+
+    for (int m = lane; m < k; m += 32)
+    {
+        double dh = variable_rescaling[start + m] / d_z;
+        double dh2 = dh * dh;
+        primal_solution[start + m] = primal_solution[start + m] * dh2 / (dh2 + 2.0 * lam);
+    }
+    if (lane == 0)
+    {
+        primal_solution[start + k + 1] = z / (1.0 - 2.0 * lam);
+        primal_solution[start + k] = w * dhat_w2 / (dhat_w2 + 2.0 * lam);
+    }
+}
+
+__global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restrict__ dual_residual,
+                                                                const double *__restrict__ objective_vector,
+                                                                const double *__restrict__ dual_product,
+                                                                const double *__restrict__ variable_rescaling,
+                                                                double *__restrict__ warm_start,
+                                                                const int *__restrict__ start_idx,
+                                                                const int *__restrict__ v_dim,
+                                                                int num_blocks)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int blk = tid >> 5;
+    int lane = tid & 31;
+    if (blk >= num_blocks)
+        return;
+
+    const unsigned MASK = 0xffffffffu;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+
+    double r_w = objective_vector[start + k] - dual_product[start + k];
+    double r_z = objective_vector[start + k + 1] - dual_product[start + k + 1];
+
+    double d_z = variable_rescaling[start + k + 1];
+    double e_w = d_z / variable_rescaling[start + k];
+    double e_w2 = e_w * e_w;
+
+    int my_diff = (lane == 0 && e_w != 1.0) ? 1 : 0;
+    for (int m = lane; m < k; m += 32)
+    {
+        if (variable_rescaling[start + m] != d_z)
+            my_diff = 1;
+    }
+    for (int o = 16; o > 0; o >>= 1)
+        my_diff |= __shfl_xor_sync(MASK, my_diff, o);
+
+    if (my_diff == 0)
+    {
+        double my_sumsq = (lane == 0) ? r_w * r_w : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            my_sumsq += rc_m * rc_m;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sumsq += __shfl_xor_sync(MASK, my_sumsq, o);
+        double r = sqrt(my_sumsq);
+        double v_factor, p_w, p_z;
+        if (r <= r_z)
+        {
+            v_factor = 0.0;
+            p_w = r_w;
+            p_z = r_z;
+        }
+        else if (r <= -r_z)
+        {
+            v_factor = 1.0;
+            p_w = 0.0;
+            p_z = 0.0;
+        }
+        else
+        {
+            double scale = (r_z + r) / (2.0 * r);
+            v_factor = 1.0 - scale;
+            p_w = scale * r_w;
+            p_z = scale * r;
+        }
+        for (int m = lane; m < k; m += 32)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            dual_residual[start + m] = rc_m * v_factor * variable_rescaling[start + m];
+        }
+        if (lane == 0)
+        {
+            dual_residual[start + k] = (r_w - p_w) * variable_rescaling[start + k];
+            dual_residual[start + k + 1] = (r_z - p_z) * variable_rescaling[start + k + 1];
+        }
+        return;
+    }
+
+    double my_inv = (lane == 0) ? (r_w / e_w) * (r_w / e_w) : 0.0;
+    double my_pos = (lane == 0) ? (r_w * e_w) * (r_w * e_w) : 0.0;
+    for (int m = lane; m < k; m += 32)
+    {
+        double e_m = d_z / variable_rescaling[start + m];
+        double rc_m = objective_vector[start + m] - dual_product[start + m];
+        my_inv += (rc_m / e_m) * (rc_m / e_m);
+        my_pos += (rc_m * e_m) * (rc_m * e_m);
+    }
+    for (int o = 16; o > 0; o >>= 1)
+    {
+        my_inv += __shfl_xor_sync(MASK, my_inv, o);
+        my_pos += __shfl_xor_sync(MASK, my_pos, o);
+    }
+    double r_inv = sqrt(my_inv);
+    double r_pos = sqrt(my_pos);
+
+    if (r_inv <= r_z)
+    {
+        for (int m = lane; m < k; m += 32)
+            dual_residual[start + m] = 0.0;
+        if (lane == 0)
+        {
+            dual_residual[start + k] = 0.0;
+            dual_residual[start + k + 1] = 0.0;
+        }
+        return;
+    }
+    if (r_pos <= -r_z)
+    {
+        for (int m = lane; m < k; m += 32)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            dual_residual[start + m] = rc_m * variable_rescaling[start + m];
+        }
+        if (lane == 0)
+        {
+            dual_residual[start + k] = r_w * variable_rescaling[start + k];
+            dual_residual[start + k + 1] = r_z * variable_rescaling[start + k + 1];
+        }
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (r_z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double my_sum = (lane == 0) ? (r_w * e_w / (e_w2 + 2.0 * hi)) * (r_w * e_w / (e_w2 + 2.0 * hi)) : 0.0;
+            for (int m = lane; m < k; m += 32)
+            {
+                double e_m = d_z / variable_rescaling[start + m];
+                double e_m2 = e_m * e_m;
+                double rc_m = objective_vector[start + m] - dual_product[start + m];
+                double tt = rc_m * e_m / (e_m2 + 2.0 * hi);
+                my_sum += tt * tt;
+            }
+            for (int o = 16; o > 0; o >>= 1)
+                my_sum += __shfl_xor_sync(MASK, my_sum, o);
+            double zt_hi = r_z / (1.0 - 2.0 * hi);
+            double f_hi = my_sum - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double my_sum =
+            (lane == 0) ? (r_w * e_w / (e_w2 + 2.0 * warm_lam)) * (r_w * e_w / (e_w2 + 2.0 * warm_lam)) : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double e_m = d_z / variable_rescaling[start + m];
+            double e_m2 = e_m * e_m;
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            double tt = rc_m * e_m / (e_m2 + 2.0 * warm_lam);
+            my_sum += tt * tt;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sum += __shfl_xor_sync(MASK, my_sum, o);
+        double zt = r_z / (1.0 - 2.0 * warm_lam);
+        double f = my_sum - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            double p_z_w = r_z / (1.0 - 2.0 * warm_lam);
+            double p_w_w = r_w * e_w2 / (e_w2 + 2.0 * warm_lam);
+            for (int m = lane; m < k; m += 32)
+            {
+                double e_m = d_z / variable_rescaling[start + m];
+                double e_m2 = e_m * e_m;
+                double rc_m = objective_vector[start + m] - dual_product[start + m];
+                double p_m = rc_m * e_m2 / (e_m2 + 2.0 * warm_lam);
+                dual_residual[start + m] = (rc_m - p_m) * variable_rescaling[start + m];
+            }
+            if (lane == 0)
+            {
+                dual_residual[start + k] = (r_w - p_w_w) * variable_rescaling[start + k];
+                dual_residual[start + k + 1] = (r_z - p_z_w) * variable_rescaling[start + k + 1];
+            }
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double my_sum = (lane == 0) ? (r_w * e_w / (e_w2 + 2.0 * lam)) * (r_w * e_w / (e_w2 + 2.0 * lam)) : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double e_m = d_z / variable_rescaling[start + m];
+            double e_m2 = e_m * e_m;
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            double tt = rc_m * e_m / (e_m2 + 2.0 * lam);
+            my_sum += tt * tt;
+        }
+        for (int o = 16; o > 0; o >>= 1)
+            my_sum += __shfl_xor_sync(MASK, my_sum, o);
+        double zt = r_z / (1.0 - 2.0 * lam);
+        double f = my_sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    if (lane == 0)
+        warm_start[blk] = lam;
+
+    double p_z = r_z / (1.0 - 2.0 * lam);
+    double p_w = r_w * e_w2 / (e_w2 + 2.0 * lam);
+
+    for (int m = lane; m < k; m += 32)
+    {
+        double e_m = d_z / variable_rescaling[start + m];
+        double e_m2 = e_m * e_m;
+        double rc_m = objective_vector[start + m] - dual_product[start + m];
+        double p_m = rc_m * e_m2 / (e_m2 + 2.0 * lam);
+        dual_residual[start + m] = (rc_m - p_m) * variable_rescaling[start + m];
+    }
+    if (lane == 0)
+    {
+        dual_residual[start + k] = (r_w - p_w) * variable_rescaling[start + k];
+        dual_residual[start + k + 1] = (r_z - p_z) * variable_rescaling[start + k + 1];
+    }
+}
+
 __global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,
                                            const double *__restrict__ objective_vector,
                                            const double *__restrict__ dual_product,

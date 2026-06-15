@@ -204,6 +204,8 @@ typedef struct
     soc_formulation_t soc_formulation;
     double *cone_warm_start_primal_d;
     double *cone_warm_start_dual_d;
+    int cone_max_v_dim;
+    int num_small_cones;
     int num_original_variables;
 } pdhg_solver_state_t;
 

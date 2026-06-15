@@ -741,11 +741,46 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
     state->cone_block_v_dim_d = NULL;
     state->cone_warm_start_primal_d = NULL;
     state->cone_warm_start_dual_d = NULL;
+    state->cone_max_v_dim = 0;
+    state->num_small_cones = 0;
+    for (int i = 0; i < state->num_cone_blocks; ++i)
+    {
+        int k = working_problem->cone_block_v_dim[i];
+        if (k > state->cone_max_v_dim)
+            state->cone_max_v_dim = k;
+        if (k < 32)
+            state->num_small_cones++;
+    }
     if (state->num_cone_blocks > 0)
     {
         size_t cb = (size_t)state->num_cone_blocks * sizeof(int);
-        ALLOC_AND_COPY(state->cone_block_start_idx_d, working_problem->cone_block_start_idx, cb);
-        ALLOC_AND_COPY(state->cone_block_v_dim_d, working_problem->cone_block_v_dim, cb);
+        int *start_perm = (int *)safe_malloc(cb);
+        int *vdim_perm = (int *)safe_malloc(cb);
+        int p = 0;
+        for (int i = 0; i < state->num_cone_blocks; ++i)
+        {
+            if (working_problem->cone_block_v_dim[i] < 32)
+            {
+                start_perm[p] = working_problem->cone_block_start_idx[i];
+                vdim_perm[p] = working_problem->cone_block_v_dim[i];
+                p++;
+            }
+        }
+        for (int i = 0; i < state->num_cone_blocks; ++i)
+        {
+            if (working_problem->cone_block_v_dim[i] >= 32)
+            {
+                start_perm[p] = working_problem->cone_block_start_idx[i];
+                vdim_perm[p] = working_problem->cone_block_v_dim[i];
+                p++;
+            }
+        }
+        CUDA_CHECK(cudaMalloc(&state->cone_block_start_idx_d, cb));
+        CUDA_CHECK(cudaMemcpy(state->cone_block_start_idx_d, start_perm, cb, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc(&state->cone_block_v_dim_d, cb));
+        CUDA_CHECK(cudaMemcpy(state->cone_block_v_dim_d, vdim_perm, cb, cudaMemcpyHostToDevice));
+        free(start_perm);
+        free(vdim_perm);
 
         size_t wb = (size_t)state->num_cone_blocks * sizeof(double);
         CUDA_CHECK(cudaMalloc(&state->cone_warm_start_primal_d, wb));

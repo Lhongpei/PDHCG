@@ -485,31 +485,53 @@ void pdhg_update(pdhg_solver_state_t *state)
     if (state->num_cone_blocks > 0)
     {
         int threads = THREADS_PER_BLOCK;
-        int blocks = (state->num_cone_blocks + threads - 1) / threads;
+        int n_small = state->num_small_cones;
+        int n_large = state->num_cone_blocks - n_small;
+        int small_blocks = (n_small + threads - 1) / threads;
+        int large_warp_blocks = (n_large * 32 + threads - 1) / threads;
         if (state->soc_formulation == SOC_STANDARD)
         {
-            project_standard_soc_kernel<<<blocks, threads>>>(state->pdhg_primal_solution,
-                                                             state->variable_rescaling,
-                                                             state->cone_warm_start_primal_d,
-                                                             state->cone_block_start_idx_d,
-                                                             state->cone_block_v_dim_d,
-                                                             state->num_cone_blocks);
+            if (n_small > 0)
+                project_standard_soc_kernel<<<small_blocks, threads>>>(state->pdhg_primal_solution,
+                                                                       state->variable_rescaling,
+                                                                       state->cone_warm_start_primal_d,
+                                                                       state->cone_block_start_idx_d,
+                                                                       state->cone_block_v_dim_d,
+                                                                       n_small);
+            if (n_large > 0)
+                project_standard_soc_warp_kernel<<<large_warp_blocks, threads>>>(
+                    state->pdhg_primal_solution,
+                    state->variable_rescaling,
+                    state->cone_warm_start_primal_d + n_small,
+                    state->cone_block_start_idx_d + n_small,
+                    state->cone_block_v_dim_d + n_small,
+                    n_large);
         }
         else
         {
-            project_rotated_soc_kernel<<<blocks, threads>>>(state->pdhg_primal_solution,
-                                                            state->variable_rescaling,
-                                                            state->cone_warm_start_primal_d,
-                                                            state->cone_block_start_idx_d,
-                                                            state->cone_block_v_dim_d,
-                                                            state->num_cone_blocks);
+            if (n_small > 0)
+                project_rotated_soc_kernel<<<small_blocks, threads>>>(state->pdhg_primal_solution,
+                                                                      state->variable_rescaling,
+                                                                      state->cone_warm_start_primal_d,
+                                                                      state->cone_block_start_idx_d,
+                                                                      state->cone_block_v_dim_d,
+                                                                      n_small);
+            if (n_large > 0)
+                project_rotated_soc_warp_kernel<<<large_warp_blocks, threads>>>(state->pdhg_primal_solution,
+                                                                                state->variable_rescaling,
+                                                                                state->cone_warm_start_primal_d +
+                                                                                    n_small,
+                                                                                state->cone_block_start_idx_d + n_small,
+                                                                                state->cone_block_v_dim_d + n_small,
+                                                                                n_large);
         }
-        recompute_reflected_at_cone_kernel<<<blocks, threads>>>(state->reflected_primal_solution,
-                                                                state->pdhg_primal_solution,
-                                                                state->current_primal_solution,
-                                                                state->cone_block_start_idx_d,
-                                                                state->cone_block_v_dim_d,
-                                                                state->num_cone_blocks);
+        int all_blocks = (state->num_cone_blocks + threads - 1) / threads;
+        recompute_reflected_at_cone_kernel<<<all_blocks, threads>>>(state->reflected_primal_solution,
+                                                                    state->pdhg_primal_solution,
+                                                                    state->current_primal_solution,
+                                                                    state->cone_block_start_idx_d,
+                                                                    state->cone_block_v_dim_d,
+                                                                    state->num_cone_blocks);
     }
 
     state->inner_solver->total_count++;
@@ -799,28 +821,53 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         if (state->num_cone_blocks > 0)
         {
             int threads = THREADS_PER_BLOCK;
-            int blocks = (state->num_cone_blocks + threads - 1) / threads;
+            int n_small = state->num_small_cones;
+            int n_large = state->num_cone_blocks - n_small;
+            int small_blocks = (n_small + threads - 1) / threads;
+            int large_warp_blocks = (n_large * 32 + threads - 1) / threads;
             if (state->soc_formulation == SOC_STANDARD)
             {
-                compute_cone_dual_residual_standard_kernel<<<blocks, threads>>>(state->dual_residual,
-                                                                                state->objective_vector,
-                                                                                state->dual_product,
-                                                                                state->variable_rescaling,
-                                                                                state->cone_warm_start_dual_d,
-                                                                                state->cone_block_start_idx_d,
-                                                                                state->cone_block_v_dim_d,
-                                                                                state->num_cone_blocks);
+                if (n_small > 0)
+                    compute_cone_dual_residual_standard_kernel<<<small_blocks, threads>>>(state->dual_residual,
+                                                                                          state->objective_vector,
+                                                                                          state->dual_product,
+                                                                                          state->variable_rescaling,
+                                                                                          state->cone_warm_start_dual_d,
+                                                                                          state->cone_block_start_idx_d,
+                                                                                          state->cone_block_v_dim_d,
+                                                                                          n_small);
+                if (n_large > 0)
+                    compute_cone_dual_residual_standard_warp_kernel<<<large_warp_blocks, threads>>>(
+                        state->dual_residual,
+                        state->objective_vector,
+                        state->dual_product,
+                        state->variable_rescaling,
+                        state->cone_warm_start_dual_d + n_small,
+                        state->cone_block_start_idx_d + n_small,
+                        state->cone_block_v_dim_d + n_small,
+                        n_large);
             }
             else
             {
-                compute_cone_dual_residual_kernel<<<blocks, threads>>>(state->dual_residual,
-                                                                       state->objective_vector,
-                                                                       state->dual_product,
-                                                                       state->variable_rescaling,
-                                                                       state->cone_warm_start_dual_d,
-                                                                       state->cone_block_start_idx_d,
-                                                                       state->cone_block_v_dim_d,
-                                                                       state->num_cone_blocks);
+                if (n_small > 0)
+                    compute_cone_dual_residual_kernel<<<small_blocks, threads>>>(state->dual_residual,
+                                                                                 state->objective_vector,
+                                                                                 state->dual_product,
+                                                                                 state->variable_rescaling,
+                                                                                 state->cone_warm_start_dual_d,
+                                                                                 state->cone_block_start_idx_d,
+                                                                                 state->cone_block_v_dim_d,
+                                                                                 n_small);
+                if (n_large > 0)
+                    compute_cone_dual_residual_warp_kernel<<<large_warp_blocks, threads>>>(
+                        state->dual_residual,
+                        state->objective_vector,
+                        state->dual_product,
+                        state->variable_rescaling,
+                        state->cone_warm_start_dual_d + n_small,
+                        state->cone_block_start_idx_d + n_small,
+                        state->cone_block_v_dim_d + n_small,
+                        n_large);
             }
         }
     }
@@ -852,28 +899,53 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         if (state->num_cone_blocks > 0)
         {
             int threads = THREADS_PER_BLOCK;
-            int blocks = (state->num_cone_blocks + threads - 1) / threads;
+            int n_small = state->num_small_cones;
+            int n_large = state->num_cone_blocks - n_small;
+            int small_blocks = (n_small + threads - 1) / threads;
+            int large_warp_blocks = (n_large * 32 + threads - 1) / threads;
             if (state->soc_formulation == SOC_STANDARD)
             {
-                compute_cone_dual_residual_standard_kernel<<<blocks, threads>>>(state->dual_residual,
-                                                                                state->objective_vector,
-                                                                                state->dual_product,
-                                                                                state->variable_rescaling,
-                                                                                state->cone_warm_start_dual_d,
-                                                                                state->cone_block_start_idx_d,
-                                                                                state->cone_block_v_dim_d,
-                                                                                state->num_cone_blocks);
+                if (n_small > 0)
+                    compute_cone_dual_residual_standard_kernel<<<small_blocks, threads>>>(state->dual_residual,
+                                                                                          state->objective_vector,
+                                                                                          state->dual_product,
+                                                                                          state->variable_rescaling,
+                                                                                          state->cone_warm_start_dual_d,
+                                                                                          state->cone_block_start_idx_d,
+                                                                                          state->cone_block_v_dim_d,
+                                                                                          n_small);
+                if (n_large > 0)
+                    compute_cone_dual_residual_standard_warp_kernel<<<large_warp_blocks, threads>>>(
+                        state->dual_residual,
+                        state->objective_vector,
+                        state->dual_product,
+                        state->variable_rescaling,
+                        state->cone_warm_start_dual_d + n_small,
+                        state->cone_block_start_idx_d + n_small,
+                        state->cone_block_v_dim_d + n_small,
+                        n_large);
             }
             else
             {
-                compute_cone_dual_residual_kernel<<<blocks, threads>>>(state->dual_residual,
-                                                                       state->objective_vector,
-                                                                       state->dual_product,
-                                                                       state->variable_rescaling,
-                                                                       state->cone_warm_start_dual_d,
-                                                                       state->cone_block_start_idx_d,
-                                                                       state->cone_block_v_dim_d,
-                                                                       state->num_cone_blocks);
+                if (n_small > 0)
+                    compute_cone_dual_residual_kernel<<<small_blocks, threads>>>(state->dual_residual,
+                                                                                 state->objective_vector,
+                                                                                 state->dual_product,
+                                                                                 state->variable_rescaling,
+                                                                                 state->cone_warm_start_dual_d,
+                                                                                 state->cone_block_start_idx_d,
+                                                                                 state->cone_block_v_dim_d,
+                                                                                 n_small);
+                if (n_large > 0)
+                    compute_cone_dual_residual_warp_kernel<<<large_warp_blocks, threads>>>(
+                        state->dual_residual,
+                        state->objective_vector,
+                        state->dual_product,
+                        state->variable_rescaling,
+                        state->cone_warm_start_dual_d + n_small,
+                        state->cone_block_start_idx_d + n_small,
+                        state->cone_block_v_dim_d + n_small,
+                        n_large);
             }
         }
     }
