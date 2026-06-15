@@ -486,10 +486,24 @@ void pdhg_update(pdhg_solver_state_t *state)
     {
         int threads = THREADS_PER_BLOCK;
         int blocks = (state->num_cone_blocks + threads - 1) / threads;
-        project_rotated_soc_kernel<<<blocks, threads>>>(state->pdhg_primal_solution,
-                                                        state->cone_block_start_idx_d,
-                                                        state->cone_block_v_dim_d,
-                                                        state->num_cone_blocks);
+        if (state->soc_formulation == SOC_STANDARD)
+        {
+            project_standard_soc_kernel<<<blocks, threads>>>(state->pdhg_primal_solution,
+                                                             state->variable_rescaling,
+                                                             state->cone_warm_start_primal_d,
+                                                             state->cone_block_start_idx_d,
+                                                             state->cone_block_v_dim_d,
+                                                             state->num_cone_blocks);
+        }
+        else
+        {
+            project_rotated_soc_kernel<<<blocks, threads>>>(state->pdhg_primal_solution,
+                                                            state->variable_rescaling,
+                                                            state->cone_warm_start_primal_d,
+                                                            state->cone_block_start_idx_d,
+                                                            state->cone_block_v_dim_d,
+                                                            state->num_cone_blocks);
+        }
         recompute_reflected_at_cone_kernel<<<blocks, threads>>>(state->reflected_primal_solution,
                                                                 state->pdhg_primal_solution,
                                                                 state->current_primal_solution,
@@ -786,13 +800,28 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         {
             int threads = THREADS_PER_BLOCK;
             int blocks = (state->num_cone_blocks + threads - 1) / threads;
-            compute_cone_dual_residual_kernel<<<blocks, threads>>>(state->dual_residual,
-                                                                   state->objective_vector,
-                                                                   state->dual_product,
-                                                                   state->variable_rescaling,
-                                                                   state->cone_block_start_idx_d,
-                                                                   state->cone_block_v_dim_d,
-                                                                   state->num_cone_blocks);
+            if (state->soc_formulation == SOC_STANDARD)
+            {
+                compute_cone_dual_residual_standard_kernel<<<blocks, threads>>>(state->dual_residual,
+                                                                                state->objective_vector,
+                                                                                state->dual_product,
+                                                                                state->variable_rescaling,
+                                                                                state->cone_warm_start_dual_d,
+                                                                                state->cone_block_start_idx_d,
+                                                                                state->cone_block_v_dim_d,
+                                                                                state->num_cone_blocks);
+            }
+            else
+            {
+                compute_cone_dual_residual_kernel<<<blocks, threads>>>(state->dual_residual,
+                                                                       state->objective_vector,
+                                                                       state->dual_product,
+                                                                       state->variable_rescaling,
+                                                                       state->cone_warm_start_dual_d,
+                                                                       state->cone_block_start_idx_d,
+                                                                       state->cone_block_v_dim_d,
+                                                                       state->num_cone_blocks);
+            }
         }
     }
     else if (state->problem_type == CONVEX_QP)
@@ -824,13 +853,28 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         {
             int threads = THREADS_PER_BLOCK;
             int blocks = (state->num_cone_blocks + threads - 1) / threads;
-            compute_cone_dual_residual_kernel<<<blocks, threads>>>(state->dual_residual,
-                                                                   state->objective_vector,
-                                                                   state->dual_product,
-                                                                   state->variable_rescaling,
-                                                                   state->cone_block_start_idx_d,
-                                                                   state->cone_block_v_dim_d,
-                                                                   state->num_cone_blocks);
+            if (state->soc_formulation == SOC_STANDARD)
+            {
+                compute_cone_dual_residual_standard_kernel<<<blocks, threads>>>(state->dual_residual,
+                                                                                state->objective_vector,
+                                                                                state->dual_product,
+                                                                                state->variable_rescaling,
+                                                                                state->cone_warm_start_dual_d,
+                                                                                state->cone_block_start_idx_d,
+                                                                                state->cone_block_v_dim_d,
+                                                                                state->num_cone_blocks);
+            }
+            else
+            {
+                compute_cone_dual_residual_kernel<<<blocks, threads>>>(state->dual_residual,
+                                                                       state->objective_vector,
+                                                                       state->dual_product,
+                                                                       state->variable_rescaling,
+                                                                       state->cone_warm_start_dual_d,
+                                                                       state->cone_block_start_idx_d,
+                                                                       state->cone_block_v_dim_d,
+                                                                       state->num_cone_blocks);
+            }
         }
     }
 

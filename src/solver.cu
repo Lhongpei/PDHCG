@@ -41,7 +41,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
     qp_problem_t *transformed = NULL;
     if (original_problem->num_quadratic_constraints > 0)
     {
-        transformed = qcqp_to_socp_qp(original_problem);
+        transformed = qcqp_to_socp_qp(original_problem, params->soc_formulation);
         if (!transformed)
         {
             fprintf(stderr, "Error: QCQP -> SOCP transformation failed; cannot solve.\n");
@@ -49,12 +49,14 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
         }
         if (params->verbose >= 1)
         {
+            const char *form_name = (params->soc_formulation == SOC_STANDARD) ? "standard" : "rotated";
             fprintf(stderr,
                     "[QCQP] %d quadratic constraint(s) reformulated as %d "
-                    "rotated SOC block(s); extended problem: %d vars, "
+                    "%s SOC block(s); extended problem: %d vars, "
                     "%d rows, %d nnz.\n",
                     original_problem->num_quadratic_constraints,
                     transformed->num_cone_blocks,
+                    form_name,
                     transformed->num_variables,
                     transformed->num_constraints,
                     transformed->constraint_matrix_num_nonzeros);

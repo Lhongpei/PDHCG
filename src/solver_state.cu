@@ -735,26 +735,58 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
                                                state->vec_dual_prod);
 
     state->num_cone_blocks = working_problem->num_cone_blocks;
+    state->soc_formulation = working_problem->soc_formulation;
     state->num_original_variables = working_problem->num_original_variables;
     state->cone_block_start_idx_d = NULL;
     state->cone_block_v_dim_d = NULL;
+    state->cone_warm_start_primal_d = NULL;
+    state->cone_warm_start_dual_d = NULL;
     if (state->num_cone_blocks > 0)
     {
         size_t cb = (size_t)state->num_cone_blocks * sizeof(int);
         ALLOC_AND_COPY(state->cone_block_start_idx_d, working_problem->cone_block_start_idx, cb);
         ALLOC_AND_COPY(state->cone_block_v_dim_d, working_problem->cone_block_v_dim, cb);
 
-        double t_val = rescale_info->con_bound_rescale;
-        for (int i = 0; i < state->num_cone_blocks; ++i)
+        size_t wb = (size_t)state->num_cone_blocks * sizeof(double);
+        CUDA_CHECK(cudaMalloc(&state->cone_warm_start_primal_d, wb));
+        CUDA_CHECK(cudaMemset(state->cone_warm_start_primal_d, 0, wb));
+        CUDA_CHECK(cudaMalloc(&state->cone_warm_start_dual_d, wb));
+        CUDA_CHECK(cudaMemset(state->cone_warm_start_dual_d, 0, wb));
+
+        if (state->soc_formulation == SOC_STANDARD)
         {
-            int t_idx = working_problem->cone_block_start_idx[i] + working_problem->cone_block_v_dim[i] + 1;
-            for (int which = 0; which < 4; ++which)
+            const double INV_SQRT2 = 0.7071067811865475;
+            for (int i = 0; i < state->num_cone_blocks; ++i)
             {
-                double *dst = (which == 0       ? state->initial_primal_solution
-                                   : which == 1 ? state->current_primal_solution
-                                   : which == 2 ? state->pdhg_primal_solution
-                                                : state->reflected_primal_solution);
-                CUDA_CHECK(cudaMemcpy(dst + t_idx, &t_val, sizeof(double), cudaMemcpyHostToDevice));
+                int w_idx = working_problem->cone_block_start_idx[i] + working_problem->cone_block_v_dim[i];
+                int z_idx = w_idx + 1;
+                double w_val = -INV_SQRT2 * rescale_info->con_bound_rescale * rescale_info->var_rescale[w_idx];
+                double z_val = INV_SQRT2 * rescale_info->con_bound_rescale * rescale_info->var_rescale[z_idx];
+                for (int which = 0; which < 4; ++which)
+                {
+                    double *dst = (which == 0       ? state->initial_primal_solution
+                                       : which == 1 ? state->current_primal_solution
+                                       : which == 2 ? state->pdhg_primal_solution
+                                                    : state->reflected_primal_solution);
+                    CUDA_CHECK(cudaMemcpy(dst + w_idx, &w_val, sizeof(double), cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(dst + z_idx, &z_val, sizeof(double), cudaMemcpyHostToDevice));
+                }
+            }
+        }
+        else
+        {
+            for (int i = 0; i < state->num_cone_blocks; ++i)
+            {
+                int t_idx = working_problem->cone_block_start_idx[i] + working_problem->cone_block_v_dim[i] + 1;
+                double t_val = rescale_info->con_bound_rescale * rescale_info->var_rescale[t_idx];
+                for (int which = 0; which < 4; ++which)
+                {
+                    double *dst = (which == 0       ? state->initial_primal_solution
+                                       : which == 1 ? state->current_primal_solution
+                                       : which == 2 ? state->pdhg_primal_solution
+                                                    : state->reflected_primal_solution);
+                    CUDA_CHECK(cudaMemcpy(dst + t_idx, &t_val, sizeof(double), cudaMemcpyHostToDevice));
+                }
             }
         }
     }
@@ -989,6 +1021,10 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
         CUDA_CHECK(cudaFree(state->cone_block_start_idx_d));
     if (state->cone_block_v_dim_d)
         CUDA_CHECK(cudaFree(state->cone_block_v_dim_d));
+    if (state->cone_warm_start_primal_d)
+        CUDA_CHECK(cudaFree(state->cone_warm_start_primal_d));
+    if (state->cone_warm_start_dual_d)
+        CUDA_CHECK(cudaFree(state->cone_warm_start_dual_d));
 
     free(state);
 }

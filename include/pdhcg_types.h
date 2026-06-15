@@ -60,6 +60,12 @@ extern "C"
         PDHCG_NON_Q
     } quad_obj_type_t;
 
+    typedef enum
+    {
+        SOC_ROTATED = 0,
+        SOC_STANDARD = 1
+    } soc_formulation_t;
+
     typedef struct
     {
         int num_variables;
@@ -93,6 +99,7 @@ extern "C"
         int num_cone_blocks;
         int *cone_block_start_idx;
         int *cone_block_v_dim;
+        soc_formulation_t soc_formulation;
         int num_original_variables;
 
         double *primal_start;
@@ -165,6 +172,7 @@ extern "C"
         inner_solver_parameters_t inner_solver_parameters;
         bool presolve;
         bool diag_jacobi_precond;
+        soc_formulation_t soc_formulation;
         partition_method_t partition_method;
         permute_method_t permute_method;
         grid_size_t grid_size;

@@ -172,6 +172,7 @@ void print_usage(const char *prog_name)
     fprintf(
         stderr,
         "      --no_diag_precond    Disable Jacobi diagonal preconditioner for inner subproblem (default: enabled).\n");
+    fprintf(stderr, "      --soc_form <form>    QCQP cone formulation: 'rotated' or 'standard' (default: rotated).\n");
 
 #ifdef PDHCG_COMPILE_DISTRIBUTED
     fprintf(stderr, "\nDistributed Options (MPI & NCCL):\n");
@@ -210,6 +211,7 @@ int run_pdhcg(int argc, char *argv[])
                                            {"inner_min_tol", required_argument, 0, 1017},
                                            {"presolve", required_argument, 0, 1018},
                                            {"no_diag_precond", no_argument, 0, 1019},
+                                           {"soc_form", required_argument, 0, 1020},
                                            {0, 0, 0, 0}};
 
     int opt;
@@ -291,6 +293,17 @@ int run_pdhcg(int argc, char *argv[])
                 break;
             case 1019:
                 params.diag_jacobi_precond = false;
+                break;
+            case 1020:
+                if (strcmp(optarg, "rotated") == 0)
+                    params.soc_formulation = SOC_ROTATED;
+                else if (strcmp(optarg, "standard") == 0)
+                    params.soc_formulation = SOC_STANDARD;
+                else
+                {
+                    fprintf(stderr, "Error: soc_form must be 'rotated' or 'standard'\n");
+                    return 1;
+                }
                 break;
             case '?':
                 return 1;

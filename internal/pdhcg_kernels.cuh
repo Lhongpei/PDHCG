@@ -350,17 +350,36 @@ extern "C"
                                                                int n_vars);
 
     __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
+                                               const double *__restrict__ variable_rescaling,
+                                               double *__restrict__ warm_start,
                                                const int *__restrict__ start_idx,
                                                const int *__restrict__ v_dim,
                                                int num_blocks);
+
+    __global__ void project_standard_soc_kernel(double *__restrict__ primal_solution,
+                                                const double *__restrict__ variable_rescaling,
+                                                double *__restrict__ warm_start,
+                                                const int *__restrict__ start_idx,
+                                                const int *__restrict__ v_dim,
+                                                int num_blocks);
 
     __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_residual,
                                                       const double *__restrict__ objective_vector,
                                                       const double *__restrict__ dual_product,
                                                       const double *__restrict__ variable_rescaling,
+                                                      double *__restrict__ warm_start,
                                                       const int *__restrict__ start_idx,
                                                       const int *__restrict__ v_dim,
                                                       int num_blocks);
+
+    __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ dual_residual,
+                                                               const double *__restrict__ objective_vector,
+                                                               const double *__restrict__ dual_product,
+                                                               const double *__restrict__ variable_rescaling,
+                                                               double *__restrict__ warm_start,
+                                                               const int *__restrict__ start_idx,
+                                                               const int *__restrict__ v_dim,
+                                                               int num_blocks);
 
     __global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,
                                                const double *__restrict__ objective_vector,

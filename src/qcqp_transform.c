@@ -48,7 +48,7 @@ extract_diag_signed(const CsrComponent *Q, int n, int nnz_max, int *out_cols, do
     return count;
 }
 
-qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
+qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, soc_formulation_t formulation)
 {
     if (!orig)
         return NULL;
@@ -61,6 +61,8 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     int n_orig = orig->num_variables;
     int m_orig = orig->num_constraints;
     int K = orig->num_quadratic_constraints;
+    const bool is_std = (formulation == SOC_STANDARD);
+    const double SQRT2 = 1.4142135623730951;
 
     int *block_k = (int *)safe_malloc(K * sizeof(int));
     int **block_cols = (int **)safe_malloc(K * sizeof(int *));
@@ -168,7 +170,8 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
 
     long n_ext = (long)n_orig + total_v + 2L * K;
     long m_ext = (long)m_orig + total_v + K;
-    long nnz_ext = (long)orig->constraint_matrix_num_nonzeros + K + 2L * total_v + K;
+    long nnz_ext = (long)orig->constraint_matrix_num_nonzeros + (is_std ? 2L * K : (long)K) + 2L * total_v +
+        (is_std ? 2L * K : (long)K);
     if (n_ext > INT32_MAX || m_ext > INT32_MAX || nnz_ext > INT32_MAX)
     {
         fprintf(stderr, "[qcqp_to_socp_qp] extended problem size overflows int32.\n");
@@ -191,6 +194,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     out->num_cone_blocks = K;
     out->cone_block_start_idx = (int *)safe_malloc(K * sizeof(int));
     out->cone_block_v_dim = (int *)safe_malloc(K * sizeof(int));
+    out->soc_formulation = formulation;
     out->num_original_variables = n_orig;
     {
         long idx = n_orig;
@@ -221,18 +225,22 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     for (int i = 0; i < K; ++i)
     {
         int row = orig->quadratic_constraint_row_indices[i];
-        out->constraint_lower_bound[row] = block_b[i];
-        out->constraint_upper_bound[row] = block_b[i];
+        double rhs = is_std ? block_b[i] * SQRT2 : block_b[i];
+        out->constraint_lower_bound[row] = rhs;
+        out->constraint_upper_bound[row] = rhs;
     }
     for (long r = m_orig; r < m_orig + total_v; ++r)
     {
         out->constraint_lower_bound[r] = 0.0;
         out->constraint_upper_bound[r] = 0.0;
     }
-    for (long r = m_orig + total_v; r < m_ext; ++r)
     {
-        out->constraint_lower_bound[r] = 1.0;
-        out->constraint_upper_bound[r] = 1.0;
+        double last_rhs = is_std ? SQRT2 : 1.0;
+        for (long r = m_orig + total_v; r < m_ext; ++r)
+        {
+            out->constraint_lower_bound[r] = last_rhs;
+            out->constraint_upper_bound[r] = last_rhs;
+        }
     }
 
     int *qc_row_to_block = (int *)safe_malloc(m_orig * sizeof(int));
@@ -250,7 +258,8 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     for (int r = 0; r < m_orig; ++r)
     {
         int orig_nnz = A_orig->row_ptr[r + 1] - A_orig->row_ptr[r];
-        row_ptr_ext[r + 1] = orig_nnz + (qc_row_to_block[r] >= 0 ? 1 : 0);
+        int extra = qc_row_to_block[r] >= 0 ? (is_std ? 2 : 1) : 0;
+        row_ptr_ext[r + 1] = orig_nnz + extra;
     }
     long extra_row = m_orig;
     for (int i = 0; i < K; ++i)
@@ -263,7 +272,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     }
     for (int i = 0; i < K; ++i)
     {
-        row_ptr_ext[extra_row + 1] = 1;
+        row_ptr_ext[extra_row + 1] = is_std ? 2 : 1;
         extra_row++;
     }
     for (long r = 1; r <= m_ext; ++r)
@@ -276,18 +285,25 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
         int e = A_orig->row_ptr[r + 1];
         int blk = qc_row_to_block[r];
         double scale = (blk >= 0 && block_flip[blk]) ? -1.0 : 1.0;
+        double xscale = (is_std && blk >= 0) ? scale * SQRT2 : scale;
         for (int k = s; k < e; ++k)
         {
             col_ind_ext[dst] = A_orig->col_ind[k];
-            val_ext[dst] = scale * A_orig->val[k];
+            val_ext[dst] = xscale * A_orig->val[k];
             dst++;
         }
         if (blk >= 0)
         {
-            int s_col = out->cone_block_start_idx[blk] + out->cone_block_v_dim[blk];
-            col_ind_ext[dst] = s_col;
+            int aux0 = out->cone_block_start_idx[blk] + out->cone_block_v_dim[blk];
+            col_ind_ext[dst] = aux0;
             val_ext[dst] = 1.0;
             dst++;
+            if (is_std)
+            {
+                col_ind_ext[dst] = aux0 + 1;
+                val_ext[dst] = 1.0;
+                dst++;
+            }
         }
     }
     extra_row = m_orig;
@@ -307,10 +323,21 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig)
     }
     for (int i = 0; i < K; ++i)
     {
-        int t_col = out->cone_block_start_idx[i] + out->cone_block_v_dim[i] + 1;
+        int aux0 = out->cone_block_start_idx[i] + out->cone_block_v_dim[i];
         int dst = row_ptr_ext[extra_row];
-        col_ind_ext[dst] = t_col;
-        val_ext[dst] = 1.0;
+        if (is_std)
+        {
+            col_ind_ext[dst] = aux0;
+            val_ext[dst] = -1.0;
+            dst++;
+            col_ind_ext[dst] = aux0 + 1;
+            val_ext[dst] = 1.0;
+        }
+        else
+        {
+            col_ind_ext[dst] = aux0 + 1;
+            val_ext[dst] = 1.0;
+        }
         extra_row++;
     }
 

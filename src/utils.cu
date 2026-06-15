@@ -342,6 +342,7 @@ void set_default_parameters(pdhg_parameters_t *params)
     params->permute_method = BLOCK_RANDOM_PERMUTATION;
 
     params->diag_jacobi_precond = true;
+    params->soc_formulation = SOC_ROTATED;
 }
 
 #define PRINT_DIFF_INT(name, current, default_val)                                                                     \

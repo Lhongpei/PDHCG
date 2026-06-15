@@ -751,6 +751,8 @@ __global__ void compute_and_rescale_reduced_cost_qp_kernel(double *__restrict__ 
 }
 
 __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
+                                           const double *__restrict__ variable_rescaling,
+                                           double *__restrict__ warm_start,
                                            const int *__restrict__ start_idx,
                                            const int *__restrict__ v_dim,
                                            int num_blocks)
@@ -772,16 +774,57 @@ __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
     double w = (s - t) * INV_SQRT2;
     double z = (s + t) * INV_SQRT2;
 
-    double sumsq = w * w;
-    for (int m = 0; m < k; ++m)
-        sumsq += v[m] * v[m];
-    double r = sqrt(sumsq);
+    double d_s = variable_rescaling[start + k];
+    double d_t = variable_rescaling[start + k + 1];
+    double d_st = sqrt(d_s * d_t);
 
-    if (r <= z)
+    bool diag_uniform = true;
+    for (int m = 0; m < k && diag_uniform; ++m)
     {
+        if (variable_rescaling[start + m] != d_st)
+            diag_uniform = false;
+    }
+
+    if (diag_uniform)
+    {
+        double sumsq = w * w;
+        for (int m = 0; m < k; ++m)
+            sumsq += v[m] * v[m];
+        double r = sqrt(sumsq);
+        if (r <= z)
+            return;
+        if (r <= -z)
+        {
+            for (int m = 0; m < k; ++m)
+                v[m] = 0.0;
+            *sptr = 0.0;
+            *tptr = 0.0;
+            return;
+        }
+        double scale = (z + r) / (2.0 * r);
+        for (int m = 0; m < k; ++m)
+            v[m] *= scale;
+        double w_new = scale * w;
+        double z_new = scale * r;
+        *sptr = (z_new + w_new) * INV_SQRT2;
+        *tptr = (z_new - w_new) * INV_SQRT2;
         return;
     }
-    if (r <= -z)
+
+    double r_inv_sq = w * w;
+    double r_pos_sq = w * w;
+    for (int m = 0; m < k; ++m)
+    {
+        double dh = variable_rescaling[start + m] / d_st;
+        double v_m = v[m];
+        r_inv_sq += (v_m / dh) * (v_m / dh);
+        r_pos_sq += (v_m * dh) * (v_m * dh);
+    }
+    double r_inv = sqrt(r_inv_sq);
+    if (r_inv <= z)
+        return;
+    double r_pos = sqrt(r_pos_sq);
+    if (r_pos <= -z)
     {
         for (int m = 0; m < k; ++m)
             v[m] = 0.0;
@@ -790,20 +833,135 @@ __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
         return;
     }
 
-    double scale = (z + r) / (2.0 * r);
-    for (int m = 0; m < k; ++m)
-        v[m] *= scale;
-    w *= scale;
-    double z_new = scale * r;
+    double lo, hi;
+    bool z_pos = (z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double sum_hi = 0.0;
+            for (int m = 0; m < k; ++m)
+            {
+                double dh = variable_rescaling[start + m] / d_st;
+                double dh2 = dh * dh;
+                double tt = v[m] * dh / (dh2 + 2.0 * hi);
+                sum_hi += tt * tt;
+            }
+            double tw_hi = w / (1.0 + 2.0 * hi);
+            sum_hi += tw_hi * tw_hi;
+            double zt_hi = z / (1.0 - 2.0 * hi);
+            double f_hi = sum_hi - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
 
-    *sptr = (z_new + w) * INV_SQRT2;
-    *tptr = (z_new - w) * INV_SQRT2;
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double sum_w = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double dh = variable_rescaling[start + m] / d_st;
+            double dh2 = dh * dh;
+            double tt = v[m] * dh / (dh2 + 2.0 * warm_lam);
+            sum_w += tt * tt;
+        }
+        double tw = w / (1.0 + 2.0 * warm_lam);
+        sum_w += tw * tw;
+        double zt = z / (1.0 - 2.0 * warm_lam);
+        double f = sum_w - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            double w_new = w / (1.0 + 2.0 * warm_lam);
+            double z_new = z / (1.0 - 2.0 * warm_lam);
+            for (int m = 0; m < k; ++m)
+            {
+                double dh = variable_rescaling[start + m] / d_st;
+                double dh2 = dh * dh;
+                v[m] = v[m] * dh2 / (dh2 + 2.0 * warm_lam);
+            }
+            *sptr = (z_new + w_new) * INV_SQRT2;
+            *tptr = (z_new - w_new) * INV_SQRT2;
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double sum = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double dh = variable_rescaling[start + m] / d_st;
+            double dh2 = dh * dh;
+            double tt = v[m] * dh / (dh2 + 2.0 * lam);
+            sum += tt * tt;
+        }
+        double tw = w / (1.0 + 2.0 * lam);
+        sum += tw * tw;
+        double zt = z / (1.0 - 2.0 * lam);
+        double f = sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    warm_start[blk] = lam;
+
+    double w_new = w / (1.0 + 2.0 * lam);
+    double z_new = z / (1.0 - 2.0 * lam);
+    for (int m = 0; m < k; ++m)
+    {
+        double dh = variable_rescaling[start + m] / d_st;
+        double dh2 = dh * dh;
+        v[m] = v[m] * dh2 / (dh2 + 2.0 * lam);
+    }
+    *sptr = (z_new + w_new) * INV_SQRT2;
+    *tptr = (z_new - w_new) * INV_SQRT2;
 }
 
 __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_residual,
                                                   const double *__restrict__ objective_vector,
                                                   const double *__restrict__ dual_product,
                                                   const double *__restrict__ variable_rescaling,
+                                                  double *__restrict__ warm_start,
                                                   const int *__restrict__ start_idx,
                                                   const int *__restrict__ v_dim,
                                                   int num_blocks)
@@ -818,47 +976,658 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
 
     double r_s = objective_vector[start + k] - dual_product[start + k];
     double r_t = objective_vector[start + k + 1] - dual_product[start + k + 1];
-    double w = (r_s - r_t) * INV_SQRT2;
-    double z = (r_s + r_t) * INV_SQRT2;
+    double r_w = (r_s - r_t) * INV_SQRT2;
+    double r_z = (r_s + r_t) * INV_SQRT2;
 
-    double sumsq = w * w;
+    double d_s = variable_rescaling[start + k];
+    double d_t = variable_rescaling[start + k + 1];
+    double d_st = sqrt(d_s * d_t);
+
+    bool diag_uniform = true;
+    for (int m = 0; m < k && diag_uniform; ++m)
+    {
+        if (variable_rescaling[start + m] != d_st)
+            diag_uniform = false;
+    }
+
+    if (diag_uniform)
+    {
+        double sumsq = r_w * r_w;
+        for (int m = 0; m < k; ++m)
+        {
+            double v_m = objective_vector[start + m] - dual_product[start + m];
+            sumsq += v_m * v_m;
+        }
+        double r_norm = sqrt(sumsq);
+
+        double v_factor, p_s, p_t;
+        if (r_norm <= r_z)
+        {
+            v_factor = 0.0;
+            p_s = r_s;
+            p_t = r_t;
+        }
+        else if (r_norm <= -r_z)
+        {
+            v_factor = 1.0;
+            p_s = 0.0;
+            p_t = 0.0;
+        }
+        else
+        {
+            double scale = (r_z + r_norm) / (2.0 * r_norm);
+            v_factor = 1.0 - scale;
+            double w_new = scale * r_w;
+            double z_new = scale * r_norm;
+            p_s = (z_new + w_new) * INV_SQRT2;
+            p_t = (z_new - w_new) * INV_SQRT2;
+        }
+        for (int m = 0; m < k; ++m)
+        {
+            double v_m = objective_vector[start + m] - dual_product[start + m];
+            dual_residual[start + m] = v_m * v_factor * variable_rescaling[start + m];
+        }
+        dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k];
+        dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1];
+        return;
+    }
+
+    double r_inv_sq = r_w * r_w;
+    double r_pos_sq = r_w * r_w;
     for (int m = 0; m < k; ++m)
     {
-        double v_m = objective_vector[start + m] - dual_product[start + m];
-        sumsq += v_m * v_m;
+        double e_m = d_st / variable_rescaling[start + m];
+        double rc_m = objective_vector[start + m] - dual_product[start + m];
+        r_inv_sq += (rc_m / e_m) * (rc_m / e_m);
+        r_pos_sq += (rc_m * e_m) * (rc_m * e_m);
     }
-    double r_norm = sqrt(sumsq);
+    double r_inv = sqrt(r_inv_sq);
+    double r_pos = sqrt(r_pos_sq);
 
-    double v_factor, p_s, p_t;
-    if (r_norm <= z)
+    if (r_inv <= r_z)
     {
-        v_factor = 0.0;
-        p_s = r_s;
-        p_t = r_t;
+        for (int m = 0; m < k; ++m)
+            dual_residual[start + m] = 0.0;
+        dual_residual[start + k] = 0.0;
+        dual_residual[start + k + 1] = 0.0;
+        return;
     }
-    else if (r_norm <= -z)
+    if (r_pos <= -r_z)
     {
-        v_factor = 1.0;
-        p_s = 0.0;
-        p_t = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            dual_residual[start + m] = rc_m * variable_rescaling[start + m];
+        }
+        dual_residual[start + k] = r_s * variable_rescaling[start + k];
+        dual_residual[start + k + 1] = r_t * variable_rescaling[start + k + 1];
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (r_z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
     }
     else
     {
-        double scale = (z + r_norm) / (2.0 * r_norm);
-        v_factor = 1.0 - scale;
-        double w_new = scale * w;
-        double z_new = scale * r_norm;
-        p_s = (z_new + w_new) * INV_SQRT2;
-        p_t = (z_new - w_new) * INV_SQRT2;
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double sum_hi = 0.0;
+            for (int m = 0; m < k; ++m)
+            {
+                double e_m = d_st / variable_rescaling[start + m];
+                double e_m2 = e_m * e_m;
+                double rc_m = objective_vector[start + m] - dual_product[start + m];
+                double tt = rc_m * e_m / (e_m2 + 2.0 * hi);
+                sum_hi += tt * tt;
+            }
+            double tw_hi = r_w / (1.0 + 2.0 * hi);
+            sum_hi += tw_hi * tw_hi;
+            double zt_hi = r_z / (1.0 - 2.0 * hi);
+            double f_hi = sum_hi - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
     }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double sum_w = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double e_m = d_st / variable_rescaling[start + m];
+            double e_m2 = e_m * e_m;
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            double tt = rc_m * e_m / (e_m2 + 2.0 * warm_lam);
+            sum_w += tt * tt;
+        }
+        double tw = r_w / (1.0 + 2.0 * warm_lam);
+        sum_w += tw * tw;
+        double zt = r_z / (1.0 - 2.0 * warm_lam);
+        double f = sum_w - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            double p_w_w = r_w / (1.0 + 2.0 * warm_lam);
+            double p_z_w = r_z / (1.0 - 2.0 * warm_lam);
+            double p_s_w = (p_z_w + p_w_w) * INV_SQRT2;
+            double p_t_w = (p_z_w - p_w_w) * INV_SQRT2;
+            for (int m = 0; m < k; ++m)
+            {
+                double e_m = d_st / variable_rescaling[start + m];
+                double e_m2 = e_m * e_m;
+                double rc_m = objective_vector[start + m] - dual_product[start + m];
+                double p_m = rc_m * e_m2 / (e_m2 + 2.0 * warm_lam);
+                dual_residual[start + m] = (rc_m - p_m) * variable_rescaling[start + m];
+            }
+            dual_residual[start + k] = (r_s - p_s_w) * variable_rescaling[start + k];
+            dual_residual[start + k + 1] = (r_t - p_t_w) * variable_rescaling[start + k + 1];
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double sum = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double e_m = d_st / variable_rescaling[start + m];
+            double e_m2 = e_m * e_m;
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            double tt = rc_m * e_m / (e_m2 + 2.0 * lam);
+            sum += tt * tt;
+        }
+        double tw = r_w / (1.0 + 2.0 * lam);
+        sum += tw * tw;
+        double zt = r_z / (1.0 - 2.0 * lam);
+        double f = sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    warm_start[blk] = lam;
+
+    double p_w = r_w / (1.0 + 2.0 * lam);
+    double p_z = r_z / (1.0 - 2.0 * lam);
+    double p_s = (p_z + p_w) * INV_SQRT2;
+    double p_t = (p_z - p_w) * INV_SQRT2;
 
     for (int m = 0; m < k; ++m)
     {
-        double v_m = objective_vector[start + m] - dual_product[start + m];
-        dual_residual[start + m] = v_m * v_factor * variable_rescaling[start + m];
+        double e_m = d_st / variable_rescaling[start + m];
+        double e_m2 = e_m * e_m;
+        double rc_m = objective_vector[start + m] - dual_product[start + m];
+        double p_m = rc_m * e_m2 / (e_m2 + 2.0 * lam);
+        dual_residual[start + m] = (rc_m - p_m) * variable_rescaling[start + m];
     }
     dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k];
     dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1];
+}
+
+__global__ void project_standard_soc_kernel(double *__restrict__ primal_solution,
+                                            const double *__restrict__ variable_rescaling,
+                                            double *__restrict__ warm_start,
+                                            const int *__restrict__ start_idx,
+                                            const int *__restrict__ v_dim,
+                                            int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+    double *v = primal_solution + start;
+    double *wptr = primal_solution + start + k;
+    double *zptr = primal_solution + start + k + 1;
+
+    double w = *wptr;
+    double z = *zptr;
+
+    double d_z = variable_rescaling[start + k + 1];
+    double dhat_w = variable_rescaling[start + k] / d_z;
+    double dhat_w2 = dhat_w * dhat_w;
+
+    bool diag_uniform = (dhat_w == 1.0);
+    for (int m = 0; m < k && diag_uniform; ++m)
+    {
+        if (variable_rescaling[start + m] != d_z)
+            diag_uniform = false;
+    }
+
+    if (diag_uniform)
+    {
+        double sumsq = w * w;
+        for (int m = 0; m < k; ++m)
+            sumsq += v[m] * v[m];
+        double r = sqrt(sumsq);
+        if (r <= z)
+            return;
+        if (r <= -z)
+        {
+            for (int m = 0; m < k; ++m)
+                v[m] = 0.0;
+            *wptr = 0.0;
+            *zptr = 0.0;
+            return;
+        }
+        double scale = (z + r) / (2.0 * r);
+        for (int m = 0; m < k; ++m)
+            v[m] *= scale;
+        *wptr = scale * w;
+        *zptr = scale * r;
+        return;
+    }
+
+    double r_inv_sq = (w / dhat_w) * (w / dhat_w);
+    double r_pos_sq = (w * dhat_w) * (w * dhat_w);
+    for (int m = 0; m < k; ++m)
+    {
+        double dh = variable_rescaling[start + m] / d_z;
+        double v_m = v[m];
+        r_inv_sq += (v_m / dh) * (v_m / dh);
+        r_pos_sq += (v_m * dh) * (v_m * dh);
+    }
+    double r_inv = sqrt(r_inv_sq);
+    if (r_inv <= z)
+        return;
+    double r_pos = sqrt(r_pos_sq);
+    if (r_pos <= -z)
+    {
+        for (int m = 0; m < k; ++m)
+            v[m] = 0.0;
+        *wptr = 0.0;
+        *zptr = 0.0;
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double sum_hi = 0.0;
+            for (int m = 0; m < k; ++m)
+            {
+                double dh = variable_rescaling[start + m] / d_z;
+                double dh2 = dh * dh;
+                double t = v[m] * dh / (dh2 + 2.0 * hi);
+                sum_hi += t * t;
+            }
+            double tw_hi = w * dhat_w / (dhat_w2 + 2.0 * hi);
+            sum_hi += tw_hi * tw_hi;
+            double zt_hi = z / (1.0 - 2.0 * hi);
+            double f_hi = sum_hi - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double sum_w = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double dh = variable_rescaling[start + m] / d_z;
+            double dh2 = dh * dh;
+            double t = v[m] * dh / (dh2 + 2.0 * warm_lam);
+            sum_w += t * t;
+        }
+        double tw = w * dhat_w / (dhat_w2 + 2.0 * warm_lam);
+        sum_w += tw * tw;
+        double zt = z / (1.0 - 2.0 * warm_lam);
+        double f = sum_w - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            *zptr = z / (1.0 - 2.0 * warm_lam);
+            *wptr = w * dhat_w2 / (dhat_w2 + 2.0 * warm_lam);
+            for (int m = 0; m < k; ++m)
+            {
+                double dh = variable_rescaling[start + m] / d_z;
+                double dh2 = dh * dh;
+                v[m] = v[m] * dh2 / (dh2 + 2.0 * warm_lam);
+            }
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double sum = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double dh = variable_rescaling[start + m] / d_z;
+            double dh2 = dh * dh;
+            double t = v[m] * dh / (dh2 + 2.0 * lam);
+            sum += t * t;
+        }
+        double tw = w * dhat_w / (dhat_w2 + 2.0 * lam);
+        sum += tw * tw;
+        double zt = z / (1.0 - 2.0 * lam);
+        double f = sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    warm_start[blk] = lam;
+
+    *zptr = z / (1.0 - 2.0 * lam);
+    *wptr = w * dhat_w2 / (dhat_w2 + 2.0 * lam);
+    for (int m = 0; m < k; ++m)
+    {
+        double dh = variable_rescaling[start + m] / d_z;
+        double dh2 = dh * dh;
+        v[m] = v[m] * dh2 / (dh2 + 2.0 * lam);
+    }
+}
+
+__global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ dual_residual,
+                                                           const double *__restrict__ objective_vector,
+                                                           const double *__restrict__ dual_product,
+                                                           const double *__restrict__ variable_rescaling,
+                                                           double *__restrict__ warm_start,
+                                                           const int *__restrict__ start_idx,
+                                                           const int *__restrict__ v_dim,
+                                                           int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+
+    double r_w = objective_vector[start + k] - dual_product[start + k];
+    double r_z = objective_vector[start + k + 1] - dual_product[start + k + 1];
+
+    double d_z = variable_rescaling[start + k + 1];
+    double e_w = d_z / variable_rescaling[start + k];
+    double e_w2 = e_w * e_w;
+
+    bool diag_uniform = (e_w == 1.0);
+    for (int m = 0; m < k && diag_uniform; ++m)
+    {
+        if (variable_rescaling[start + m] != d_z)
+            diag_uniform = false;
+    }
+
+    if (diag_uniform)
+    {
+        double sumsq = r_w * r_w;
+        for (int m = 0; m < k; ++m)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            sumsq += rc_m * rc_m;
+        }
+        double r = sqrt(sumsq);
+        double v_factor, p_w, p_z;
+        if (r <= r_z)
+        {
+            v_factor = 0.0;
+            p_w = r_w;
+            p_z = r_z;
+        }
+        else if (r <= -r_z)
+        {
+            v_factor = 1.0;
+            p_w = 0.0;
+            p_z = 0.0;
+        }
+        else
+        {
+            double scale = (r_z + r) / (2.0 * r);
+            v_factor = 1.0 - scale;
+            p_w = scale * r_w;
+            p_z = scale * r;
+        }
+        for (int m = 0; m < k; ++m)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            dual_residual[start + m] = rc_m * v_factor * variable_rescaling[start + m];
+        }
+        dual_residual[start + k] = (r_w - p_w) * variable_rescaling[start + k];
+        dual_residual[start + k + 1] = (r_z - p_z) * variable_rescaling[start + k + 1];
+        return;
+    }
+
+    double r_inv_sq = (r_w / e_w) * (r_w / e_w);
+    double r_pos_sq = (r_w * e_w) * (r_w * e_w);
+    for (int m = 0; m < k; ++m)
+    {
+        double e_m = d_z / variable_rescaling[start + m];
+        double rc_m = objective_vector[start + m] - dual_product[start + m];
+        r_inv_sq += (rc_m / e_m) * (rc_m / e_m);
+        r_pos_sq += (rc_m * e_m) * (rc_m * e_m);
+    }
+    double r_inv = sqrt(r_inv_sq);
+    double r_pos = sqrt(r_pos_sq);
+
+    if (r_inv <= r_z)
+    {
+        for (int m = 0; m < k; ++m)
+            dual_residual[start + m] = 0.0;
+        dual_residual[start + k] = 0.0;
+        dual_residual[start + k + 1] = 0.0;
+        return;
+    }
+    if (r_pos <= -r_z)
+    {
+        for (int m = 0; m < k; ++m)
+        {
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            dual_residual[start + m] = rc_m * variable_rescaling[start + m];
+        }
+        dual_residual[start + k] = r_w * variable_rescaling[start + k];
+        dual_residual[start + k + 1] = r_z * variable_rescaling[start + k + 1];
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (r_z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double sum_hi = 0.0;
+            for (int m = 0; m < k; ++m)
+            {
+                double e_m = d_z / variable_rescaling[start + m];
+                double e_m2 = e_m * e_m;
+                double rc_m = objective_vector[start + m] - dual_product[start + m];
+                double t = rc_m * e_m / (e_m2 + 2.0 * hi);
+                sum_hi += t * t;
+            }
+            double tw_hi = r_w * e_w / (e_w2 + 2.0 * hi);
+            sum_hi += tw_hi * tw_hi;
+            double zt_hi = r_z / (1.0 - 2.0 * hi);
+            double f_hi = sum_hi - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double sum_w = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double e_m = d_z / variable_rescaling[start + m];
+            double e_m2 = e_m * e_m;
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            double t = rc_m * e_m / (e_m2 + 2.0 * warm_lam);
+            sum_w += t * t;
+        }
+        double tw = r_w * e_w / (e_w2 + 2.0 * warm_lam);
+        sum_w += tw * tw;
+        double zt = r_z / (1.0 - 2.0 * warm_lam);
+        double f = sum_w - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            double p_z_w = r_z / (1.0 - 2.0 * warm_lam);
+            double p_w_w = r_w * e_w2 / (e_w2 + 2.0 * warm_lam);
+            for (int m = 0; m < k; ++m)
+            {
+                double e_m = d_z / variable_rescaling[start + m];
+                double e_m2 = e_m * e_m;
+                double rc_m = objective_vector[start + m] - dual_product[start + m];
+                double p_m = rc_m * e_m2 / (e_m2 + 2.0 * warm_lam);
+                dual_residual[start + m] = (rc_m - p_m) * variable_rescaling[start + m];
+            }
+            dual_residual[start + k] = (r_w - p_w_w) * variable_rescaling[start + k];
+            dual_residual[start + k + 1] = (r_z - p_z_w) * variable_rescaling[start + k + 1];
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double sum = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double e_m = d_z / variable_rescaling[start + m];
+            double e_m2 = e_m * e_m;
+            double rc_m = objective_vector[start + m] - dual_product[start + m];
+            double t = rc_m * e_m / (e_m2 + 2.0 * lam);
+            sum += t * t;
+        }
+        double tw = r_w * e_w / (e_w2 + 2.0 * lam);
+        sum += tw * tw;
+        double zt = r_z / (1.0 - 2.0 * lam);
+        double f = sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    warm_start[blk] = lam;
+
+    double p_z = r_z / (1.0 - 2.0 * lam);
+    double p_w = r_w * e_w2 / (e_w2 + 2.0 * lam);
+
+    for (int m = 0; m < k; ++m)
+    {
+        double e_m = d_z / variable_rescaling[start + m];
+        double e_m2 = e_m * e_m;
+        double rc_m = objective_vector[start + m] - dual_product[start + m];
+        double p_m = rc_m * e_m2 / (e_m2 + 2.0 * lam);
+        dual_residual[start + m] = (rc_m - p_m) * variable_rescaling[start + m];
+    }
+    dual_residual[start + k] = (r_w - p_w) * variable_rescaling[start + k];
+    dual_residual[start + k + 1] = (r_z - p_z) * variable_rescaling[start + k + 1];
 }
 
 __global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,

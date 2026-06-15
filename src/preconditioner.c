@@ -111,6 +111,7 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
     }
 
     new_prob->num_cone_blocks = prob->num_cone_blocks;
+    new_prob->soc_formulation = prob->soc_formulation;
     new_prob->num_original_variables = prob->num_original_variables;
     new_prob->cone_block_start_idx = NULL;
     new_prob->cone_block_v_dim = NULL;
@@ -248,7 +249,24 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-        if (problem->num_original_variables > 0)
+        if (problem->num_cone_blocks > 0)
+        {
+            if (problem->soc_formulation == SOC_STANDARD)
+            {
+                for (int blk = 0; blk < problem->num_cone_blocks; ++blk)
+                {
+                    int s = problem->cone_block_start_idx[blk];
+                    int len = problem->cone_block_v_dim[blk] + 2;
+                    double sum_log = 0.0;
+                    for (int i = 0; i < len; ++i)
+                        sum_log += log(var_rescale[s + i]);
+                    double d_block = exp(sum_log / (double)len);
+                    for (int i = 0; i < len; ++i)
+                        var_rescale[s + i] = d_block;
+                }
+            }
+        }
+        else if (problem->num_original_variables > 0)
         {
             for (int i = problem->num_original_variables; i < num_vars; ++i)
                 var_rescale[i] = 1.0;
@@ -307,7 +325,24 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
     for (int i = 0; i < num_cons; ++i)
         con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-    if (problem->num_original_variables > 0)
+    if (problem->num_cone_blocks > 0)
+    {
+        if (problem->soc_formulation == SOC_STANDARD)
+        {
+            for (int blk = 0; blk < problem->num_cone_blocks; ++blk)
+            {
+                int s = problem->cone_block_start_idx[blk];
+                int len = problem->cone_block_v_dim[blk] + 2;
+                double sum_log = 0.0;
+                for (int i = 0; i < len; ++i)
+                    sum_log += log(var_rescale[s + i]);
+                double d_block = exp(sum_log / (double)len);
+                for (int i = 0; i < len; ++i)
+                    var_rescale[s + i] = d_block;
+            }
+        }
+    }
+    else if (problem->num_original_variables > 0)
     {
         for (int i = problem->num_original_variables; i < num_vars; ++i)
             var_rescale[i] = 1.0;

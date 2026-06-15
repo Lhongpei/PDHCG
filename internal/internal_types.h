@@ -201,6 +201,9 @@ typedef struct
     int num_cone_blocks;
     int *cone_block_start_idx_d;
     int *cone_block_v_dim_d;
+    soc_formulation_t soc_formulation;
+    double *cone_warm_start_primal_d;
+    double *cone_warm_start_dual_d;
     int num_original_variables;
 } pdhg_solver_state_t;
 
