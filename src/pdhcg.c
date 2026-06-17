@@ -393,7 +393,143 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->cones.start_idx = NULL;
     prob->cones.v_dim = NULL;
     prob->cones.type = NULL;
+    prob->cones.is_fixed = NULL;
     prob->num_original_variables = 0;
+
+    return prob;
+}
+
+/* Returns 1 if Q (sparse or low-rank component) has any nonzero on a cone variable index. */
+static int q_touches_cone(const qp_problem_t *prob, const char *in_cone)
+{
+    int n = prob->num_variables;
+    if (prob->objective_sparse_matrix && prob->objective_sparse_matrix_num_nonzeros > 0)
+    {
+        const CsrComponent *Q = prob->objective_sparse_matrix;
+        for (int r = 0; r < n; ++r)
+        {
+            int has_nnz = (Q->row_ptr[r + 1] > Q->row_ptr[r]);
+            if (has_nnz && in_cone[r])
+            {
+                fprintf(stderr, "[create_conic_problem] Q has nonzero on cone variable row %d\n", r);
+                return 1;
+            }
+            for (int k = Q->row_ptr[r]; k < Q->row_ptr[r + 1]; ++k)
+            {
+                int c = Q->col_ind[k];
+                if (in_cone[c])
+                {
+                    fprintf(stderr, "[create_conic_problem] Q has nonzero on cone variable column %d (row %d)\n", c, r);
+                    return 1;
+                }
+            }
+        }
+    }
+    if (prob->objective_lowrank_matrix && prob->objective_lowrank_matrix_num_nonzeros > 0)
+    {
+        const CsrComponent *R = prob->objective_lowrank_matrix;
+        for (int r = 0; r < prob->num_rank_lowrank_obj; ++r)
+        {
+            for (int k = R->row_ptr[r]; k < R->row_ptr[r + 1]; ++k)
+            {
+                int c = R->col_ind[k];
+                if (in_cone[c])
+                {
+                    fprintf(
+                        stderr, "[create_conic_problem] R (low-rank Q) has nonzero on cone variable column %d\n", c);
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+qp_problem_t *create_conic_problem(const double *objective_c,
+                                   const matrix_desc_t *Q_desc,
+                                   const matrix_desc_t *R_desc,
+                                   const matrix_desc_t *D_desc,
+                                   const matrix_desc_t *A_desc,
+                                   const double *con_lb,
+                                   const double *con_ub,
+                                   const double *var_lb,
+                                   const double *var_ub,
+                                   const double *objective_constant,
+                                   int num_cones,
+                                   const cone_spec_t *cones)
+{
+    qp_problem_t *prob = create_qp_problem(
+        objective_c, Q_desc, R_desc, D_desc, A_desc, con_lb, con_ub, var_lb, var_ub, objective_constant);
+    if (!prob)
+        return NULL;
+
+    if (num_cones <= 0 || cones == NULL)
+        return prob;
+
+    int n_vars = prob->num_variables;
+    int n_orig = n_vars;
+    char *in_cone = (char *)safe_calloc(n_vars, sizeof(char));
+    for (int i = 0; i < num_cones; ++i)
+    {
+        int s = cones[i].start_idx;
+        int len = (cones[i].type == CONE_EXPONENTIAL) ? 3 : (cones[i].v_dim + 2);
+        if (s < 0 || s + len > n_vars)
+        {
+            fprintf(stderr,
+                    "[create_conic_problem] cone %d out of range: start=%d len=%d num_variables=%d\n",
+                    i,
+                    s,
+                    len,
+                    n_vars);
+            free(in_cone);
+            qp_problem_free(prob);
+            return NULL;
+        }
+        for (int j = s; j < s + len; ++j)
+            in_cone[j] = 1;
+        if (s < n_orig)
+            n_orig = s;
+    }
+
+    if (q_touches_cone(prob, in_cone))
+    {
+        fprintf(stderr,
+                "[create_conic_problem] Q must vanish on cone variables; "
+                "introduce slack variables outside the cone to model objective coupling.\n");
+        free(in_cone);
+        qp_problem_free(prob);
+        return NULL;
+    }
+    free(in_cone);
+
+    prob->cones.num_cones = num_cones;
+    prob->cones.start_idx = (int *)safe_malloc(num_cones * sizeof(int));
+    prob->cones.v_dim = (int *)safe_malloc(num_cones * sizeof(int));
+    prob->cones.type = (cone_type_t *)safe_malloc(num_cones * sizeof(cone_type_t));
+    prob->cones.is_fixed = NULL;
+    int any_fix = 0;
+    for (int i = 0; i < num_cones; ++i)
+    {
+        prob->cones.start_idx[i] = cones[i].start_idx;
+        prob->cones.v_dim[i] = (cones[i].type == CONE_EXPONENTIAL) ? 1 : cones[i].v_dim;
+        prob->cones.type[i] = cones[i].type;
+        if (cones[i].is_fixed)
+            any_fix = 1;
+    }
+    if (any_fix)
+    {
+        prob->cones.is_fixed = (char *)safe_calloc(n_vars, sizeof(char));
+        for (int i = 0; i < num_cones; ++i)
+        {
+            if (!cones[i].is_fixed)
+                continue;
+            int s = cones[i].start_idx;
+            int len = (cones[i].type == CONE_EXPONENTIAL) ? 3 : (cones[i].v_dim + 2);
+            for (int j = 0; j < len; ++j)
+                prob->cones.is_fixed[s + j] = cones[i].is_fixed[j] ? 1 : 0;
+        }
+    }
+    prob->num_original_variables = n_orig;
 
     return prob;
 }
@@ -448,6 +584,7 @@ void qp_problem_free(qp_problem_t *prob)
     free(prob->cones.start_idx);
     free(prob->cones.v_dim);
     free(prob->cones.type);
+    free(prob->cones.is_fixed);
     memset(prob, 0, sizeof(*prob));
     free(prob);
 }
@@ -460,7 +597,23 @@ void set_start_values(qp_problem_t *prob, const double *primal, const double *du
     int n = prob->num_variables;
     int m = prob->num_constraints;
 
-    // Free previous if any
+    if (primal && prob->cones.is_fixed && prob->primal_start)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if (prob->cones.is_fixed[i] && primal[i] != prob->primal_start[i])
+            {
+                fprintf(stderr,
+                        "[set_start_values] slot %d is fixed at %.17g but caller provided %.17g; "
+                        "rejecting (use set_cone_fixed to change fixed value).\n",
+                        i,
+                        prob->primal_start[i],
+                        primal[i]);
+                return;
+            }
+        }
+    }
+
     if (prob->primal_start)
     {
         free(prob->primal_start);
@@ -482,6 +635,41 @@ void set_start_values(qp_problem_t *prob, const double *primal, const double *du
         prob->dual_start = (double *)safe_malloc(m * sizeof(double));
         memcpy(prob->dual_start, dual, m * sizeof(double));
     }
+}
+
+int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
+{
+    if (!prob)
+    {
+        fprintf(stderr, "[set_cone_fixed] prob is NULL\n");
+        return -1;
+    }
+    if (cone_idx < 0 || cone_idx >= prob->cones.num_cones)
+    {
+        fprintf(stderr, "[set_cone_fixed] cone_idx %d out of range [0, %d)\n", cone_idx, prob->cones.num_cones);
+        return -1;
+    }
+    int len = (prob->cones.type[cone_idx] == CONE_EXPONENTIAL) ? 3 : (prob->cones.v_dim[cone_idx] + 2);
+    if (slot < 0 || slot >= len)
+    {
+        fprintf(stderr, "[set_cone_fixed] slot %d out of range [0, %d) for cone %d\n", slot, len, cone_idx);
+        return -1;
+    }
+    int idx = prob->cones.start_idx[cone_idx] + slot;
+    if (idx < 0 || idx >= prob->num_variables)
+    {
+        fprintf(stderr, "[set_cone_fixed] computed index %d out of range [0, %d)\n", idx, prob->num_variables);
+        return -1;
+    }
+
+    if (!prob->cones.is_fixed)
+        prob->cones.is_fixed = (char *)safe_calloc(prob->num_variables, sizeof(char));
+    prob->cones.is_fixed[idx] = 1;
+
+    if (!prob->primal_start)
+        prob->primal_start = (double *)safe_calloc(prob->num_variables, sizeof(double));
+    prob->primal_start[idx] = value;
+    return 0;
 }
 
 pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters_t *params)

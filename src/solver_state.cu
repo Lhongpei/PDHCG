@@ -458,8 +458,10 @@ void initialize_quadratic_term_information(pdhg_solver_state_t *state, const pdh
     }
 }
 
-static cone_proj_method_t pick_cone_proj_method(int v_dim)
+static cone_proj_method_t pick_cone_proj_method(cone_type_t type, int v_dim)
 {
+    if (type == CONE_EXPONENTIAL)
+        return PROJ_METHOD_THREAD;
     return (v_dim < 32) ? PROJ_METHOD_THREAD : PROJ_METHOD_WARP;
 }
 
@@ -470,6 +472,7 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
     state->num_cone_blocks = working_problem->cones.num_cones;
     state->cone_start_idx = NULL;
     state->cone_v_dim = NULL;
+    state->cone_is_fixed = NULL;
     state->cone_warm_start_primal = NULL;
     state->cone_warm_start_dual = NULL;
     state->cone_buckets = NULL;
@@ -482,7 +485,7 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
 
     cone_proj_method_t *methods = (cone_proj_method_t *)safe_malloc(K * sizeof(cone_proj_method_t));
     for (int i = 0; i < K; ++i)
-        methods[i] = pick_cone_proj_method(cones->v_dim[i]);
+        methods[i] = pick_cone_proj_method(cones->type[i], cones->v_dim[i]);
 
     int bucket_count[NUM_CONE_TYPES][NUM_PROJ_METHODS] = {{0}};
     for (int i = 0; i < K; ++i)
@@ -535,6 +538,13 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
     free(vdim_perm);
     free(methods);
 
+    if (cones->is_fixed)
+    {
+        size_t fb = (size_t)state->num_variables * sizeof(char);
+        CUDA_CHECK(cudaMalloc(&state->cone_is_fixed, fb));
+        CUDA_CHECK(cudaMemcpy(state->cone_is_fixed, cones->is_fixed, fb, cudaMemcpyHostToDevice));
+    }
+
     size_t wb = (size_t)K * sizeof(double);
     CUDA_CHECK(cudaMalloc(&state->cone_warm_start_primal, wb));
     CUDA_CHECK(cudaMemset(state->cone_warm_start_primal, 0, wb));
@@ -560,6 +570,10 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
                 CUDA_CHECK(cudaMemcpy(dst + w_idx, &w_val, sizeof(double), cudaMemcpyHostToDevice));
                 CUDA_CHECK(cudaMemcpy(dst + z_idx, &z_val, sizeof(double), cudaMemcpyHostToDevice));
             }
+        }
+        else if (cones->type[i] == CONE_EXPONENTIAL)
+        {
+            /* leave at default (zeros). */
         }
         else
         {
@@ -1086,6 +1100,8 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
         CUDA_CHECK(cudaFree(state->cone_start_idx));
     if (state->cone_v_dim)
         CUDA_CHECK(cudaFree(state->cone_v_dim));
+    if (state->cone_is_fixed)
+        CUDA_CHECK(cudaFree(state->cone_is_fixed));
     if (state->cone_buckets)
         free(state->cone_buckets);
     if (state->cone_warm_start_primal)

@@ -2629,6 +2629,325 @@ __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restri
     }
 }
 
+/* Project (r1, r2, r3) onto D * K_exp with D = diag(d1, d2, d3).
+   Reduces to standard projection onto K_exp when d1=d2=d3=1.
+   Algorithm: change variables u = D^{-1} x to convert to weighted projection onto K_exp.
+   With weights d_i^2, KKT gives a 1D Newton equation in rho = u_1/u_2 with parameters
+   alpha = (d3/d1)^2, beta = (d3/d2)^2. */
+__device__ static inline void project_exp_cone_point(
+    double r1, double r2, double r3, double d1, double d2, double d3, double *xo, double *yo, double *zo)
+{
+    const double E_CONST = 2.718281828459045;
+    double rr1 = r1 / d1, rr2 = r2 / d2, rr3 = r3 / d3;
+
+    /* Case 1: r in D K_exp  <=>  D^{-1} r in K_exp. */
+    if (rr2 > 0.0)
+    {
+        double ratio = rr1 / rr2;
+        if (ratio < 700.0 && rr2 * exp(ratio) <= rr3)
+        {
+            *xo = r1;
+            *yo = r2;
+            *zo = r3;
+            return;
+        }
+    }
+    else if (rr2 == 0.0 && rr1 <= 0.0 && rr3 >= 0.0)
+    {
+        *xo = r1;
+        *yo = r2;
+        *zo = r3;
+        return;
+    }
+
+    /* Case 2: r in polar = -D^{-1} K_exp^*.
+       -D r in K_exp^*: -d1 r1 < 0 (so r1>0), and  -(-d1 r1) exp(-d2 r2/(-d1 r1)) <= e * (-d3 r3)
+                       i.e.  d1 r1 * exp(d2 r2/(d1 r1)) <= -e d3 r3. */
+    if (r1 > 0.0)
+    {
+        double ratio = (d2 * r2) / (d1 * r1);
+        if (ratio < 700.0 && d1 * r1 * exp(ratio) + E_CONST * d3 * r3 <= 0.0)
+        {
+            *xo = 0.0;
+            *yo = 0.0;
+            *zo = 0.0;
+            return;
+        }
+    }
+    else if (r1 == 0.0 && r2 <= 0.0 && r3 <= 0.0)
+    {
+        *xo = 0.0;
+        *yo = 0.0;
+        *zo = 0.0;
+        return;
+    }
+
+    /* Case 3: recession edge.  D K_exp contains {(c1, 0, c3) : c1 <= 0, c3 >= 0}
+       (no scaling needed since y=0). Project x and z components, zero out y. */
+    if (rr1 <= 0.0 && rr2 <= 0.0)
+    {
+        *xo = r1;
+        *yo = 0.0;
+        *zo = (rr3 < 0.0) ? 0.0 : r3;
+        return;
+    }
+
+    /* Case 4: Newton iteration on f(rho)=0 with rho = u_1/u_2 (u = D^{-1} x). */
+    double alpha = (d3 / d1) * (d3 / d1);
+    double beta = (d3 / d2) * (d3 / d2);
+    double rho = 0.0;
+    bool diverged = false;
+    for (int it = 0; it < 100; ++it)
+    {
+        if (rho >= 299.0 || rho <= -299.0)
+        {
+            diverged = true;
+            break;
+        }
+        double e_rho = exp(rho);
+        double e_2rho = e_rho * e_rho;
+        double one_m_rho = 1.0 - rho;
+
+        double a_term = alpha - beta * rho * one_m_rho;
+        double b_term = beta * rr1 * one_m_rho - alpha * rr2;
+        double f = rr1 - rr2 * rho + rr3 * e_rho * a_term + e_2rho * b_term;
+
+        double da_drho = -beta * (1.0 - 2.0 * rho);
+        double db_drho = -beta * rr1;
+        double df = -rr2 + rr3 * e_rho * (a_term + da_drho) + e_2rho * (2.0 * b_term + db_drho);
+
+        if (fabs(df) < 1e-300)
+            break;
+        double step = f / df;
+        /* Damp aggressive steps to prevent runaway divergence. */
+        if (step > 10.0)
+            step = 10.0;
+        if (step < -10.0)
+            step = -10.0;
+        rho -= step;
+        if (fabs(step) < 1e-13 * (1.0 + fabs(rho)))
+            break;
+    }
+
+    double e_rho = exp(rho);
+    double denom = rho + alpha * e_rho * e_rho;
+    double u2 = (rr1 + alpha * rr3 * e_rho) / denom;
+
+    /* Robustness: if Newton failed to find a valid cone point, fall back to
+       projection onto the recession edge {(x, 0, z) : x <= 0, z >= 0}. */
+    if (diverged || !isfinite(u2) || u2 <= 0.0)
+    {
+        *xo = (r1 < 0.0) ? r1 : 0.0;
+        *yo = 0.0;
+        *zo = (r3 > 0.0) ? r3 : 0.0;
+        return;
+    }
+
+    double u1 = rho * u2;
+    double u3 = u2 * e_rho;
+
+    *xo = d1 * u1;
+    *yo = d2 * u2;
+    *zo = d3 * u3;
+}
+
+/* Project (rz0, rt0) onto the y-fixed cross-section of D K_exp with D = diag(d_r, d_y, d_t),
+   y slot held at scaled value ry. In scaled coordinates the constraint is
+       d_t * y_eff * exp((rz/d_r) / y_eff) <= rt,    y_eff = ry / d_y > 0.
+   Parameterize the boundary by u = exp((rz/d_r) / y_eff) > 0:
+       rz_s = d_r * y_eff * log(u),   rt_s = d_t * y_eff * u.
+   The KKT stationarity for distance^2 = (rz - rz0)^2 + (rt - rt0)^2 gives
+       f(u) = d_t^2 * y_eff * u^2 - d_t * rt0 * u + d_r^2 * y_eff * log(u) - d_r * rz0 = 0.
+   We bracket [u_lo, u_hi] with f(u_lo) < 0, f(u_hi) > 0 and run Newton with bisection
+   fallback. */
+__device__ static inline void
+project_2d_exp_persp(double rz0, double ry, double rt0, double d_r, double d_y, double d_t, double *rzo, double *rto)
+{
+    if (d_r <= 0.0 || d_y <= 0.0 || d_t <= 0.0)
+    {
+        *rzo = rz0;
+        *rto = rt0;
+        return;
+    }
+    double y_eff = ry / d_y;
+    if (y_eff <= 0.0)
+    {
+        /* Degenerate: K_exp interior needs y > 0. Project to recession edge. */
+        *rzo = (rz0 < 0.0) ? rz0 : 0.0;
+        *rto = (rt0 > 0.0) ? rt0 : 0.0;
+        return;
+    }
+
+    /* In-cone test. */
+    double arg = (rz0 / d_r) / y_eff;
+    if (arg < 700.0)
+    {
+        double rhs = y_eff * d_t * exp(arg);
+        if (rhs <= rt0)
+        {
+            *rzo = rz0;
+            *rto = rt0;
+            return;
+        }
+    }
+
+    double a = d_t * d_t * y_eff; /* > 0 */
+    double b = d_t * rt0;         /* any sign */
+    double c = d_r * d_r * y_eff; /* > 0 */
+    double e = d_r * rz0;         /* any sign */
+
+    /* Bracket. f(u_lo) < 0, f(u_hi) > 0. */
+    double u_lo = 1e-30;
+    double u_hi = 1.0;
+    for (int g = 0; g < 200; ++g)
+    {
+        double lu = log(u_hi);
+        double f_hi = a * u_hi * u_hi - b * u_hi + c * lu - e;
+        if (isfinite(f_hi) && f_hi > 0.0)
+            break;
+        u_hi *= 4.0;
+        if (u_hi > 1e150)
+            break;
+    }
+    for (int g = 0; g < 200; ++g)
+    {
+        double lu = log(u_lo);
+        double f_lo = a * u_lo * u_lo - b * u_lo + c * lu - e;
+        if (isfinite(f_lo) && f_lo < 0.0)
+            break;
+        u_lo *= 0.25;
+        if (u_lo < 1e-300)
+            break;
+    }
+    if (u_lo >= u_hi)
+    {
+        *rzo = rz0;
+        *rto = rt0;
+        return;
+    }
+
+    /* Geometric-mean init keeps log(u) well-conditioned. */
+    double u = exp(0.5 * (log(u_lo) + log(u_hi)));
+
+    for (int it = 0; it < 80; ++it)
+    {
+        double lu = log(u);
+        double f = a * u * u - b * u + c * lu - e;
+        double df = 2.0 * a * u - b + c / u;
+        if (f > 0.0)
+            u_hi = u;
+        else
+            u_lo = u;
+        double u_new;
+        if (df > 1e-300 && isfinite(df) && isfinite(f))
+        {
+            u_new = u - f / df;
+            if (!isfinite(u_new) || u_new <= u_lo || u_new >= u_hi)
+                u_new = exp(0.5 * (log(u_lo) + log(u_hi)));
+        }
+        else
+        {
+            u_new = exp(0.5 * (log(u_lo) + log(u_hi)));
+        }
+        if (fabs(u_new - u) < 1e-14 * (1.0 + fabs(u_new)))
+        {
+            u = u_new;
+            break;
+        }
+        u = u_new;
+    }
+    *rzo = d_r * y_eff * log(u);
+    *rto = d_t * y_eff * u;
+}
+
+__global__ void project_exp_cone_kernel(double *__restrict__ primal_solution,
+                                        const double *__restrict__ variable_rescaling,
+                                        double *__restrict__ warm_start,
+                                        const int *__restrict__ start_idx,
+                                        const int *__restrict__ v_dim,
+                                        const char *__restrict__ is_fixed,
+                                        int num_blocks)
+{
+    (void)warm_start;
+    (void)v_dim;
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int s_idx = start_idx[blk];
+    double r1 = primal_solution[s_idx + 0];
+    double r2 = primal_solution[s_idx + 1];
+    double r3 = primal_solution[s_idx + 2];
+
+    double d1 = variable_rescaling[s_idx + 0];
+    double d2 = variable_rescaling[s_idx + 1];
+    double d3 = variable_rescaling[s_idx + 2];
+
+    /* If the y slot is fixed, do a 2D cross-section projection at y = r2 (constant). */
+    if (is_fixed && is_fixed[s_idx + 1])
+    {
+        double zo, to;
+        project_2d_exp_persp(r1, r2, r3, d1, d2, d3, &zo, &to);
+        primal_solution[s_idx + 0] = zo;
+        /* primal_solution[s_idx + 1] left untouched (= r2). */
+        primal_solution[s_idx + 2] = to;
+        return;
+    }
+
+    double xo, yo, zo;
+    project_exp_cone_point(r1, r2, r3, d1, d2, d3, &xo, &yo, &zo);
+
+    primal_solution[s_idx + 0] = xo;
+    primal_solution[s_idx + 1] = yo;
+    primal_solution[s_idx + 2] = zo;
+}
+
+__global__ void compute_cone_dual_residual_exp_kernel(double *__restrict__ dual_residual,
+                                                      const double *__restrict__ objective_vector,
+                                                      const double *__restrict__ dual_product,
+                                                      const double *__restrict__ variable_rescaling,
+                                                      double *__restrict__ warm_start,
+                                                      const int *__restrict__ start_idx,
+                                                      const int *__restrict__ v_dim,
+                                                      const char *__restrict__ is_fixed,
+                                                      int num_blocks)
+{
+    (void)warm_start;
+    (void)v_dim;
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int s_idx = start_idx[blk];
+    double r1 = objective_vector[s_idx + 0] - dual_product[s_idx + 0];
+    double r2 = objective_vector[s_idx + 1] - dual_product[s_idx + 1];
+    double r3 = objective_vector[s_idx + 2] - dual_product[s_idx + 2];
+
+    /* y fixed: dual cross-section of K_exp^* projected onto (z, t) plane is {u <= 0, w >= 0}
+       (since y free in K_exp^* allows any feasible (u, w) with u <= 0, w >= 0). Residual
+       outside this set = (max(r_z, 0), 0, min(r_t, 0)). */
+    if (is_fixed && is_fixed[s_idx + 1])
+    {
+        dual_residual[s_idx + 0] = ((r1 > 0.0) ? r1 : 0.0) * variable_rescaling[s_idx + 0];
+        dual_residual[s_idx + 1] = 0.0;
+        dual_residual[s_idx + 2] = ((r3 < 0.0) ? r3 : 0.0) * variable_rescaling[s_idx + 2];
+        return;
+    }
+
+    /* Inverse scaling for dual cone projection (K_exp^* lives in dual space). */
+    double d1 = 1.0 / variable_rescaling[s_idx + 0];
+    double d2 = 1.0 / variable_rescaling[s_idx + 1];
+    double d3 = 1.0 / variable_rescaling[s_idx + 2];
+
+    /* dist(r, K_exp^*) = || -proj_{K_exp}(-r) || via Moreau identity. */
+    double xo, yo, zo;
+    project_exp_cone_point(-r1, -r2, -r3, d1, d2, d3, &xo, &yo, &zo);
+
+    dual_residual[s_idx + 0] = -xo * variable_rescaling[s_idx + 0];
+    dual_residual[s_idx + 1] = -yo * variable_rescaling[s_idx + 1];
+    dual_residual[s_idx + 2] = -zo * variable_rescaling[s_idx + 2];
+}
+
 __global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,
                                            const double *__restrict__ objective_vector,
                                            const double *__restrict__ dual_product,

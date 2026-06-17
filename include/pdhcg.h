@@ -37,8 +37,22 @@ extern "C"
                                     const double *var_ub,
                                     const double *objective_constant);
 
-    // Set up initial primal and dual solution for an qp_problem_t
+    qp_problem_t *create_conic_problem(const double *objective_c,
+                                       const matrix_desc_t *Q_desc,
+                                       const matrix_desc_t *R_desc,
+                                       const matrix_desc_t *D_desc,
+                                       const matrix_desc_t *A_desc,
+                                       const double *con_lb,
+                                       const double *con_ub,
+                                       const double *var_lb,
+                                       const double *var_ub,
+                                       const double *objective_constant,
+                                       int num_cones,
+                                       const cone_spec_t *cones);
+
     void set_start_values(qp_problem_t *prob, const double *primal, const double *dual);
+
+    int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value);
 
     qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig_qcqp, cone_type_t default_type);
 

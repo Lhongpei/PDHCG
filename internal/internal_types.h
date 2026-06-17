@@ -201,6 +201,7 @@ typedef struct
     int num_cone_blocks;
     int *cone_start_idx; /* [num_cone_blocks], permuted by bucket */
     int *cone_v_dim;     /* [num_cone_blocks], permuted by bucket */
+    char *cone_is_fixed; /* [num_variables] device array; NULL if no fixes */
     double *cone_warm_start_primal;
     double *cone_warm_start_dual;
     struct cone_bucket_s *cone_buckets; /* [num_cone_buckets] */

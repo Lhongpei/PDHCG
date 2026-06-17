@@ -64,8 +64,8 @@ extern "C"
     {
         CONE_ROTATED_SOC = 0,
         CONE_STANDARD_SOC = 1,
-        /* CONE_EXPONENTIAL = 2, */
-        NUM_CONE_TYPES = 2
+        CONE_EXPONENTIAL = 2,
+        NUM_CONE_TYPES = 3
     } cone_type_t;
 
     typedef struct
@@ -74,7 +74,16 @@ extern "C"
         int *start_idx;    /* [num_cones] */
         int *v_dim;        /* [num_cones] */
         cone_type_t *type; /* [num_cones] */
+        char *is_fixed;
     } cone_blocks_t;
+
+    typedef struct
+    {
+        cone_type_t type;
+        int start_idx;
+        int v_dim;
+        const char *is_fixed;
+    } cone_spec_t;
 
     typedef struct
     {
