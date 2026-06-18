@@ -34,12 +34,13 @@ extern "C"
 
     __global__ void element_wise_mul_inplace_kernel(double *__restrict__ x, const double *__restrict__ d, int n);
 
-    __global__ void compute_diag_q_obj_and_grad_kernel(const double *__restrict__ Q_diag,
-                                                       const double *__restrict__ x,
-                                                       const double *__restrict__ c,
-                                                       double *__restrict__ Qx,
-                                                       double *__restrict__ obj_grad,
-                                                       int n);
+    __global__ void vector_sub_kernel(double *__restrict__ direction,
+                                      const double *__restrict__ a,
+                                      const double *__restrict__ b,
+                                      int n);
+
+    __global__ void
+    vector_add_kernel(const double *__restrict__ a, const double *__restrict__ b, double *__restrict__ out, int n);
 
     // ======================================================================
     // Advanced Metrics & Reduced Costs

@@ -304,15 +304,19 @@ static void dispatch_cone_projection(pdhg_solver_state_t *state, double *primal_
     }
 }
 
-static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state, double primal_step_size)
+static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state,
+                                            double primal_step_size,
+                                            const double *Q_diag,
+                                            double *pdhg_primal,
+                                            double *reflected_primal,
+                                            const double *current_primal)
 {
-    const double *Q_diag = state->quadratic_objective_term->diagonal_objective_matrix;
     for (int b = 0; b < state->num_cone_buckets; ++b)
     {
         const cone_bucket_t *bk = &state->cone_buckets[b];
-        proj_diag_q_launch_table[bk->type][PROJ_METHOD_THREAD](state->pdhg_primal_solution,
-                                                               state->reflected_primal_solution,
-                                                               state->current_primal_solution,
+        proj_diag_q_launch_table[bk->type][PROJ_METHOD_THREAD](pdhg_primal,
+                                                               reflected_primal,
+                                                               current_primal,
                                                                state->variable_rescaling,
                                                                Q_diag,
                                                                primal_step_size,
@@ -388,6 +392,14 @@ void update_obj_product(pdhg_solver_state_t *state, double *primal_solution)
         case PDHCG_NON_Q:
             return;
 
+        case PDHCG_DIAG_Q:
+            element_wise_mul_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                state->quadratic_objective_term->diagonal_objective_matrix,
+                primal_solution,
+                state->quadratic_objective_term->primal_obj_product,
+                state->num_variables);
+            break;
+
         case PDHCG_SPARSE_Q:
             pdhcg_spmv_execute(state->sparse_handle,
                                state->quadratic_objective_term->spmv_ctx_Q,
@@ -402,28 +414,7 @@ void update_obj_product(pdhg_solver_state_t *state, double *primal_solution)
                                    PDHCG_OP_SUM,
                                    PDHCG_SCOPE_ROW,
                                    0);
-            return;
-
-        case PDHCG_DIAG_Q:
-            if (state->effective_obj_grad)
-            {
-                compute_diag_q_obj_and_grad_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-                    state->quadratic_objective_term->diagonal_objective_matrix,
-                    primal_solution,
-                    state->objective_vector,
-                    state->quadratic_objective_term->primal_obj_product,
-                    state->effective_obj_grad,
-                    state->num_variables);
-            }
-            else
-            {
-                element_wise_mul_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-                    state->quadratic_objective_term->diagonal_objective_matrix,
-                    primal_solution,
-                    state->quadratic_objective_term->primal_obj_product,
-                    state->num_variables);
-            }
-            return;
+            break;
 
         case PDHCG_LOW_RANK_Q:
             pdhcg_spmv_execute(state->sparse_handle,
@@ -448,7 +439,7 @@ void update_obj_product(pdhg_solver_state_t *state, double *primal_solution)
                                &HOST_ZERO,
                                state->quadratic_objective_term->Rx_product,
                                state->quadratic_objective_term->primal_obj_product);
-            return;
+            break;
 
         case PDHCG_LOW_RANK_PLUS_SPARSE_Q:
             pdhcg_spmv_execute(state->sparse_handle,
@@ -487,11 +478,20 @@ void update_obj_product(pdhg_solver_state_t *state, double *primal_solution)
                                &HOST_ONE,
                                state->quadratic_objective_term->Rx_product,
                                state->quadratic_objective_term->primal_obj_product);
-            return;
+            break;
 
         default:
             fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
             exit(EXIT_FAILURE);
+    }
+
+    if (state->effective_obj_grad)
+    {
+        vector_add_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+            state->objective_vector,
+            state->quadratic_objective_term->primal_obj_product,
+            state->effective_obj_grad,
+            state->num_variables);
     }
 }
 
@@ -641,6 +641,17 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
             state->num_variables);
     }
 
+    /* BB init writes pdhg = box-clamped(current - alpha * grad). For QP + cones we
+       additionally project pdhg onto the cone (unweighted LP-style projection: BB does
+       projected gradient onto Box ∩ K, where Box ∩ K factors per-slot because cone vars
+       have no finite box). Then direction = pdhg_after_cone - current. */
+    if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
+    {
+        dispatch_cone_projection(state, state->pdhg_primal_solution);
+        vector_sub_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+            bb->direction, state->pdhg_primal_solution, state->current_primal_solution, state->num_variables);
+    }
+
     cublasSetPointerMode(state->blas_handle, CUBLAS_POINTER_MODE_DEVICE);
 
     int check_frequency = 1;
@@ -689,6 +700,14 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
 
         pdhcg_all_reduce_scalar(state->grid_context, d_tmp, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, true);
 
+        if (state->var_set_type == VAR_SET_CONTAIN_CONIC && state->bb_pdhg_snapshot)
+        {
+            CUDA_CHECK(cudaMemcpyAsync(state->bb_pdhg_snapshot,
+                                       state->pdhg_primal_solution,
+                                       (size_t)state->num_variables * sizeof(double),
+                                       cudaMemcpyDeviceToDevice));
+        }
+
         if (precond)
         {
             compute_bb_alpha_M_kernel<<<1, 1>>>(d_stMs, d_tmp, d_alpha);
@@ -716,6 +735,14 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
                 d_alpha,
                 state->num_variables);
         }
+
+        if (state->var_set_type == VAR_SET_CONTAIN_CONIC && state->bb_pdhg_snapshot)
+        {
+            dispatch_cone_projection(state, state->pdhg_primal_solution);
+            vector_sub_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                bb->direction, state->pdhg_primal_solution, state->bb_pdhg_snapshot, state->num_variables);
+        }
+
         inner_solver_iter++;
     }
 
@@ -808,9 +835,18 @@ void pdhg_update(pdhg_solver_state_t *state)
 
     if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
     {
-        if (state->quadratic_objective_term->quad_obj_type == PDHCG_DIAG_Q)
+        quad_obj_type_t qt = state->quadratic_objective_term->quad_obj_type;
+        if (qt == PDHCG_DIAG_Q)
         {
-            dispatch_cone_projection_diag_q(state, primal_step_size);
+            dispatch_cone_projection_diag_q(state,
+                                            primal_step_size,
+                                            state->quadratic_objective_term->diagonal_objective_matrix,
+                                            state->pdhg_primal_solution,
+                                            state->reflected_primal_solution,
+                                            state->current_primal_solution);
+        }
+        else if (qt == PDHCG_SPARSE_Q || qt == PDHCG_LOW_RANK_Q || qt == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+        {
         }
         else
         {

@@ -399,51 +399,6 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     return prob;
 }
 
-static int q_nondiag_touches_cone(const qp_problem_t *prob, const char *in_cone)
-{
-    int n = prob->num_variables;
-    if (prob->objective_sparse_matrix && prob->objective_sparse_matrix_num_nonzeros > 0)
-    {
-        const CsrComponent *Q = prob->objective_sparse_matrix;
-        for (int r = 0; r < n; ++r)
-        {
-            for (int k = Q->row_ptr[r]; k < Q->row_ptr[r + 1]; ++k)
-            {
-                int c = Q->col_ind[k];
-                if (r == c)
-                    continue;
-                if (in_cone[r] || in_cone[c])
-                {
-                    fprintf(stderr,
-                            "[create_conic_problem] Q off-diagonal nonzero at (%d, %d) touches a cone variable; "
-                            "off-diagonal Q on cone vars is not supported.\n",
-                            r,
-                            c);
-                    return 1;
-                }
-            }
-        }
-    }
-    if (prob->objective_lowrank_matrix && prob->objective_lowrank_matrix_num_nonzeros > 0)
-    {
-        const CsrComponent *R = prob->objective_lowrank_matrix;
-        for (int r = 0; r < prob->num_rank_lowrank_obj; ++r)
-        {
-            for (int k = R->row_ptr[r]; k < R->row_ptr[r + 1]; ++k)
-            {
-                int c = R->col_ind[k];
-                if (in_cone[c])
-                {
-                    fprintf(
-                        stderr, "[create_conic_problem] R (low-rank Q) has nonzero on cone variable column %d\n", c);
-                    return 1;
-                }
-            }
-        }
-    }
-    return 0;
-}
-
 /* Build the per-variable diagonal of Q (0.0 for missing entries). Caller owns the returned
    buffer (malloc, length = prob->num_variables). NULL if no sparse Q. */
 static double *extract_q_diagonal(const qp_problem_t *prob)
@@ -498,6 +453,27 @@ static int rsoc_q_symmetry_violated(const qp_problem_t *prob, int num_cones, con
     return violated;
 }
 
+/* Returns 1 iff Q's sparse CSR has no off-diagonal entries (i.e., would classify as
+   PDHCG_DIAG_Q under determine_quad_obj_type).  R (low-rank) is treated as off-diagonal
+   for safety: low-rank Q can introduce dense couplings. */
+static int q_is_purely_diagonal(const qp_problem_t *prob)
+{
+    if (prob->objective_lowrank_matrix && prob->objective_lowrank_matrix_num_nonzeros > 0)
+        return 0;
+    if (!prob->objective_sparse_matrix || prob->objective_sparse_matrix_num_nonzeros == 0)
+        return 1;
+    const CsrComponent *Q = prob->objective_sparse_matrix;
+    for (int r = 0; r < prob->num_variables; ++r)
+    {
+        for (int k = Q->row_ptr[r]; k < Q->row_ptr[r + 1]; ++k)
+        {
+            if (Q->col_ind[k] != r)
+                return 0;
+        }
+    }
+    return 1;
+}
+
 qp_problem_t *create_conic_problem(const double *objective_c,
                                    const matrix_desc_t *Q_desc,
                                    const matrix_desc_t *R_desc,
@@ -544,21 +520,12 @@ qp_problem_t *create_conic_problem(const double *objective_c,
             n_orig = s;
     }
 
-    if (q_nondiag_touches_cone(prob, in_cone))
-    {
-        fprintf(stderr,
-                "[create_conic_problem] Q must be diagonal on cone variables; "
-                "off-diagonal coupling requires slack variables outside the cone.\n");
-        free(in_cone);
-        qp_problem_free(prob);
-        return NULL;
-    }
     free(in_cone);
 
-    /* Diagonal Q on cone vars is allowed by the diag-Q cone projection kernels, but the
-       rotated-SOC projection requires Q[s] == Q[t]. Hard-fail at problem-creation time so
-       this footgun cannot reach the GPU. */
-    if (rsoc_q_symmetry_violated(prob, num_cones, cones))
+    /* RSOC weighted prox (DIAG_Q outer path) cannot handle Q_s != Q_t; hard-fail at
+       problem-creation time so this footgun cannot reach the GPU. The SPARSE_Q + RSOC
+       path goes through BB with unweighted cone projection and is unaffected. */
+    if (q_is_purely_diagonal(prob) && rsoc_q_symmetry_violated(prob, num_cones, cones))
     {
         qp_problem_free(prob);
         return NULL;

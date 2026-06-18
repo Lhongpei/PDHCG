@@ -42,20 +42,24 @@ element_wise_mul_kernel(const double *__restrict__ A, const double *__restrict__
     }
 }
 
-__global__ void compute_diag_q_obj_and_grad_kernel(const double *__restrict__ Q_diag,
-                                                   const double *__restrict__ x,
-                                                   const double *__restrict__ c,
-                                                   double *__restrict__ Qx,
-                                                   double *__restrict__ obj_grad,
-                                                   int n)
+__global__ void
+vector_sub_kernel(double *__restrict__ direction, const double *__restrict__ a, const double *__restrict__ b, int n)
 {
     for (int i = blockDim.x * blockIdx.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x)
     {
-        double qxi = Q_diag[i] * x[i];
-        Qx[i] = qxi;
-        obj_grad[i] = c[i] + qxi;
+        direction[i] = a[i] - b[i];
     }
 }
+
+__global__ void
+vector_add_kernel(const double *__restrict__ a, const double *__restrict__ b, double *__restrict__ out, int n)
+{
+    for (int i = blockDim.x * blockIdx.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x)
+    {
+        out[i] = a[i] + b[i];
+    }
+}
+
 __global__ void compute_lp_next_pdhg_primal_solution_kernel(const double *current_primal,
                                                             double *reflected_primal,
                                                             const double *dual_product,

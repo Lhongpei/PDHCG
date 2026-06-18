@@ -477,6 +477,7 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
     state->cone_warm_start_primal = NULL;
     state->cone_warm_start_dual = NULL;
     state->effective_obj_grad = NULL;
+    state->bb_pdhg_snapshot = NULL;
     state->cone_buckets = NULL;
     state->num_cone_buckets = 0;
     if (state->var_set_type == VAR_SET_BOX_ONLY)
@@ -555,10 +556,16 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
 
     {
         quad_obj_type_t qt = rescale_info->processed_problem ? rescale_info->processed_problem->quad_type : PDHCG_NON_Q;
-        if (qt == PDHCG_DIAG_Q)
+        size_t vb = (size_t)state->num_variables * sizeof(double);
+        if (qt != PDHCG_NON_Q)
         {
-            size_t vb = (size_t)state->num_variables * sizeof(double);
+            /* effective_obj_grad = c + Q*x (re-populated each iter by update_obj_product). */
             CUDA_CHECK(cudaMalloc(&state->effective_obj_grad, vb));
+        }
+        if (qt == PDHCG_SPARSE_Q || qt == PDHCG_LOW_RANK_Q || qt == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+        {
+            /* Snapshot buffer for BB direction fixup after in-loop cone projection. */
+            CUDA_CHECK(cudaMalloc(&state->bb_pdhg_snapshot, vb));
         }
     }
 
@@ -1119,6 +1126,8 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
         CUDA_CHECK(cudaFree(state->cone_warm_start_primal));
     if (state->effective_obj_grad)
         CUDA_CHECK(cudaFree(state->effective_obj_grad));
+    if (state->bb_pdhg_snapshot)
+        CUDA_CHECK(cudaFree(state->bb_pdhg_snapshot));
     if (state->cone_warm_start_dual)
         CUDA_CHECK(cudaFree(state->cone_warm_start_dual));
 

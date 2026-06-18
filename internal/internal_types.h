@@ -206,6 +206,7 @@ typedef struct
     double *cone_warm_start_primal;
     double *cone_warm_start_dual;
     double *effective_obj_grad;
+    double *bb_pdhg_snapshot;
     struct cone_bucket_s *cone_buckets; /* [num_cone_buckets] */
     int num_cone_buckets;
     int num_original_variables;
