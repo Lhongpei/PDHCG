@@ -481,20 +481,67 @@ static PyMatrixView get_matrix_from_python(py::object A, double zero_tol)
                                 "scipy.sparse (csr/csc/coo)");
 }
 // solve function
+/* Parse a Python list of dicts into a vector of cone_spec_t plus per-cone is_fixed byte
+   storage (kept alive in cones_keep_alive until create_qp_problem returns).  Each entry:
+       {"type": "soc" | "rsoc" | "exp", "start_idx": int, "v_dim": int (omitted for exp),
+        "is_fixed": optional bytes/list of length v_dim+2 (or 3 for exp)} */
+static std::vector<cone_spec_t> parse_cone_specs(py::object cones, std::vector<std::vector<char>> &keep_alive)
+{
+    std::vector<cone_spec_t> out;
+    if (cones.is_none())
+        return out;
+    py::list lst = py::cast<py::list>(cones);
+    out.reserve(lst.size());
+    keep_alive.reserve(lst.size());
+    for (auto &handle : lst)
+    {
+        py::dict d = py::cast<py::dict>(py::reinterpret_borrow<py::object>(handle));
+        std::string ty = py::cast<std::string>(d["type"]);
+        cone_spec_t cs{};
+        if (ty == "soc")
+            cs.type = CONE_STANDARD_SOC;
+        else if (ty == "rsoc")
+            cs.type = CONE_ROTATED_SOC;
+        else if (ty == "exp")
+            cs.type = CONE_EXPONENTIAL;
+        else
+            throw std::invalid_argument("cone type must be 'soc', 'rsoc', or 'exp'; got '" + ty + "'");
+        cs.start_idx = py::cast<int>(d["start_idx"]);
+        cs.v_dim = (cs.type == CONE_EXPONENTIAL) ? 1 : py::cast<int>(d["v_dim"]);
+        cs.is_fixed = nullptr;
+        if (d.contains("is_fixed") && !d["is_fixed"].is_none())
+        {
+            py::sequence seq = py::cast<py::sequence>(d["is_fixed"]);
+            int slot_count = (cs.type == CONE_EXPONENTIAL) ? 3 : (cs.v_dim + 2);
+            if ((int)seq.size() != slot_count)
+                throw std::invalid_argument("is_fixed length must equal cone slot count (" +
+                                            std::to_string(slot_count) + ")");
+            std::vector<char> buf(slot_count);
+            for (int j = 0; j < slot_count; ++j)
+                buf[j] = py::cast<bool>(seq[j]) ? 1 : 0;
+            keep_alive.push_back(std::move(buf));
+            cs.is_fixed = keep_alive.back().data();
+        }
+        out.push_back(cs);
+    }
+    return out;
+}
+
 static py::dict solve_once(py::object Q,
                            py::object R,
                            py::object A,
-                           py::object objective_vector,       // c
-                           py::object objective_constant,     // c0
-                           py::object variable_lower_bound,   // lb
-                           py::object variable_upper_bound,   // ub
-                           py::object constraint_lower_bound, // l
-                           py::object constraint_upper_bound, // u
+                           py::object objective_vector,
+                           py::object objective_constant,
+                           py::object variable_lower_bound,
+                           py::object variable_upper_bound,
+                           py::object constraint_lower_bound,
+                           py::object constraint_upper_bound,
                            double zero_tolerance = 0.0,
                            py::object params = py::none(),
                            py::object primal_start = py::none(),
                            py::object dual_start = py::none(),
-                           py::object D = py::none())
+                           py::object D = py::none(),
+                           py::object cones = py::none())
 {
     static std::once_flag cuda_init_flag;
     std::call_once(cuda_init_flag, []() { cudaFree(0); });
@@ -622,8 +669,21 @@ static py::dict solve_once(py::object Q,
         }
     }
 
-    qp_problem_t *prob =
-        create_qp_problem(c_ptr, q_desc_ptr, r_desc_ptr, d_desc_ptr, a_desc_ptr, l_ptr, u_ptr, lb_ptr, ub_ptr, c0_ptr);
+    std::vector<std::vector<char>> cones_keep;
+    std::vector<cone_spec_t> cones_vec = parse_cone_specs(cones, cones_keep);
+
+    qp_problem_t *prob = create_qp_problem(c_ptr,
+                                           q_desc_ptr,
+                                           r_desc_ptr,
+                                           d_desc_ptr,
+                                           a_desc_ptr,
+                                           l_ptr,
+                                           u_ptr,
+                                           lb_ptr,
+                                           ub_ptr,
+                                           c0_ptr,
+                                           (int)cones_vec.size(),
+                                           cones_vec.empty() ? nullptr : cones_vec.data());
     if (!prob)
     {
         throw std::runtime_error("create_qp_problem failed.");
@@ -714,7 +774,6 @@ static py::dict solve_once(py::object Q,
     return info;
 }
 
-// module
 PYBIND11_MODULE(_pdhcg_core, m)
 {
     m.doc() = "pdhcg core bindings (auto-detect dense/CSR/CSC/COO; initialize "
@@ -737,5 +796,6 @@ PYBIND11_MODULE(_pdhcg_core, m)
           py::arg("params") = py::none(),
           py::arg("primal_start") = py::none(),
           py::arg("dual_start") = py::none(),
-          py::arg("D") = py::none());
+          py::arg("D") = py::none(),
+          py::arg("cones") = py::none());
 }

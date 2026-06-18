@@ -39,7 +39,9 @@ qp_problem_t *create_qp_problem(const double *objective_c,
                                 const double *con_ub,
                                 const double *var_lb,
                                 const double *var_ub,
-                                const double *objective_constant)
+                                const double *objective_constant,
+                                int num_cones,
+                                const cone_spec_t *cones)
 {
     qp_problem_t *prob = (qp_problem_t *)safe_malloc(sizeof(qp_problem_t));
     prob->primal_start = NULL;
@@ -390,33 +392,11 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->cones.is_fixed = NULL;
     prob->num_original_variables = 0;
 
-    return prob;
-}
-
-qp_problem_t *create_conic_problem(const double *objective_c,
-                                   const matrix_desc_t *Q_desc,
-                                   const matrix_desc_t *R_desc,
-                                   const matrix_desc_t *D_desc,
-                                   const matrix_desc_t *A_desc,
-                                   const double *con_lb,
-                                   const double *con_ub,
-                                   const double *var_lb,
-                                   const double *var_ub,
-                                   const double *objective_constant,
-                                   int num_cones,
-                                   const cone_spec_t *cones)
-{
-    qp_problem_t *prob = create_qp_problem(
-        objective_c, Q_desc, R_desc, D_desc, A_desc, con_lb, con_ub, var_lb, var_ub, objective_constant);
-    if (!prob)
-        return NULL;
-
     if (num_cones <= 0 || cones == NULL)
         return prob;
 
     int n_vars = prob->num_variables;
     int n_orig = n_vars;
-    char *in_cone = (char *)safe_calloc(n_vars, sizeof(char));
     for (int i = 0; i < num_cones; ++i)
     {
         int s = cones[i].start_idx;
@@ -424,28 +404,22 @@ qp_problem_t *create_conic_problem(const double *objective_c,
         if (s < 0 || s + len > n_vars)
         {
             fprintf(stderr,
-                    "[create_conic_problem] cone %d out of range: start=%d len=%d num_variables=%d\n",
+                    "[create_qp_problem] cone %d out of range: start=%d len=%d num_variables=%d\n",
                     i,
                     s,
                     len,
                     n_vars);
-            free(in_cone);
             qp_problem_free(prob);
             return NULL;
         }
-        for (int j = s; j < s + len; ++j)
-            in_cone[j] = 1;
         if (s < n_orig)
             n_orig = s;
     }
-
-    free(in_cone);
 
     prob->cones.num_cones = num_cones;
     prob->cones.start_idx = (int *)safe_malloc(num_cones * sizeof(int));
     prob->cones.v_dim = (int *)safe_malloc(num_cones * sizeof(int));
     prob->cones.type = (cone_type_t *)safe_malloc(num_cones * sizeof(cone_type_t));
-    prob->cones.is_fixed = NULL;
     int any_fix = 0;
     for (int i = 0; i < num_cones; ++i)
     {

@@ -24,8 +24,8 @@ extern "C"
 {
 #endif
 
-    // create an qp_problem_t from matrix descriptors.
-    // pass NULL for the default D = I.
+    /* Pass NULL for any optional matrix descriptor (defaults: Q=0, R=0, D=I).
+       Pass num_cones=0 and cones=NULL for a plain QP without cone constraints. */
     qp_problem_t *create_qp_problem(const double *objective_c,
                                     const matrix_desc_t *Q_desc,
                                     const matrix_desc_t *R_desc,
@@ -35,20 +35,9 @@ extern "C"
                                     const double *con_ub,
                                     const double *var_lb,
                                     const double *var_ub,
-                                    const double *objective_constant);
-
-    qp_problem_t *create_conic_problem(const double *objective_c,
-                                       const matrix_desc_t *Q_desc,
-                                       const matrix_desc_t *R_desc,
-                                       const matrix_desc_t *D_desc,
-                                       const matrix_desc_t *A_desc,
-                                       const double *con_lb,
-                                       const double *con_ub,
-                                       const double *var_lb,
-                                       const double *var_ub,
-                                       const double *objective_constant,
-                                       int num_cones,
-                                       const cone_spec_t *cones);
+                                    const double *objective_constant,
+                                    int num_cones,
+                                    const cone_spec_t *cones);
 
     void set_start_values(qp_problem_t *prob, const double *primal, const double *dual);
 
