@@ -230,28 +230,6 @@ static void ruiz_rescaling(qp_problem_t *problem,
                     con_rescale[row] = val;
             }
         }
-        // for (int q_row = 0; problem->objective_sparse_matrix && q_row < num_vars; ++q_row)
-        // {
-        //     for (int nz_idx = problem->objective_sparse_matrix->row_ptr[q_row];
-        //          nz_idx < problem->objective_sparse_matrix->row_ptr[q_row + 1];
-        //          ++nz_idx)
-        //     {
-        //         int q_col = problem->objective_sparse_matrix->col_ind[nz_idx];
-        //         if (q_col < 0 || q_col >= num_vars)
-        //         {
-        //             fprintf(stderr,
-        //                     "Error: Invalid column index %d at nz_idx %d for q_row %d. "
-        //                     "Must be in [0, %d).\n",
-        //                     q_col,
-        //                     nz_idx,
-        //                     q_row,
-        //                     num_vars);
-        //         }
-        //         double val = fabs(problem->objective_sparse_matrix->val[nz_idx]);
-        //         if (val > var_rescale[q_col])
-        //             var_rescale[q_col] = val;
-        //     }
-        // }
         for (int i = 0; i < num_vars; ++i)
             var_rescale[i] = (var_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(var_rescale[i]);
         for (int i = 0; i < num_cons; ++i)
@@ -295,21 +273,6 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
             con_rescale[row] += pow(val, alpha);
         }
     }
-
-    // if (problem->objective_sparse_matrix)
-    // {
-    //     for (int q_row = 0; q_row < num_vars; ++q_row)
-    //     {
-    //         for (int nz_idx = problem->objective_sparse_matrix->row_ptr[q_row];
-    //              nz_idx < problem->objective_sparse_matrix->row_ptr[q_row + 1];
-    //              ++nz_idx)
-    //         {
-    //             int q_col = problem->objective_sparse_matrix->col_ind[nz_idx];
-    //             double val = fabs(problem->objective_sparse_matrix->val[nz_idx]);
-    //             var_rescale[q_col] += pow(val, 2.0 - alpha);
-    //         }
-    //     }
-    // }
 
     for (int i = 0; i < num_vars; ++i)
         var_rescale[i] = (var_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(var_rescale[i]);

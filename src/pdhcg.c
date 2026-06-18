@@ -30,7 +30,6 @@ limitations under the License.
 
 volatile sig_atomic_t g_pdhcg_cancel_request = 0;
 
-// create an qp_problem_t from a matrix
 qp_problem_t *create_qp_problem(const double *objective_c,
                                 const matrix_desc_t *Q_desc,
                                 const matrix_desc_t *R_desc,
@@ -56,11 +55,11 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     }
     else if (Q_desc)
     {
-        n = Q_desc->n; // Infer variables from Quadratic term if A is missing
+        n = Q_desc->n;
     }
     else if (R_desc)
     {
-        n = R_desc->n; // Infer variables from Low-Rank term if others missing
+        n = R_desc->n;
     }
     else
     {
@@ -81,7 +80,6 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->num_variables = n;
     prob->num_constraints = m;
 
-    // --- 2. Process Constraint Matrix (A) [OPTIONAL] ---
     prob->constraint_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
     if (A_desc)
     {
@@ -149,14 +147,12 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     }
     else
     {
-        // Handle missing A: Initialize empty 0xN matrix
         prob->constraint_matrix_num_nonzeros = 0;
         prob->constraint_matrix->row_ptr = (int *)safe_calloc(m + 1, sizeof(int));
         prob->constraint_matrix->col_ind = NULL;
         prob->constraint_matrix->val = NULL;
     }
 
-    // --- 3. Process Sparse Objective Matrix (Q) [OPTIONAL] ---
     prob->objective_sparse_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
     if (Q_desc)
     {
@@ -227,13 +223,12 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     }
     else
     {
-        // For empty Q matrix, allocate row_ptr with n+1 elements (all zeros)
         prob->objective_sparse_matrix->row_ptr = (int *)safe_calloc(n + 1, sizeof(int));
         prob->objective_sparse_matrix->col_ind = NULL;
         prob->objective_sparse_matrix->val = NULL;
         prob->objective_sparse_matrix_num_nonzeros = 0;
     }
-    // --- 4. Process Low-Rank Objective Matrix (R) [OPTIONAL] ---
+
     prob->objective_lowrank_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
     prob->num_rank_lowrank_obj = 0;
 
@@ -376,7 +371,6 @@ qp_problem_t *create_qp_problem(const double *objective_c,
         }
     }
 
-    // default fill values
     prob->objective_constant = objective_constant ? *objective_constant : 0.0;
     fill_or_copy(&prob->objective_vector, prob->num_variables, objective_c, 0.0);
     fill_or_copy(&prob->variable_lower_bound, prob->num_variables, var_lb, -INFINITY);
@@ -397,81 +391,6 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->num_original_variables = 0;
 
     return prob;
-}
-
-/* Build the per-variable diagonal of Q (0.0 for missing entries). Caller owns the returned
-   buffer (malloc, length = prob->num_variables). NULL if no sparse Q. */
-static double *extract_q_diagonal(const qp_problem_t *prob)
-{
-    int n = prob->num_variables;
-    if (!prob->objective_sparse_matrix || prob->objective_sparse_matrix_num_nonzeros == 0)
-        return NULL;
-    double *q_diag = (double *)safe_calloc(n, sizeof(double));
-    const CsrComponent *Q = prob->objective_sparse_matrix;
-    for (int r = 0; r < n; ++r)
-    {
-        for (int k = Q->row_ptr[r]; k < Q->row_ptr[r + 1]; ++k)
-        {
-            if (Q->col_ind[k] == r)
-                q_diag[r] = Q->val[k];
-        }
-    }
-    return q_diag;
-}
-
-/* Hard-fail if any RSOC cone has Q[s_slot] != Q[t_slot] -- the rotated-SOC diag-Q projection
-   kernel cannot handle asymmetric weights and silently bypasses when it sees them. Returns 1
-   if a violation is found (and prints to stderr). */
-static int rsoc_q_symmetry_violated(const qp_problem_t *prob, int num_cones, const cone_spec_t *cones)
-{
-    double *q_diag = extract_q_diagonal(prob);
-    if (!q_diag)
-        return 0;
-    int violated = 0;
-    for (int i = 0; i < num_cones; ++i)
-    {
-        if (cones[i].type != CONE_ROTATED_SOC)
-            continue;
-        int s_slot = cones[i].start_idx + cones[i].v_dim;
-        int t_slot = cones[i].start_idx + cones[i].v_dim + 1;
-        if (q_diag[s_slot] != q_diag[t_slot])
-        {
-            fprintf(stderr,
-                    "[create_conic_problem] rotated SOC cone %d: Q diagonal asymmetric at s/t "
-                    "slots (Q[%d] = %.17g, Q[%d] = %.17g). The rotated-SOC weighted prox requires "
-                    "Q[s] == Q[t]; split the cone or zero one of the entries.\n",
-                    i,
-                    s_slot,
-                    q_diag[s_slot],
-                    t_slot,
-                    q_diag[t_slot]);
-            violated = 1;
-            break;
-        }
-    }
-    free(q_diag);
-    return violated;
-}
-
-/* Returns 1 iff Q's sparse CSR has no off-diagonal entries (i.e., would classify as
-   PDHCG_DIAG_Q under determine_quad_obj_type).  R (low-rank) is treated as off-diagonal
-   for safety: low-rank Q can introduce dense couplings. */
-static int q_is_purely_diagonal(const qp_problem_t *prob)
-{
-    if (prob->objective_lowrank_matrix && prob->objective_lowrank_matrix_num_nonzeros > 0)
-        return 0;
-    if (!prob->objective_sparse_matrix || prob->objective_sparse_matrix_num_nonzeros == 0)
-        return 1;
-    const CsrComponent *Q = prob->objective_sparse_matrix;
-    for (int r = 0; r < prob->num_variables; ++r)
-    {
-        for (int k = Q->row_ptr[r]; k < Q->row_ptr[r + 1]; ++k)
-        {
-            if (Q->col_ind[k] != r)
-                return 0;
-        }
-    }
-    return 1;
 }
 
 qp_problem_t *create_conic_problem(const double *objective_c,
@@ -521,15 +440,6 @@ qp_problem_t *create_conic_problem(const double *objective_c,
     }
 
     free(in_cone);
-
-    /* RSOC weighted prox (DIAG_Q outer path) cannot handle Q_s != Q_t; hard-fail at
-       problem-creation time so this footgun cannot reach the GPU. The SPARSE_Q + RSOC
-       path goes through BB with unweighted cone projection and is unaffected. */
-    if (q_is_purely_diagonal(prob) && rsoc_q_symmetry_violated(prob, num_cones, cones))
-    {
-        qp_problem_free(prob);
-        return NULL;
-    }
 
     prob->cones.num_cones = num_cones;
     prob->cones.start_idx = (int *)safe_malloc(num_cones * sizeof(int));
@@ -703,14 +613,12 @@ int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
 
 pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters_t *params)
 {
-    // argument checks
     if (!prob)
     {
         fprintf(stderr, "[interface] solve_qp_problem: invalid arguments.\n");
         return NULL;
     }
 
-    // prepare parameters: use defaults if not provided
     pdhg_parameters_t local_params;
     if (params)
     {
@@ -721,7 +629,6 @@ pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters
         set_default_parameters(&local_params);
     }
 
-    // call optimizer
     pdhcg_result_t *res = optimize(&local_params, prob);
     if (!res)
     {

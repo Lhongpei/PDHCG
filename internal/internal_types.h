@@ -48,7 +48,6 @@ typedef struct
 
     cusparseDnVecDescr_t vec_primal_obj_prod;
 
-    // Low rank Component
     cu_sparse_matrix_csr_t *objective_lowrank_matrix;
     cu_sparse_matrix_csr_t *objective_lowrank_matrix_t;
     pdhcg_spmv_ctx_t *spmv_ctx_R;
@@ -65,7 +64,6 @@ typedef struct
     double *d_middle_dense;
     double *Rx_buffer;
 
-    // Buffer for Distributed Version
     double *global_primal_obj_product;
     cusparseDnVecDescr_t vec_global_primal_obj_prod;
 } quadratic_objective_term_t;
@@ -200,23 +198,22 @@ typedef struct
 
     variable_set_type_t var_set_type;
     int num_cone_blocks;
-    int *cone_start_idx; /* [num_cone_blocks], permuted by bucket */
-    int *cone_v_dim;     /* [num_cone_blocks], permuted by bucket */
-    char *cone_is_fixed; /* [num_variables] device array; NULL if no fixes */
+    int *cone_start_idx; /* permuted by bucket */
+    int *cone_v_dim;     /* permuted by bucket */
+    char *cone_is_fixed; /* NULL if no fixes */
     double *cone_warm_start_primal;
     double *cone_warm_start_dual;
     double *effective_obj_grad;
     double *bb_pdhg_snapshot;
-    struct cone_bucket_s *cone_buckets; /* [num_cone_buckets] */
+    struct cone_bucket_s *cone_buckets;
     int num_cone_buckets;
     int num_original_variables;
 } pdhg_solver_state_t;
 
 typedef enum
 {
-    PROJ_METHOD_THREAD = 0, /* 1 thread / cone */
-    PROJ_METHOD_WARP = 1,   /* 1 warp / cone (32 threads) */
-    /* PROJ_METHOD_BLOCK = 2, */
+    PROJ_METHOD_THREAD = 0,
+    PROJ_METHOD_WARP = 1,
     NUM_PROJ_METHODS = 2
 } cone_proj_method_t;
 
@@ -225,7 +222,7 @@ typedef struct cone_bucket_s
     cone_type_t type;
     cone_proj_method_t method;
     int offset; /* start within permuted cone arrays */
-    int count;  /* number of cones in this bucket */
+    int count;
 } cone_bucket_t;
 
 typedef enum

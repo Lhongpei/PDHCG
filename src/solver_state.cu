@@ -559,12 +559,10 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
         size_t vb = (size_t)state->num_variables * sizeof(double);
         if (qt != PDHCG_NON_Q)
         {
-            /* effective_obj_grad = c + Q*x (re-populated each iter by update_obj_product). */
             CUDA_CHECK(cudaMalloc(&state->effective_obj_grad, vb));
         }
         if (qt == PDHCG_SPARSE_Q || qt == PDHCG_LOW_RANK_Q || qt == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
         {
-            /* Snapshot buffer for BB direction fixup after in-loop cone projection. */
             CUDA_CHECK(cudaMalloc(&state->bb_pdhg_snapshot, vb));
         }
     }
@@ -591,7 +589,6 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
         }
         else if (cones->type[i] == CONE_EXPONENTIAL)
         {
-            /* leave at default (zeros). */
         }
         else
         {

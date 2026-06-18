@@ -188,8 +188,6 @@ static void launch_exp_thread_dual(double *dr,
     compute_cone_dual_residual_exp_kernel<<<b, t>>>(dr, obj, dp, vr, ws, si, vd, isf, n);
 }
 
-/* Diagonal-Q cone projection launchers.  Signature differs from the LP launchers because
-   the kernels fuse the reflected_primal write (no separate recompute_reflected_at_cone). */
 typedef void (*cone_proj_diag_q_launcher_t)(double *pdhg_primal,
                                             double *reflected_primal,
                                             const double *current_primal,
@@ -641,10 +639,6 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
             state->num_variables);
     }
 
-    /* BB init writes pdhg = box-clamped(current - alpha * grad). For QP + cones we
-       additionally project pdhg onto the cone (unweighted LP-style projection: BB does
-       projected gradient onto Box ∩ K, where Box ∩ K factors per-slot because cone vars
-       have no finite box). Then direction = pdhg_after_cone - current. */
     if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
     {
         dispatch_cone_projection(state, state->pdhg_primal_solution);
