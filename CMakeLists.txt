@@ -123,6 +123,7 @@ file(GLOB C_SOURCES
 )
 file(GLOB CU_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels/*.cu"
 )
 
 # Exclude cli.c from library builds
