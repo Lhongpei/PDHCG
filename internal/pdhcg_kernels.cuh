@@ -34,6 +34,13 @@ extern "C"
 
     __global__ void element_wise_mul_inplace_kernel(double *__restrict__ x, const double *__restrict__ d, int n);
 
+    __global__ void compute_diag_q_obj_and_grad_kernel(const double *__restrict__ Q_diag,
+                                                       const double *__restrict__ x,
+                                                       const double *__restrict__ c,
+                                                       double *__restrict__ Qx,
+                                                       double *__restrict__ obj_grad,
+                                                       int n);
+
     // ======================================================================
     // Advanced Metrics & Reduced Costs
     // ======================================================================
@@ -444,6 +451,40 @@ extern "C"
                                                        const int *__restrict__ start_idx,
                                                        const int *__restrict__ v_dim,
                                                        int num_blocks);
+
+    __global__ void project_rotated_soc_diag_q_kernel(double *__restrict__ pdhg_primal,
+                                                      double *__restrict__ reflected_primal,
+                                                      const double *__restrict__ current_primal,
+                                                      const double *__restrict__ variable_rescaling,
+                                                      const double *__restrict__ Q_diag,
+                                                      double tau,
+                                                      double *__restrict__ warm_start,
+                                                      const int *__restrict__ start_idx,
+                                                      const int *__restrict__ v_dim,
+                                                      int num_blocks);
+
+    __global__ void project_standard_soc_diag_q_kernel(double *__restrict__ pdhg_primal,
+                                                       double *__restrict__ reflected_primal,
+                                                       const double *__restrict__ current_primal,
+                                                       const double *__restrict__ variable_rescaling,
+                                                       const double *__restrict__ Q_diag,
+                                                       double tau,
+                                                       double *__restrict__ warm_start,
+                                                       const int *__restrict__ start_idx,
+                                                       const int *__restrict__ v_dim,
+                                                       int num_blocks);
+
+    __global__ void project_exp_cone_diag_q_kernel(double *__restrict__ pdhg_primal,
+                                                   double *__restrict__ reflected_primal,
+                                                   const double *__restrict__ current_primal,
+                                                   const double *__restrict__ variable_rescaling,
+                                                   const double *__restrict__ Q_diag,
+                                                   double tau,
+                                                   double *__restrict__ warm_start,
+                                                   const int *__restrict__ start_idx,
+                                                   const int *__restrict__ v_dim,
+                                                   const char *__restrict__ is_fixed,
+                                                   int num_blocks);
 
 #ifdef __cplusplus
 }

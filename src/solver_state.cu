@@ -470,14 +470,16 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
                                    const rescale_info_t *rescale_info)
 {
     state->num_cone_blocks = working_problem->cones.num_cones;
+    state->var_set_type = (state->num_cone_blocks > 0) ? VAR_SET_CONTAIN_CONIC : VAR_SET_BOX_ONLY;
     state->cone_start_idx = NULL;
     state->cone_v_dim = NULL;
     state->cone_is_fixed = NULL;
     state->cone_warm_start_primal = NULL;
     state->cone_warm_start_dual = NULL;
+    state->effective_obj_grad = NULL;
     state->cone_buckets = NULL;
     state->num_cone_buckets = 0;
-    if (state->num_cone_blocks == 0)
+    if (state->var_set_type == VAR_SET_BOX_ONLY)
         return;
 
     int K = state->num_cone_blocks;
@@ -550,6 +552,15 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
     CUDA_CHECK(cudaMemset(state->cone_warm_start_primal, 0, wb));
     CUDA_CHECK(cudaMalloc(&state->cone_warm_start_dual, wb));
     CUDA_CHECK(cudaMemset(state->cone_warm_start_dual, 0, wb));
+
+    {
+        quad_obj_type_t qt = rescale_info->processed_problem ? rescale_info->processed_problem->quad_type : PDHCG_NON_Q;
+        if (qt == PDHCG_DIAG_Q)
+        {
+            size_t vb = (size_t)state->num_variables * sizeof(double);
+            CUDA_CHECK(cudaMalloc(&state->effective_obj_grad, vb));
+        }
+    }
 
     const double INV_SQRT2 = 0.7071067811865475;
     for (int i = 0; i < K; ++i)
@@ -1106,6 +1117,8 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
         free(state->cone_buckets);
     if (state->cone_warm_start_primal)
         CUDA_CHECK(cudaFree(state->cone_warm_start_primal));
+    if (state->effective_obj_grad)
+        CUDA_CHECK(cudaFree(state->effective_obj_grad));
     if (state->cone_warm_start_dual)
         CUDA_CHECK(cudaFree(state->cone_warm_start_dual));
 

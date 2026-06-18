@@ -62,6 +62,12 @@ extern "C"
 
     typedef enum
     {
+        VAR_SET_BOX_ONLY = 0,
+        VAR_SET_CONTAIN_CONIC = 1,
+    } variable_set_type_t;
+
+    typedef enum
+    {
         CONE_ROTATED_SOC = 0,
         CONE_STANDARD_SOC = 1,
         CONE_EXPONENTIAL = 2,

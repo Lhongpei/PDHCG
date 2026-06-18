@@ -2255,3 +2255,686 @@ __global__ void recompute_reflected_at_cone_kernel(double *__restrict__ reflecte
         reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
     }
 }
+
+// Diagonal-Q variant of project_standard_soc_kernel.
+__global__ void project_standard_soc_diag_q_kernel(double *__restrict__ pdhg_primal,
+                                                   double *__restrict__ reflected_primal,
+                                                   const double *__restrict__ current_primal,
+                                                   const double *__restrict__ variable_rescaling,
+                                                   const double *__restrict__ Q_diag,
+                                                   double tau,
+                                                   double *__restrict__ warm_start,
+                                                   const int *__restrict__ start_idx,
+                                                   const int *__restrict__ v_dim,
+                                                   int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+    int w_off = start + k;
+    int z_off = start + k + 1;
+
+    // Capture r (the temp values) into locals before any writes to pdhg_primal.
+    double r_w = pdhg_primal[w_off];
+    double r_z = pdhg_primal[z_off];
+
+    double d_z = variable_rescaling[z_off];
+    double w_w = 1.0 + tau * Q_diag[w_off];
+    double w_z = 1.0 + tau * Q_diag[z_off];
+    double sqrt_w_w = sqrt(w_w);
+    double sqrt_w_z = sqrt(w_z);
+    double e_z = sqrt_w_z * d_z;
+    double e_w = sqrt_w_w * variable_rescaling[w_off];
+    double eh_w = e_w / e_z;
+    double eh_w2 = eh_w * eh_w;
+
+    // Fast-path tests are exactly f(lam=0) <= 0 (in-cone) and the recession KKT.
+    //   f(lam) = sum_m w_m r_m^2 eh_m^2 / (eh_m^2 + 2 lam)^2
+    //          + w_w r_w^2 eh_w^2 / (eh_w^2 + 2 lam)^2
+    //          - w_z r_z^2 / (1 - 2 lam)^2
+    // f(0) = sum_m w_m r_m^2 / eh_m^2 + w_w r_w^2 / eh_w^2 - w_z r_z^2.
+    // Recession (x* = 0): -DWr in K_soc <=> sum_m w_m r_m^2 eh_m^2 + w_w r_w^2 eh_w^2
+    //                                       <= w_z r_z^2 with r_z <= 0.
+
+    double r_inv_sq = w_w * (r_w / eh_w) * (r_w / eh_w);
+    double r_pos_sq = w_w * (r_w * eh_w) * (r_w * eh_w);
+    for (int m = 0; m < k; ++m)
+    {
+        double w_m = 1.0 + tau * Q_diag[start + m];
+        double e_m = sqrt(w_m) * variable_rescaling[start + m];
+        double eh_m = e_m / e_z;
+        double r_m = pdhg_primal[start + m];
+        r_inv_sq += w_m * (r_m / eh_m) * (r_m / eh_m);
+        r_pos_sq += w_m * (r_m * eh_m) * (r_m * eh_m);
+    }
+    double w_z_r_z_sq = w_z * r_z * r_z;
+
+    if (r_inv_sq <= w_z_r_z_sq && r_z >= 0.0)
+    {
+        // Already in DK: projection is the identity. Still need reflected writes.
+        for (int m = 0; m < k; ++m)
+        {
+            int idx = start + m;
+            reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+        }
+        reflected_primal[w_off] = 2.0 * r_w - current_primal[w_off];
+        reflected_primal[z_off] = 2.0 * r_z - current_primal[z_off];
+        return;
+    }
+
+    if (r_pos_sq <= w_z_r_z_sq && r_z <= 0.0)
+    {
+        // Recession: projection is zero.
+        for (int m = 0; m < k; ++m)
+        {
+            int idx = start + m;
+            pdhg_primal[idx] = 0.0;
+            reflected_primal[idx] = -current_primal[idx];
+        }
+        pdhg_primal[w_off] = 0.0;
+        pdhg_primal[z_off] = 0.0;
+        reflected_primal[w_off] = -current_primal[w_off];
+        reflected_primal[z_off] = -current_primal[z_off];
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (r_z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double sum_hi = 0.0;
+            for (int m = 0; m < k; ++m)
+            {
+                double w_m = 1.0 + tau * Q_diag[start + m];
+                double e_m = sqrt(w_m) * variable_rescaling[start + m];
+                double eh_m = e_m / e_z;
+                double eh_m2 = eh_m * eh_m;
+                double r_m = pdhg_primal[start + m];
+                double t = sqrt(w_m) * r_m * eh_m / (eh_m2 + 2.0 * hi);
+                sum_hi += t * t;
+            }
+            double tw_hi = sqrt_w_w * r_w * eh_w / (eh_w2 + 2.0 * hi);
+            sum_hi += tw_hi * tw_hi;
+            double tz_hi = sqrt_w_z * r_z / (1.0 - 2.0 * hi);
+            double f_hi = sum_hi - tz_hi * tz_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double sum_w = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double w_m = 1.0 + tau * Q_diag[start + m];
+            double e_m = sqrt(w_m) * variable_rescaling[start + m];
+            double eh_m = e_m / e_z;
+            double eh_m2 = eh_m * eh_m;
+            double r_m = pdhg_primal[start + m];
+            double t = sqrt(w_m) * r_m * eh_m / (eh_m2 + 2.0 * warm_lam);
+            sum_w += t * t;
+        }
+        double tw = sqrt_w_w * r_w * eh_w / (eh_w2 + 2.0 * warm_lam);
+        sum_w += tw * tw;
+        double tz = sqrt_w_z * r_z / (1.0 - 2.0 * warm_lam);
+        double f = sum_w - tz * tz;
+        if (fabs(f) < 1e-12)
+        {
+            double new_z = r_z / (1.0 - 2.0 * warm_lam);
+            double new_w = r_w * eh_w2 / (eh_w2 + 2.0 * warm_lam);
+            pdhg_primal[z_off] = new_z;
+            pdhg_primal[w_off] = new_w;
+            reflected_primal[z_off] = 2.0 * new_z - current_primal[z_off];
+            reflected_primal[w_off] = 2.0 * new_w - current_primal[w_off];
+            for (int m = 0; m < k; ++m)
+            {
+                int idx = start + m;
+                double w_m = 1.0 + tau * Q_diag[idx];
+                double e_m = sqrt(w_m) * variable_rescaling[idx];
+                double eh_m = e_m / e_z;
+                double eh_m2 = eh_m * eh_m;
+                double r_m = pdhg_primal[idx];
+                double new_m = r_m * eh_m2 / (eh_m2 + 2.0 * warm_lam);
+                pdhg_primal[idx] = new_m;
+                reflected_primal[idx] = 2.0 * new_m - current_primal[idx];
+            }
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double sum = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double w_m = 1.0 + tau * Q_diag[start + m];
+            double e_m = sqrt(w_m) * variable_rescaling[start + m];
+            double eh_m = e_m / e_z;
+            double eh_m2 = eh_m * eh_m;
+            double r_m = pdhg_primal[start + m];
+            double t = sqrt(w_m) * r_m * eh_m / (eh_m2 + 2.0 * lam);
+            sum += t * t;
+        }
+        double tw = sqrt_w_w * r_w * eh_w / (eh_w2 + 2.0 * lam);
+        sum += tw * tw;
+        double tz = sqrt_w_z * r_z / (1.0 - 2.0 * lam);
+        double f = sum - tz * tz;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    warm_start[blk] = lam;
+
+    double new_z = r_z / (1.0 - 2.0 * lam);
+    double new_w = r_w * eh_w2 / (eh_w2 + 2.0 * lam);
+    pdhg_primal[z_off] = new_z;
+    pdhg_primal[w_off] = new_w;
+    reflected_primal[z_off] = 2.0 * new_z - current_primal[z_off];
+    reflected_primal[w_off] = 2.0 * new_w - current_primal[w_off];
+    for (int m = 0; m < k; ++m)
+    {
+        int idx = start + m;
+        double w_m = 1.0 + tau * Q_diag[idx];
+        double e_m = sqrt(w_m) * variable_rescaling[idx];
+        double eh_m = e_m / e_z;
+        double eh_m2 = eh_m * eh_m;
+        double r_m = pdhg_primal[idx];
+        double new_m = r_m * eh_m2 / (eh_m2 + 2.0 * lam);
+        pdhg_primal[idx] = new_m;
+        reflected_primal[idx] = 2.0 * new_m - current_primal[idx];
+    }
+}
+
+/* Weighted-prox projection onto D K_exp for the diagonal-Q PDHG primal update.
+
+   At call time pdhg_primal already holds the per-coordinate temp value
+       temp_i = (current_i - tau (c_i - dual_product_i)) / (1 + tau Q_i),
+   produced by diag_q_primal_update. The remaining step is
+
+       min   sum_i w_i (x_i - temp_i)^2,    w_i = 1 + tau Q_i,
+       s.t.  x in D K_exp.
+
+   Coordinate transform y_i = sqrt(w_i) x_i, u_i = sqrt(w_i) temp_i turns the
+   objective into the unweighted sum_i (y_i - u_i)^2, while the constraint
+   x in D K_exp <=> v in K_exp with x_i = d_i v_i becomes y_i = e_i v_i with
+       e_i = sqrt(w_i) * d_i,
+   i.e. y in E K_exp. project_exp_cone_point already solves the unweighted
+   projection onto E K_exp by taking (e_1, e_2, e_3) as its scaling vector,
+   so we just feed (u_1, u_2, u_3, e_1, e_2, e_3) in and recover x_i = y_i / sqrt(w_i).
+
+   y-fixed sub-case (is_fixed[y]): the y slot is held at temp_2 = r_2 (no prox
+   weight applies because the slot cannot move). The 2D weighted prox in the
+   (x_1, x_3) plane reduces analogously by transforming only the variable
+   coordinates. The y_eff parameter inside project_2d_exp_persp depends on
+   ry / d_y, which uses the unscaled d_2, so we pass (e_1, d_2, e_3) as the
+   scaling triple along with (u_1, r_2, u_3) for the inputs.
+
+   Fast paths and edge cases (in-cone, polar, recession edge, Newton diverged)
+   are handled inside project_exp_cone_point / project_2d_exp_persp; we just
+   transform on the way in and out. Reflected primal write is fused:
+       reflected_primal[i] = 2 * proj_i - current_primal[i]
+   on every cone slot, including the in-cone fast path. */
+__global__ void project_exp_cone_diag_q_kernel(double *__restrict__ pdhg_primal,
+                                               double *__restrict__ reflected_primal,
+                                               const double *__restrict__ current_primal,
+                                               const double *__restrict__ variable_rescaling,
+                                               const double *__restrict__ Q_diag,
+                                               double tau,
+                                               double *__restrict__ warm_start,
+                                               const int *__restrict__ start_idx,
+                                               const int *__restrict__ v_dim,
+                                               const char *__restrict__ is_fixed,
+                                               int num_blocks)
+{
+    (void)warm_start;
+    (void)v_dim;
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int s_idx = start_idx[blk];
+
+    double r1 = pdhg_primal[s_idx + 0];
+    double r2 = pdhg_primal[s_idx + 1];
+    double r3 = pdhg_primal[s_idx + 2];
+
+    double d1 = variable_rescaling[s_idx + 0];
+    double d2 = variable_rescaling[s_idx + 1];
+    double d3 = variable_rescaling[s_idx + 2];
+
+    double w1 = 1.0 + tau * Q_diag[s_idx + 0];
+    double w2 = 1.0 + tau * Q_diag[s_idx + 1];
+    double w3 = 1.0 + tau * Q_diag[s_idx + 2];
+
+    /* Diagonal Q on a convex problem should give w_i >= 1, but clamp to guard
+       against tiny negative drift in Q_diag (which would invalidate the sqrt). */
+    if (!(w1 > 0.0))
+        w1 = 1.0;
+    if (!(w2 > 0.0))
+        w2 = 1.0;
+    if (!(w3 > 0.0))
+        w3 = 1.0;
+
+    double sw1 = sqrt(w1);
+    double sw2 = sqrt(w2);
+    double sw3 = sqrt(w3);
+
+    double e1 = sw1 * d1;
+    double e2 = sw2 * d2;
+    double e3 = sw3 * d3;
+
+    double x1, x2, x3;
+
+    if (is_fixed && is_fixed[s_idx + 1])
+    {
+        /* y slot is fixed at r2 (untransformed). Only the (x_1, x_3) coordinates
+           are subject to the prox; transform them and project onto the y=r2
+           cross-section of E' K_exp with E' = diag(e_1, d_2, e_3). */
+        double u1 = sw1 * r1;
+        double u3 = sw3 * r3;
+        double y1_out, y3_out;
+        project_2d_exp_persp(u1, r2, u3, e1, d2, e3, &y1_out, &y3_out);
+        x1 = y1_out / sw1;
+        x2 = r2;
+        x3 = y3_out / sw3;
+    }
+    else
+    {
+        /* Full 3D weighted prox: transform input, project onto E K_exp, untransform. */
+        double u1 = sw1 * r1;
+        double u2 = sw2 * r2;
+        double u3 = sw3 * r3;
+        double y1_out, y2_out, y3_out;
+        project_exp_cone_point(u1, u2, u3, e1, e2, e3, &y1_out, &y2_out, &y3_out);
+        x1 = y1_out / sw1;
+        x2 = y2_out / sw2;
+        x3 = y3_out / sw3;
+    }
+
+    pdhg_primal[s_idx + 0] = x1;
+    pdhg_primal[s_idx + 1] = x2;
+    pdhg_primal[s_idx + 2] = x3;
+
+    reflected_primal[s_idx + 0] = 2.0 * x1 - current_primal[s_idx + 0];
+    reflected_primal[s_idx + 1] = 2.0 * x2 - current_primal[s_idx + 1];
+    reflected_primal[s_idx + 2] = 2.0 * x3 - current_primal[s_idx + 2];
+}
+
+/* Rotated SOC projection with diagonal-Q prox weights w_i = 1 + tau * Q_diag[i].
+ * Minimizes sum w_i (x_i - temp_i)^2 over x in (D K_rsoc) where temp_i is
+ * already in pdhg_primal[start+i]. Requires Q_diag[start+k] == Q_diag[start+k+1]
+ * (so the rotation (s,t) -> (w,z) preserves the prox metric).
+ *
+ * After projecting, fuses the reflected-primal write:
+ *   reflected_primal[i] = 2 * pdhg_primal[i] - current_primal[i] for every cone slot.
+ */
+__global__ void project_rotated_soc_diag_q_kernel(double *__restrict__ pdhg_primal,
+                                                  double *__restrict__ reflected_primal,
+                                                  const double *__restrict__ current_primal,
+                                                  const double *__restrict__ variable_rescaling,
+                                                  const double *__restrict__ Q_diag,
+                                                  double tau,
+                                                  double *__restrict__ warm_start,
+                                                  const int *__restrict__ start_idx,
+                                                  const int *__restrict__ v_dim,
+                                                  int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    const double INV_SQRT2 = 0.7071067811865475;
+
+    int start = start_idx[blk];
+    int k = v_dim[blk];
+    int len = k + 2;
+    double *v = pdhg_primal + start;
+    double *sptr = pdhg_primal + start + k;
+    double *tptr = pdhg_primal + start + k + 1;
+
+    double q_s = Q_diag[start + k];
+    double q_t = Q_diag[start + k + 1];
+
+    /* Limitation: rotation only decouples prox metric when Q_s == Q_t.
+     * If violated, leave temp values in place and still write reflected. */
+    if (q_s != q_t)
+    {
+        for (int m = 0; m < len; ++m)
+        {
+            int idx = start + m;
+            double pv = pdhg_primal[idx];
+            reflected_primal[idx] = 2.0 * pv - current_primal[idx];
+        }
+        return;
+    }
+
+    double w_st = 1.0 + tau * q_s;
+    /* Guard against tiny negative drift in Q_diag breaking sqrt(w_st). */
+    if (!(w_st > 0.0))
+        w_st = 1.0;
+
+    double r_s = *sptr;
+    double r_t = *tptr;
+    double r_w = (r_s - r_t) * INV_SQRT2;
+    double r_z = (r_s + r_t) * INV_SQRT2;
+
+    double d_s = variable_rescaling[start + k];
+    double d_t = variable_rescaling[start + k + 1];
+    double d_st = sqrt(d_s * d_t);
+
+    double sqrt_w_st = sqrt(w_st);
+
+    /* Uniform fast path: when eh_m == 1 for all v slots, the SOC bisection
+     * collapses to the closed-form scalar projection. */
+    bool diag_uniform = true;
+    for (int m = 0; m < k && diag_uniform; ++m)
+    {
+        double w_m = 1.0 + tau * Q_diag[start + m];
+        if (!(w_m > 0.0))
+            w_m = 1.0;
+        double d_m = variable_rescaling[start + m];
+        double eh_m = sqrt(w_m / w_st) * (d_m / d_st);
+        if (eh_m != 1.0)
+            diag_uniform = false;
+    }
+
+    if (diag_uniform)
+    {
+        double sumsq = r_w * r_w;
+        for (int m = 0; m < k; ++m)
+            sumsq += v[m] * v[m];
+        double r = sqrt(sumsq);
+        if (r <= r_z)
+        {
+            /* Already in scaled cone; temp values are the projection. */
+            for (int m = 0; m < len; ++m)
+            {
+                int idx = start + m;
+                double pv = pdhg_primal[idx];
+                reflected_primal[idx] = 2.0 * pv - current_primal[idx];
+            }
+            return;
+        }
+        if (r <= -r_z)
+        {
+            for (int m = 0; m < k; ++m)
+                v[m] = 0.0;
+            *sptr = 0.0;
+            *tptr = 0.0;
+            for (int m = 0; m < len; ++m)
+            {
+                int idx = start + m;
+                reflected_primal[idx] = -current_primal[idx];
+            }
+            return;
+        }
+        double scale = (r_z + r) / (2.0 * r);
+        for (int m = 0; m < k; ++m)
+            v[m] *= scale;
+        double w_new = scale * r_w;
+        double z_new = scale * r;
+        *sptr = (z_new + w_new) * INV_SQRT2;
+        *tptr = (z_new - w_new) * INV_SQRT2;
+        for (int m = 0; m < len; ++m)
+        {
+            int idx = start + m;
+            double pv = pdhg_primal[idx];
+            reflected_primal[idx] = 2.0 * pv - current_primal[idx];
+        }
+        return;
+    }
+
+    /* General path: KKT bisection on
+     *   f(lam) = sum_m t_m^2 + t_w^2 - t_z^2,
+     * with
+     *   t_m = sqrt(w_m) r_m eh_m / (eh_m^2 + 2 lam),
+     *   t_w = sqrt(w_st) r_w / (1 + 2 lam),
+     *   t_z = sqrt(w_st) r_z / (1 - 2 lam).
+     *
+     * Cone fast-check uses r_inv (eh_m -> 0 limit yields large weight) and
+     * r_pos (eh_m -> infty) as worst-case bounds on the radius. */
+    double rw_sq = w_st * r_w * r_w;
+    double r_inv_sq = rw_sq;
+    double r_pos_sq = rw_sq;
+    for (int m = 0; m < k; ++m)
+    {
+        double w_m = 1.0 + tau * Q_diag[start + m];
+        if (!(w_m > 0.0))
+            w_m = 1.0;
+        double d_m = variable_rescaling[start + m];
+        double eh_m = sqrt(w_m / w_st) * (d_m / d_st);
+        double sqrt_w_m = sqrt(w_m);
+        double v_m = v[m];
+        double a_lo = sqrt_w_m * v_m / eh_m; /* eh_m^2 + 2lam -> 2lam as eh_m -> 0 */
+        double a_hi = sqrt_w_m * v_m * eh_m; /* eh_m^2 + 2lam -> eh_m^2 as eh_m -> infty */
+        r_inv_sq += a_lo * a_lo;
+        r_pos_sq += a_hi * a_hi;
+    }
+    double r_inv = sqrt(r_inv_sq);
+    double sw_rz = sqrt_w_st * r_z;
+    if (r_inv <= sw_rz)
+    {
+        for (int m = 0; m < len; ++m)
+        {
+            int idx = start + m;
+            double pv = pdhg_primal[idx];
+            reflected_primal[idx] = 2.0 * pv - current_primal[idx];
+        }
+        return;
+    }
+    double r_pos = sqrt(r_pos_sq);
+    if (r_pos <= -sw_rz)
+    {
+        for (int m = 0; m < k; ++m)
+            v[m] = 0.0;
+        *sptr = 0.0;
+        *tptr = 0.0;
+        for (int m = 0; m < len; ++m)
+        {
+            int idx = start + m;
+            reflected_primal[idx] = -current_primal[idx];
+        }
+        return;
+    }
+
+    double lo, hi;
+    bool z_pos = (r_z > 0.0);
+    if (z_pos)
+    {
+        lo = 0.0;
+        hi = 0.5 - 1e-14;
+    }
+    else
+    {
+        lo = 0.5 + 1e-14;
+        hi = 1.0;
+        for (int doubling = 0; doubling < 60; ++doubling)
+        {
+            double sum_hi = 0.0;
+            for (int m = 0; m < k; ++m)
+            {
+                double w_m = 1.0 + tau * Q_diag[start + m];
+                if (!(w_m > 0.0))
+                    w_m = 1.0;
+                double d_m = variable_rescaling[start + m];
+                double eh_m = sqrt(w_m / w_st) * (d_m / d_st);
+                double eh_m2 = eh_m * eh_m;
+                double tt = sqrt(w_m) * v[m] * eh_m / (eh_m2 + 2.0 * hi);
+                sum_hi += tt * tt;
+            }
+            double tw_hi = sqrt_w_st * r_w / (1.0 + 2.0 * hi);
+            sum_hi += tw_hi * tw_hi;
+            double zt_hi = sqrt_w_st * r_z / (1.0 - 2.0 * hi);
+            double f_hi = sum_hi - zt_hi * zt_hi;
+            if (f_hi > 0.0)
+                break;
+            lo = hi;
+            hi *= 2.0;
+        }
+    }
+
+    double warm_lam = warm_start[blk];
+    if (warm_lam > lo && warm_lam < hi)
+    {
+        double sum_w = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double w_m = 1.0 + tau * Q_diag[start + m];
+            if (!(w_m > 0.0))
+                w_m = 1.0;
+            double d_m = variable_rescaling[start + m];
+            double eh_m = sqrt(w_m / w_st) * (d_m / d_st);
+            double eh_m2 = eh_m * eh_m;
+            double tt = sqrt(w_m) * v[m] * eh_m / (eh_m2 + 2.0 * warm_lam);
+            sum_w += tt * tt;
+        }
+        double tw = sqrt_w_st * r_w / (1.0 + 2.0 * warm_lam);
+        sum_w += tw * tw;
+        double zt = sqrt_w_st * r_z / (1.0 - 2.0 * warm_lam);
+        double f = sum_w - zt * zt;
+        if (fabs(f) < 1e-12)
+        {
+            double x_w_new = r_w / (1.0 + 2.0 * warm_lam);
+            double x_z_new = r_z / (1.0 - 2.0 * warm_lam);
+            for (int m = 0; m < k; ++m)
+            {
+                double w_m = 1.0 + tau * Q_diag[start + m];
+                if (!(w_m > 0.0))
+                    w_m = 1.0;
+                double d_m = variable_rescaling[start + m];
+                double eh_m = sqrt(w_m / w_st) * (d_m / d_st);
+                double eh_m2 = eh_m * eh_m;
+                v[m] = v[m] * eh_m2 / (eh_m2 + 2.0 * warm_lam);
+            }
+            *sptr = (x_z_new + x_w_new) * INV_SQRT2;
+            *tptr = (x_z_new - x_w_new) * INV_SQRT2;
+            for (int m = 0; m < len; ++m)
+            {
+                int idx = start + m;
+                double pv = pdhg_primal[idx];
+                reflected_primal[idx] = 2.0 * pv - current_primal[idx];
+            }
+            return;
+        }
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = warm_lam;
+            else
+                hi = warm_lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = warm_lam;
+            else
+                lo = warm_lam;
+        }
+    }
+
+    for (int it = 0; it < 60; ++it)
+    {
+        double lam = 0.5 * (lo + hi);
+        double sum = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double w_m = 1.0 + tau * Q_diag[start + m];
+            if (!(w_m > 0.0))
+                w_m = 1.0;
+            double d_m = variable_rescaling[start + m];
+            double eh_m = sqrt(w_m / w_st) * (d_m / d_st);
+            double eh_m2 = eh_m * eh_m;
+            double tt = sqrt(w_m) * v[m] * eh_m / (eh_m2 + 2.0 * lam);
+            sum += tt * tt;
+        }
+        double tw = sqrt_w_st * r_w / (1.0 + 2.0 * lam);
+        sum += tw * tw;
+        double zt = sqrt_w_st * r_z / (1.0 - 2.0 * lam);
+        double f = sum - zt * zt;
+        if (z_pos)
+        {
+            if (f > 0.0)
+                lo = lam;
+            else
+                hi = lam;
+        }
+        else
+        {
+            if (f > 0.0)
+                hi = lam;
+            else
+                lo = lam;
+        }
+        if ((hi - lo) / (1.0 + hi + lo) < 1e-13)
+            break;
+    }
+    double lam = 0.5 * (lo + hi);
+    warm_start[blk] = lam;
+
+    double x_w_new = r_w / (1.0 + 2.0 * lam);
+    double x_z_new = r_z / (1.0 - 2.0 * lam);
+    for (int m = 0; m < k; ++m)
+    {
+        double w_m = 1.0 + tau * Q_diag[start + m];
+        if (!(w_m > 0.0))
+            w_m = 1.0;
+        double d_m = variable_rescaling[start + m];
+        double eh_m = sqrt(w_m / w_st) * (d_m / d_st);
+        double eh_m2 = eh_m * eh_m;
+        v[m] = v[m] * eh_m2 / (eh_m2 + 2.0 * lam);
+    }
+    *sptr = (x_z_new + x_w_new) * INV_SQRT2;
+    *tptr = (x_z_new - x_w_new) * INV_SQRT2;
+
+    for (int m = 0; m < len; ++m)
+    {
+        int idx = start + m;
+        double pv = pdhg_primal[idx];
+        reflected_primal[idx] = 2.0 * pv - current_primal[idx];
+    }
+}
