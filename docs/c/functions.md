@@ -11,12 +11,14 @@ qp_problem_t *create_qp_problem(
     const matrix_desc_t *A_desc,
     const double *con_lb, const double *con_ub,
     const double *var_lb, const double *var_ub,
-    const double *objective_constant
+    const double *objective_constant,
+    int num_cones,
+    const cone_spec_t *cones
 );
 ```
 
 Creates a QP problem of the form
-`min 0.5 * x^T (Q + R^T D R) x + c^T x` subject to `con_lb <= A x <= con_ub` and `var_lb <= x <= var_ub`.
+`min 0.5 * x^T (Q + R^T D R) x + c^T x` subject to `con_lb <= A x <= con_ub`, `var_lb <= x <= var_ub`, and optional conic blocks listed in `cones`. Pass `num_cones=0` and `cones=NULL` for a plain QP.
 
 **Parameters:**
 
@@ -32,6 +34,8 @@ Creates a QP problem of the form
 | `var_lb` | Variable lower bounds (size n) |
 | `var_ub` | Variable upper bounds (size n) |
 | `objective_constant` | Constant term in objective (can be NULL) |
+| `num_cones` | Number of cone blocks (0 for a plain QP) |
+| `cones` | Array of `cone_spec_t` (length `num_cones`, NULL if `num_cones=0`) |
 
 **Returns:** Pointer to allocated `qp_problem_t`, or NULL on error.
 
@@ -56,6 +60,34 @@ Sets initial primal and dual solutions for warm starting.
 | `prob` | QP problem pointer |
 | `primal` | Primal solution vector (size n, can be NULL) |
 | `dual` | Dual solution vector (size m, can be NULL) |
+
+Rejects any slot already pinned by `set_cone_fixed`.
+
+---
+
+## set_cone_fixed
+
+```c
+int set_cone_fixed(
+    qp_problem_t *prob,
+    int cone_idx,
+    int slot,
+    double value
+);
+```
+
+Pins one slot of cone `cone_idx` to `value`. Allocates the `is_fixed` flag array on first use and also writes `primal_start[start_idx + slot] = value` so the projection sees the constant. Typical use: fix the `y` slot of an exponential cone (e.g. Fisher-market entropy term with `y = 1`).
+
+**Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `prob` | QP problem pointer |
+| `cone_idx` | Cone index in `[0, num_cones)` |
+| `slot` | Slot offset within the cone (0-based) |
+| `value` | Fixed value |
+
+**Returns:** 0 on success, nonzero on error (bad indices or no cones).
 
 ---
 

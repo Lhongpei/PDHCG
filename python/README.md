@@ -113,6 +113,14 @@ print("Primal solution:", m.X)
 print("Dual solution:", m.Pi)
 ```
 
+## Cone Constraints
+
+Second-order, rotated second-order, and exponential cone constraints are supported
+through the `cones=` kwarg of `solve_once` (importable from `pdhcg._core`). Each cone is described by a dict
+`{"type": "soc"|"rsoc"|"exp", "start_idx": int, "v_dim": int}` (`v_dim` is omitted
+for `exp`). See [docs/python/quickstart.md](../docs/python/quickstart.md#quick-start-with-cone-constraints)
+for a runnable example and [docs/python/model.md](../docs/python/model.md#cone-constraints) for the dict spec.
+
 ## Modeling
 
 The `Model` class represents a quadratic programming problem of the form:

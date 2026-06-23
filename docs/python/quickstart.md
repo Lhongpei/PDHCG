@@ -55,6 +55,32 @@ if m.X is not None:
     print(f"Primal Solution: {m.X}")
 ```
 
+## Quick start with cone constraints
+
+Conic constraints are passed to the lower-level [`solve_once`](../c/functions.md) entry point
+via a `cones=` list of dicts. Each dict has `type` (`"soc"`, `"rsoc"`, or `"exp"`),
+`start_idx`, and (for SOC/RSOC) `v_dim`. See [model.md](model.md#cone-constraints).
+
+```python
+import numpy as np
+import scipy.sparse as sp
+from pdhcg._core import solve_once
+
+# min  z  s.t.  v = 3, w = 4, (v, w, z) in K_soc  =>  z = sqrt(v^2 + w^2) = 5
+A = sp.csr_matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+res = solve_once(
+    None, None, A,
+    np.array([0.0, 0.0, 1.0]),                # objective_vector
+    0.0,                                      # objective_constant
+    np.array([-np.inf, -np.inf, -np.inf]),    # variable_lower_bound
+    np.array([np.inf, np.inf, np.inf]),       # variable_upper_bound
+    np.array([3.0, 4.0]),                     # constraint_lower_bound
+    np.array([3.0, 4.0]),                     # constraint_upper_bound
+    cones=[{"type": "soc", "start_idx": 0, "v_dim": 1}],
+)
+print(res["Status"], res["X"])
+```
+
 ## Model Creation
 
 The `Model` class is the core interface for defining QP problems. The problem formulation is:

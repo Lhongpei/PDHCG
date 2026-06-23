@@ -18,7 +18,9 @@ qp_problem_t *create_qp_problem(
     const double *con_ub,                // constraint upper bounds (length m)
     const double *var_lb,                // variable lower bounds (length n)
     const double *var_ub,                // variable upper bounds (length n)
-    const double *objective_constant     // scalar objective offset
+    const double *objective_constant,    // scalar objective offset
+    int num_cones,                       // number of cone blocks (0 for plain QP)
+    const cone_spec_t *cones             // cone descriptors (NULL if num_cones=0)
 );
 
 pdhcg_result_t* solve_qp_problem(
@@ -40,6 +42,7 @@ The objective minimized is `0.5 * x^T (Q + R^T D R) x + c^T x + c0`. `Q`, `R`, a
 - `var_lb`: Variable lower bounds. If `NULL`, defaults to all `-INFINITY`.
 - `var_ub`: Variable upper bounds. If `NULL`, defaults to all `+INFINITY`.
 - `objective_constant`: Scalar constant term added to the objective value. If `NULL`, defaults to `0.0`.
+- `num_cones`, `cones`: Optional conic blocks. Supported types are Standard SOC, Rotated SOC, and Exponential (`cone_type_t`). Pass `0` and `NULL` for a plain QP. See [Types](c/types.md) for slot layout and `set_cone_fixed` in [Functions](c/functions.md) for pinning individual slots.
 
 
 `solve_qp_problem` parameters:
@@ -108,7 +111,7 @@ int main() {
 
     // 6. Build the QP problem
     // Note: We pass NULL for R_desc (low-rank factor), D_desc (middle matrix),
-    // and objective_constant.
+    // and objective_constant. num_cones=0 / cones=NULL marks this as a plain QP.
     qp_problem_t* prob = create_qp_problem(
         c,          // objective_c
         &Q_desc,    // Q_desc
@@ -119,7 +122,9 @@ int main() {
         u,          // con_ub
         lb,         // var_lb
         ub,         // var_ub
-        NULL        // objective_constant
+        NULL,       // objective_constant
+        0,          // num_cones
+        NULL        // cones
     );
 
     // 7. Solve (NULL → use default parameters)

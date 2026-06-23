@@ -10,7 +10,8 @@ $$
 \begin{aligned}
 \min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top D R) x + c^\top x \\
 \text{s.t.} \quad & \ell_c \le Ax \le u_c, \\
-                  & \ell_v \le x \le u_v.
+                  & \ell_v \le x \le u_v, \\
+                  & x_J \in \mathcal{K} \quad \text{for cone blocks } J.
 \end{aligned}
 $$
 
@@ -23,11 +24,13 @@ Where:
 - $c$ is the linear objective vector
 - $\ell_c, u_c$ are constraint bounds
 - $\ell_v, u_v$ are variable bounds
+- $\mathcal{K}$ is a convex cone (Standard SOC, Rotated SOC, or Exponential) applied to a contiguous block of variables
 
 ## Key Features
 
 - **GPU Acceleration**: Fully leverages NVIDIA CUDA for extreme-scale QP problems
 - **Flexible Problem Structure**: Supports sparse, low-rank, and middle-weighted low-rank ($R^\top D R$) quadratic terms — alone or combined
+- **Conic constraints**: native SOC / Rotated SOC / Exponential cone projection, fully GPU-accelerated; works with LP, diagonal Q, and sparse Q objectives
 - **High Performance**: Competitive with commercial solvers on large-scale problems
 - **SpMVOp Auto-Detection**: Automatically uses cuSPARSE SpMVOp on CUDA 13+ while falling back to standard SpMV on CUDA 12.x
 - **Multi-GPU Distributed Solving**: Supports parallel solving across multiple GPUs via MPI and NCCL (optional, enabled at compile time)
@@ -38,6 +41,7 @@ Where:
 - [Python API Reference](python/quickstart.md)
 - [C API Reference](c/overview.md)
 - [Examples](examples.md)
+- [Conic constraints usage](examples.md#conic-examples)
 
 ## Citation
 

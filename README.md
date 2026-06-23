@@ -18,13 +18,15 @@ PDHCG solves convex quadratic programs in the following form, which allows a fle
 \begin{aligned}
 \min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top D R) x + c^\top x \\
 \text{s.t.} \quad & \ell_c \le Ax \le u_c, \\
-                  & \ell_v \le x \le u_v.
+                  & \ell_v \le x \le u_v, \\
+                  & x_J \in \mathcal{K} \quad \text{for cone blocks } J.
 \end{aligned}
 ```
 
 - $Q$ is the sparse symmetric quadratic component (optional).
 - $R \in \mathbb{R}^{k\times n}$ is a tall low-rank factor (optional, $k$ = rank).
 - $D \in \mathbb{R}^{k\times k}$ is an optional middle matrix that scales / weights / signs the low-rank term. When omitted it defaults to the identity, recovering the standard $Q + R^\top R$ formulation. $D$ may be **diagonal, sparse, dense, or indefinite** — the backend auto-detects the cheapest runtime representation.
+- Convex conic constraints (Standard SOC, Rotated SOC, Exponential cone) are supported as additional restrictions on the variable set.
 
 
 ## Installation (C++ Executable)

@@ -96,6 +96,60 @@ typedef struct {
 } matrix_desc_t;
 ```
 
+## Cone Type
+
+```c
+typedef enum {
+  CONE_ROTATED_SOC = 0,
+  CONE_STANDARD_SOC = 1,
+  CONE_EXPONENTIAL = 2
+} cone_type_t;
+```
+
+| Value | Constraint | Slot layout (length) |
+|-------|------------|----------------------|
+| `CONE_STANDARD_SOC` | `\|\|v\|\|^2 + w^2 <= z^2`, `z >= 0` | `v` (`v_dim`), `w`, `z` |
+| `CONE_ROTATED_SOC` | `\|\|v\|\|^2 <= 2 s t`, `s, t >= 0` | `v` (`v_dim`), `s`, `t` |
+| `CONE_EXPONENTIAL` | `y * exp(x / y) <= z`, `y > 0` | `x`, `y`, `z` (`v_dim` must be 1) |
+
+## Cone Spec
+
+```c
+typedef struct {
+  cone_type_t type;
+  int start_idx;
+  int v_dim;
+  const char *is_fixed;
+} cone_spec_t;
+```
+
+Input descriptor for a single cone block. Slots occupy `[start_idx, start_idx + slot_count)` of the variable vector, where `slot_count` is `v_dim + 2` for SOC/RSOC and `3` for the exponential cone. If non-NULL, `is_fixed` has length `slot_count`; a nonzero entry pins that slot to its initial value.
+
+## Cone Blocks
+
+```c
+typedef struct {
+  int num_cones;
+  int *start_idx;     /* [num_cones] */
+  int *v_dim;         /* [num_cones] */
+  cone_type_t *type;  /* [num_cones] */
+  char *is_fixed;     /* concatenated per-slot flags, or NULL */
+} cone_blocks_t;
+```
+
+Storage form held inside `qp_problem_t`. Built from the user-supplied `cone_spec_t` array by `create_qp_problem`; users normally do not touch this struct directly.
+
+## Variable Set Type
+
+```c
+typedef enum {
+  VAR_SET_BOX_ONLY = 0,
+  VAR_SET_CONTAIN_CONIC = 1
+} variable_set_type_t;
+```
+
+Derived inside the solver from the presence of cone blocks. Not user-facing.
+
 ## Quadratic Objective Type
 
 ```c

@@ -60,3 +60,7 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `OptNorm` | str | "linf" | Norm for optimality: "l2" or "linf" |
+
+!!! note "Cone constraints"
+    Cone specs are not solver parameters; they are part of the problem and are
+    passed via the `cones=` kwarg of `solve_once`. See [model.md](model.md#cone-constraints).
