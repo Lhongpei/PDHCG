@@ -1,4 +1,4 @@
-# PDHCG-II: A GPU-Accelerated Solver for Quadratic Programming
+# PDHCG: A First-Order Solver for Quadratic Conic Programming with Multi-GPU Acceleration
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![PyPI version](https://badge.fury.io/py/pdhcg.svg)](https://pypi.org/project/pdhcg/) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://lhongpei.github.io/PDHCG-II) [![Publication](https://img.shields.io/badge/DOI-10.1287/ijoc.2024.0983-B31B1B.svg)](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) [![arXiv](https://img.shields.io/badge/arXiv-2602.23967-b31b1b.svg)](https://arxiv.org/abs/2602.23967) [![qpsolvers](https://img.shields.io/badge/qpsolvers-supported-brightgreen.svg)](https://github.com/qpsolvers/qpsolvers)
 

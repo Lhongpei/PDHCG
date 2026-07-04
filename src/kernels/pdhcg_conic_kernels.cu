@@ -23,6 +23,7 @@ __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
                                            double *__restrict__ warm_start,
                                            const int *__restrict__ start_idx,
                                            const int *__restrict__ v_dim,
+                                           const char *__restrict__ is_fixed,
                                            int num_blocks)
 {
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
@@ -39,6 +40,36 @@ __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
 
     double s = *sptr;
     double t = *tptr;
+
+    /* Fast path: s, t pinned via is_fixed. Cone reduces to ball on v with R^2 = 2 s t / (d_s d_t).
+       s, t kept at their input (pinned) values; only v is projected. */
+    if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
+    {
+        double d_s_p = variable_rescaling[start + k];
+        double d_t_p = variable_rescaling[start + k + 1];
+        double R2 = 2.0 * (s / d_s_p) * (t / d_t_p);
+        if (!(R2 > 0.0))
+        {
+            for (int m = 0; m < k; ++m)
+                v[m] = 0.0;
+            return;
+        }
+        /* In-cone: sum (v_i/d_v_i)^2 <= R^2 -> identity */
+        double lhs = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double d_m = variable_rescaling[start + m];
+            double y = v[m] / d_m;
+            lhs += y * y;
+        }
+        if (lhs <= R2)
+            return;
+        double scale = sqrt(R2 / lhs);
+        for (int m = 0; m < k; ++m)
+            v[m] *= scale;
+        return;
+    }
+
     double w = (s - t) * INV_SQRT2;
     double z = (s + t) * INV_SQRT2;
 
@@ -52,7 +83,6 @@ __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
         if (variable_rescaling[start + m] != d_st)
             diag_uniform = false;
     }
-
     if (diag_uniform)
     {
         double sumsq = w * w;
@@ -229,9 +259,11 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
                                                   const double *__restrict__ objective_vector,
                                                   const double *__restrict__ dual_product,
                                                   const double *__restrict__ variable_rescaling,
+                                                  const double *__restrict__ primal_solution,
                                                   double *__restrict__ warm_start,
                                                   const int *__restrict__ start_idx,
                                                   const int *__restrict__ v_dim,
+                                                  const char *__restrict__ is_fixed,
                                                   int num_blocks)
 {
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
@@ -241,6 +273,50 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
     const double INV_SQRT2 = 0.7071067811865475;
     int start = start_idx[blk];
     int k = v_dim[blk];
+
+    /* Fast path: s, t pinned via is_fixed. Cone reduces to ball ||v/d||^2 <= R^2 in v slots.
+       Normal cone at v*: {0} if interior, R_+ . (v/d^2) if boundary. Dual residual is
+       r - proj_{N_K(v*)}(r); report it scaled by variable_rescaling like the LP-style kernel. */
+    if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
+    {
+        /* k==1 closed form: lambda absorbs r iff r and v have opposite signs (inward gradient). */
+        if (k == 1)
+        {
+            int idx = start;
+            double r = objective_vector[idx] - dual_product[idx];
+            double v = primal_solution[idx];
+            double d_0 = variable_rescaling[idx];
+            dual_residual[idx] = (r * v >= 0.0) ? r * d_0 : 0.0;
+            dual_residual[start + 1] = 0.0;
+            dual_residual[start + 2] = 0.0;
+            return;
+        }
+        /* KKT on v: r_v + lambda * n = 0 with lambda >= 0, n = outward normal (v / d^2).
+           Choose lambda = max(0, -r . n / n . n); residual = r + lambda * n; scale by d.
+           Fused single pass over k slots (was two; redundant reads removed). */
+        double dot = 0.0, n2 = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double n_m = primal_solution[idx] / (d_m * d_m);
+            double r = objective_vector[idx] - dual_product[idx];
+            dot += r * n_m;
+            n2 += n_m * n_m;
+        }
+        double lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double n_m = primal_solution[idx] / (d_m * d_m);
+            double r = objective_vector[idx] - dual_product[idx];
+            dual_residual[idx] = (r + lambda * n_m) * d_m;
+        }
+        dual_residual[start + k] = 0.0;
+        dual_residual[start + k + 1] = 0.0;
+        return;
+    }
 
     double r_s = objective_vector[start + k] - dual_product[start + k];
     double r_t = objective_vector[start + k + 1] - dual_product[start + k + 1];
@@ -473,6 +549,7 @@ __global__ void project_standard_soc_kernel(double *__restrict__ primal_solution
                                             double *__restrict__ warm_start,
                                             const int *__restrict__ start_idx,
                                             const int *__restrict__ v_dim,
+                                            const char *__restrict__ is_fixed,
                                             int num_blocks)
 {
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
@@ -487,6 +564,36 @@ __global__ void project_standard_soc_kernel(double *__restrict__ primal_solution
 
     double w = *wptr;
     double z = *zptr;
+
+    /* Fast path: w, z pinned via is_fixed. SOC ||v,w|| <= z reduces to ball
+       sum(v_actual)^2 <= z_actual^2 - w_actual^2 (assumes uniform d on cone slots). */
+    if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
+    {
+        double d_z_p = variable_rescaling[start + k + 1];
+        double d_w_p = variable_rescaling[start + k];
+        double z_a = z / d_z_p;
+        double w_a = w / d_w_p;
+        double R2 = z_a * z_a - w_a * w_a;
+        if (!(R2 > 0.0))
+        {
+            for (int m = 0; m < k; ++m)
+                v[m] = 0.0;
+            return;
+        }
+        double lhs = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double d_m = variable_rescaling[start + m];
+            double y = v[m] / d_m;
+            lhs += y * y;
+        }
+        if (lhs <= R2)
+            return;
+        double scale = sqrt(R2 / lhs);
+        for (int m = 0; m < k; ++m)
+            v[m] *= scale;
+        return;
+    }
 
     double d_z = variable_rescaling[start + k + 1];
     double dhat_w = variable_rescaling[start + k] / d_z;
@@ -669,9 +776,11 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
                                                            const double *__restrict__ objective_vector,
                                                            const double *__restrict__ dual_product,
                                                            const double *__restrict__ variable_rescaling,
+                                                           const double *__restrict__ primal_solution,
                                                            double *__restrict__ warm_start,
                                                            const int *__restrict__ start_idx,
                                                            const int *__restrict__ v_dim,
+                                                           const char *__restrict__ is_fixed,
                                                            int num_blocks)
 {
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
@@ -680,6 +789,47 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
 
     int start = start_idx[blk];
     int k = v_dim[blk];
+    int w_off = start + k;
+    int z_off = start + k + 1;
+
+    /* Fast path: w, z pinned via is_fixed. SOC reduces to ball on v; dual residual for
+       v projects onto ball's normal cone at v*; w, z slots have no dual condition. */
+    if (is_fixed && is_fixed[w_off] && is_fixed[z_off])
+    {
+        if (k == 1)
+        {
+            int idx = start;
+            double r = objective_vector[idx] - dual_product[idx];
+            double v = primal_solution[idx];
+            double d_0 = variable_rescaling[idx];
+            dual_residual[idx] = (r * v >= 0.0) ? r * d_0 : 0.0;
+            dual_residual[w_off] = 0.0;
+            dual_residual[z_off] = 0.0;
+            return;
+        }
+        double dot = 0.0, n2 = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double n_m = primal_solution[idx] / (d_m * d_m);
+            double r = objective_vector[idx] - dual_product[idx];
+            dot += r * n_m;
+            n2 += n_m * n_m;
+        }
+        double lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double n_m = primal_solution[idx] / (d_m * d_m);
+            double r = objective_vector[idx] - dual_product[idx];
+            dual_residual[idx] = (r + lambda * n_m) * d_m;
+        }
+        dual_residual[w_off] = 0.0;
+        dual_residual[z_off] = 0.0;
+        return;
+    }
 
     double r_w = objective_vector[start + k] - dual_product[start + k];
     double r_z = objective_vector[start + k + 1] - dual_product[start + k + 1];
@@ -903,6 +1053,7 @@ __global__ void project_rotated_soc_warp_kernel(double *__restrict__ primal_solu
                                                 double *__restrict__ warm_start,
                                                 const int *__restrict__ start_idx,
                                                 const int *__restrict__ v_dim,
+                                                const char *__restrict__ is_fixed,
                                                 int num_blocks)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -919,6 +1070,35 @@ __global__ void project_rotated_soc_warp_kernel(double *__restrict__ primal_solu
 
     double s_val = primal_solution[start + k];
     double t_val = primal_solution[start + k + 1];
+
+    if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
+    {
+        double d_s_p = variable_rescaling[start + k];
+        double d_t_p = variable_rescaling[start + k + 1];
+        double R2 = 2.0 * (s_val / d_s_p) * (t_val / d_t_p);
+        if (!(R2 > 0.0))
+        {
+            for (int m = lane; m < k; m += 32)
+                primal_solution[start + m] = 0.0;
+            return;
+        }
+        double lhs_p = 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double d_m = variable_rescaling[start + m];
+            double y = primal_solution[start + m] / d_m;
+            lhs_p += y * y;
+        }
+        for (int off = 16; off > 0; off >>= 1)
+            lhs_p += __shfl_xor_sync(MASK, lhs_p, off);
+        if (lhs_p <= R2)
+            return;
+        double scale = sqrt(R2 / lhs_p);
+        for (int m = lane; m < k; m += 32)
+            primal_solution[start + m] *= scale;
+        return;
+    }
+
     double w = (s_val - t_val) * INV_SQRT2;
     double z = (s_val + t_val) * INV_SQRT2;
 
@@ -1137,9 +1317,11 @@ __global__ void compute_cone_dual_residual_warp_kernel(double *__restrict__ dual
                                                        const double *__restrict__ objective_vector,
                                                        const double *__restrict__ dual_product,
                                                        const double *__restrict__ variable_rescaling,
+                                                       const double *__restrict__ primal_solution,
                                                        double *__restrict__ warm_start,
                                                        const int *__restrict__ start_idx,
                                                        const int *__restrict__ v_dim,
+                                                       const char *__restrict__ is_fixed,
                                                        int num_blocks)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1153,6 +1335,55 @@ __global__ void compute_cone_dual_residual_warp_kernel(double *__restrict__ dual
 
     int start = start_idx[blk];
     int k = v_dim[blk];
+
+    if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
+    {
+        if (k == 1)
+        {
+            if (lane == 0)
+            {
+                int idx = start;
+                double r = objective_vector[idx] - dual_product[idx];
+                double v = primal_solution[idx];
+                double d_0 = variable_rescaling[idx];
+                dual_residual[idx] = (r * v >= 0.0) ? r * d_0 : 0.0;
+                dual_residual[start + 1] = 0.0;
+                dual_residual[start + 2] = 0.0;
+            }
+            return;
+        }
+
+        double dot_p = 0.0, n2_p = 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double n_m = primal_solution[idx] / (d_m * d_m);
+            double r = objective_vector[idx] - dual_product[idx];
+            dot_p += r * n_m;
+            n2_p += n_m * n_m;
+        }
+        for (int off = 16; off > 0; off >>= 1)
+        {
+            dot_p += __shfl_xor_sync(MASK, dot_p, off);
+            n2_p += __shfl_xor_sync(MASK, n2_p, off);
+        }
+        double lambda = (dot_p < 0.0 && n2_p > 0.0) ? -dot_p / n2_p : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double n_m = primal_solution[idx] / (d_m * d_m);
+            double r = objective_vector[idx] - dual_product[idx];
+            dual_residual[idx] = (r + lambda * n_m) * d_m;
+        }
+        if (lane == 0)
+        {
+            dual_residual[start + k] = 0.0;
+            dual_residual[start + k + 1] = 0.0;
+        }
+        return;
+    }
 
     double r_s = objective_vector[start + k] - dual_product[start + k];
     double r_t = objective_vector[start + k + 1] - dual_product[start + k + 1];
@@ -1411,6 +1642,7 @@ __global__ void project_standard_soc_warp_kernel(double *__restrict__ primal_sol
                                                  double *__restrict__ warm_start,
                                                  const int *__restrict__ start_idx,
                                                  const int *__restrict__ v_dim,
+                                                 const char *__restrict__ is_fixed,
                                                  int num_blocks)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1426,6 +1658,36 @@ __global__ void project_standard_soc_warp_kernel(double *__restrict__ primal_sol
 
     double w = primal_solution[start + k];
     double z = primal_solution[start + k + 1];
+
+    if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
+    {
+        double d_z_p = variable_rescaling[start + k + 1];
+        double d_w_p = variable_rescaling[start + k];
+        double z_a = z / d_z_p;
+        double w_a = w / d_w_p;
+        double R2 = z_a * z_a - w_a * w_a;
+        if (!(R2 > 0.0))
+        {
+            for (int m = lane; m < k; m += 32)
+                primal_solution[start + m] = 0.0;
+            return;
+        }
+        double lhs_p = 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double d_m = variable_rescaling[start + m];
+            double y = primal_solution[start + m] / d_m;
+            lhs_p += y * y;
+        }
+        for (int off = 16; off > 0; off >>= 1)
+            lhs_p += __shfl_xor_sync(MASK, lhs_p, off);
+        if (lhs_p <= R2)
+            return;
+        double scale = sqrt(R2 / lhs_p);
+        for (int m = lane; m < k; m += 32)
+            primal_solution[start + m] *= scale;
+        return;
+    }
 
     double d_z = variable_rescaling[start + k + 1];
     double dhat_w = variable_rescaling[start + k] / d_z;
@@ -1638,9 +1900,11 @@ __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restri
                                                                 const double *__restrict__ objective_vector,
                                                                 const double *__restrict__ dual_product,
                                                                 const double *__restrict__ variable_rescaling,
+                                                                const double *__restrict__ primal_solution,
                                                                 double *__restrict__ warm_start,
                                                                 const int *__restrict__ start_idx,
                                                                 const int *__restrict__ v_dim,
+                                                                const char *__restrict__ is_fixed,
                                                                 int num_blocks)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1653,6 +1917,42 @@ __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restri
 
     int start = start_idx[blk];
     int k = v_dim[blk];
+    int w_off = start + k;
+    int z_off = start + k + 1;
+
+    if (is_fixed && is_fixed[w_off] && is_fixed[z_off])
+    {
+        double dot_p = 0.0, n2_p = 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double n_m = primal_solution[idx] / (d_m * d_m);
+            double r = objective_vector[idx] - dual_product[idx];
+            dot_p += r * n_m;
+            n2_p += n_m * n_m;
+        }
+        for (int off = 16; off > 0; off >>= 1)
+        {
+            dot_p += __shfl_xor_sync(MASK, dot_p, off);
+            n2_p += __shfl_xor_sync(MASK, n2_p, off);
+        }
+        double lambda = (dot_p < 0.0 && n2_p > 0.0) ? -dot_p / n2_p : 0.0;
+        for (int m = lane; m < k; m += 32)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double n_m = primal_solution[idx] / (d_m * d_m);
+            double r = objective_vector[idx] - dual_product[idx];
+            dual_residual[idx] = (r + lambda * n_m) * d_m;
+        }
+        if (lane == 0)
+        {
+            dual_residual[w_off] = 0.0;
+            dual_residual[z_off] = 0.0;
+        }
+        return;
+    }
 
     double r_w = objective_vector[start + k] - dual_product[start + k];
     double r_z = objective_vector[start + k + 1] - dual_product[start + k + 1];
@@ -2232,6 +2532,7 @@ __global__ void project_standard_soc_diag_q_kernel(double *__restrict__ pdhg_pri
                                                    double *__restrict__ warm_start,
                                                    const int *__restrict__ start_idx,
                                                    const int *__restrict__ v_dim,
+                                                   const char *__restrict__ is_fixed,
                                                    int num_blocks)
 {
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2245,6 +2546,55 @@ __global__ void project_standard_soc_diag_q_kernel(double *__restrict__ pdhg_pri
 
     double r_w = pdhg_primal[w_off];
     double r_z = pdhg_primal[z_off];
+
+    /* Fast path: w, z pinned via is_fixed. Cone reduces to ball on v with R^2 = z_actual^2 - w_actual^2. */
+    if (is_fixed && is_fixed[w_off] && is_fixed[z_off])
+    {
+        double d_z_p = variable_rescaling[z_off];
+        double d_w_p = variable_rescaling[w_off];
+        double z_a = r_z / d_z_p;
+        double w_a = r_w / d_w_p;
+        double R2 = z_a * z_a - w_a * w_a;
+        if (!(R2 > 0.0))
+        {
+            for (int m = 0; m < k; ++m)
+            {
+                pdhg_primal[start + m] = 0.0;
+                int idx = start + m;
+                reflected_primal[idx] = -current_primal[idx];
+            }
+            reflected_primal[w_off] = 2.0 * r_w - current_primal[w_off];
+            reflected_primal[z_off] = 2.0 * r_z - current_primal[z_off];
+            return;
+        }
+        double lhs = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double d_m = variable_rescaling[start + m];
+            double y = pdhg_primal[start + m] / d_m;
+            lhs += y * y;
+        }
+        if (lhs <= R2)
+        {
+            for (int m = 0; m < k + 2; ++m)
+            {
+                int idx = start + m;
+                reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+            }
+            return;
+        }
+        double scale = sqrt(R2 / lhs);
+        for (int m = 0; m < k; ++m)
+        {
+            double v_new = pdhg_primal[start + m] * scale;
+            pdhg_primal[start + m] = v_new;
+            int idx = start + m;
+            reflected_primal[idx] = 2.0 * v_new - current_primal[idx];
+        }
+        reflected_primal[w_off] = 2.0 * r_w - current_primal[w_off];
+        reflected_primal[z_off] = 2.0 * r_z - current_primal[z_off];
+        return;
+    }
 
     double d_z = variable_rescaling[z_off];
     double w_w = 1.0 + tau * Q_diag[w_off];
@@ -2294,6 +2644,52 @@ __global__ void project_standard_soc_diag_q_kernel(double *__restrict__ pdhg_pri
         reflected_primal[w_off] = -current_primal[w_off];
         reflected_primal[z_off] = -current_primal[z_off];
         return;
+    }
+
+    /* Fast path: no Q on cone slots and uniform d_v = d_z (LP-style symmetric case). */
+    if (Q_diag[w_off] == 0.0 && Q_diag[z_off] == 0.0)
+    {
+        bool no_cone_Q = true;
+        bool d_uniform = (variable_rescaling[w_off] == d_z);
+        for (int m = 0; m < k; ++m)
+        {
+            if (Q_diag[start + m] != 0.0)
+            {
+                no_cone_Q = false;
+                break;
+            }
+            if (variable_rescaling[start + m] != d_z)
+            {
+                d_uniform = false;
+                break;
+            }
+        }
+        if (no_cone_Q && d_uniform)
+        {
+            double sumsq = r_w * r_w;
+            for (int m = 0; m < k; ++m)
+            {
+                double vm = pdhg_primal[start + m];
+                sumsq += vm * vm;
+            }
+            double rnorm = sqrt(sumsq);
+            /* in-cone (rnorm <= r_z, r_z >= 0) and at-origin (rnorm <= -r_z, r_z <= 0) handled above */
+            double scale = (r_z + rnorm) / (2.0 * rnorm);
+            for (int m = 0; m < k; ++m)
+            {
+                double v_new = scale * pdhg_primal[start + m];
+                pdhg_primal[start + m] = v_new;
+                int idx = start + m;
+                reflected_primal[idx] = 2.0 * v_new - current_primal[idx];
+            }
+            double w_new = scale * r_w;
+            double z_new = scale * rnorm;
+            pdhg_primal[w_off] = w_new;
+            pdhg_primal[z_off] = z_new;
+            reflected_primal[w_off] = 2.0 * w_new - current_primal[w_off];
+            reflected_primal[z_off] = 2.0 * z_new - current_primal[z_off];
+            return;
+        }
     }
 
     double lo, hi;
@@ -2537,6 +2933,7 @@ __global__ void project_rotated_soc_diag_q_kernel(double *__restrict__ pdhg_prim
                                                   double *__restrict__ warm_start,
                                                   const int *__restrict__ start_idx,
                                                   const int *__restrict__ v_dim,
+                                                  const char *__restrict__ is_fixed,
                                                   int num_blocks)
 {
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2551,6 +2948,115 @@ __global__ void project_rotated_soc_diag_q_kernel(double *__restrict__ pdhg_prim
 
     double r_s = pdhg_primal[start + k];
     double r_t = pdhg_primal[start + k + 1];
+
+    /* Fast path: both s and t slots pinned via is_fixed. Cone reduces to weighted ball
+       projection on v slots with radius R^2 = 2 (S/d_s)(T/d_t); s, t stay at pinned r_s, r_t. */
+    if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
+    {
+        double d_s = variable_rescaling[start + k];
+        double d_t = variable_rescaling[start + k + 1];
+        double R2 = 2.0 * (r_s / d_s) * (r_t / d_t);
+        if (!(R2 > 0.0))
+        {
+            for (int m = 0; m < k; ++m)
+            {
+                pdhg_primal[start + m] = 0.0;
+                int idx = start + m;
+                reflected_primal[idx] = -current_primal[idx];
+            }
+            reflected_primal[start + k] = 2.0 * r_s - current_primal[start + k];
+            reflected_primal[start + k + 1] = 2.0 * r_t - current_primal[start + k + 1];
+            return;
+        }
+        /* k==1 closed form. KKT collapses: w cancels, v_new = sign(r) * min(|r|, d*R). */
+        if (k == 1)
+        {
+            double d_0 = variable_rescaling[start];
+            double r_0 = pdhg_primal[start];
+            double bound = d_0 * sqrt(R2);
+            double v_new = (fabs(r_0) <= bound) ? r_0 : ((r_0 >= 0.0) ? bound : -bound);
+            pdhg_primal[start] = v_new;
+            reflected_primal[start] = 2.0 * v_new - current_primal[start];
+            reflected_primal[start + 1] = 2.0 * r_s - current_primal[start + 1];
+            reflected_primal[start + 2] = 2.0 * r_t - current_primal[start + 2];
+            return;
+        }
+        /* In-cone test: sum (r_v_i / d_v_i)^2 <= R^2 */
+        double lhs0 = 0.0;
+        for (int m = 0; m < k; ++m)
+        {
+            double d_m = variable_rescaling[start + m];
+            double y = pdhg_primal[start + m] / d_m;
+            lhs0 += y * y;
+        }
+        if (lhs0 <= R2)
+        {
+            for (int m = 0; m < len; ++m)
+            {
+                int idx = start + m;
+                reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+            }
+            return;
+        }
+        /* Weighted ball: bisect lambda; v_i = r_i e_i^2 / (e_i^2 + lambda),  e_i^2 = w_i d_i^2.
+           Constraint sum (v_i/d_v_i)^2 = R^2  =>  sum r_i^2 w_i^2 d_i^2 / (e_i^2 + lambda)^2 = R^2. */
+        double lo_l = 0.0, hi_l = 1.0;
+        for (int it = 0; it < 80; ++it)
+        {
+            double s = 0.0;
+            for (int m = 0; m < k; ++m)
+            {
+                double w_m = 1.0 + tau * Q_diag[start + m];
+                if (!(w_m > W_FLOOR))
+                    w_m = W_FLOOR;
+                double d_m = variable_rescaling[start + m];
+                double e2 = w_m * d_m * d_m;
+                double tt = pdhg_primal[start + m] * w_m * d_m / (e2 + hi_l);
+                s += tt * tt;
+            }
+            if (s < R2)
+                break;
+            lo_l = hi_l;
+            hi_l *= 2.0;
+        }
+        for (int it = 0; it < 80; ++it)
+        {
+            double lam = 0.5 * (lo_l + hi_l);
+            double s = 0.0;
+            for (int m = 0; m < k; ++m)
+            {
+                double w_m = 1.0 + tau * Q_diag[start + m];
+                if (!(w_m > W_FLOOR))
+                    w_m = W_FLOOR;
+                double d_m = variable_rescaling[start + m];
+                double e2 = w_m * d_m * d_m;
+                double tt = pdhg_primal[start + m] * w_m * d_m / (e2 + lam);
+                s += tt * tt;
+            }
+            if (s > R2)
+                lo_l = lam;
+            else
+                hi_l = lam;
+            if ((hi_l - lo_l) / (1.0 + hi_l + lo_l) < 1e-13)
+                break;
+        }
+        double lam = 0.5 * (lo_l + hi_l);
+        for (int m = 0; m < k; ++m)
+        {
+            double w_m = 1.0 + tau * Q_diag[start + m];
+            if (!(w_m > W_FLOOR))
+                w_m = W_FLOOR;
+            double d_m = variable_rescaling[start + m];
+            double e2 = w_m * d_m * d_m;
+            double v_new = pdhg_primal[start + m] * e2 / (e2 + lam);
+            pdhg_primal[start + m] = v_new;
+            int idx = start + m;
+            reflected_primal[idx] = 2.0 * v_new - current_primal[idx];
+        }
+        reflected_primal[start + k] = 2.0 * r_s - current_primal[start + k];
+        reflected_primal[start + k + 1] = 2.0 * r_t - current_primal[start + k + 1];
+        return;
+    }
 
     double q_s = Q_diag[start + k];
     double q_t = Q_diag[start + k + 1];
@@ -2567,6 +3073,80 @@ __global__ void project_rotated_soc_diag_q_kernel(double *__restrict__ pdhg_prim
     double d_s = variable_rescaling[start + k];
     double d_t = variable_rescaling[start + k + 1];
     double d_st = sqrt(d_s * d_t);
+
+    const double INV_SQRT2 = 0.7071067811865475;
+    /* Fast path: no Q on cone slots (w_s = w_t = 1 and all w_v_i = 1) and uniform d_v = d_st.
+       This is the COMMON case for QCQP transform aux vars. Reduces to LP-style RSOC closed form. */
+    if (q_s == 0.0 && q_t == 0.0)
+    {
+        bool no_cone_Q = true;
+        bool d_uniform = true;
+        for (int m = 0; m < k; ++m)
+        {
+            if (Q_diag[start + m] != 0.0)
+            {
+                no_cone_Q = false;
+                break;
+            }
+            if (variable_rescaling[start + m] != d_st)
+            {
+                d_uniform = false;
+                break;
+            }
+        }
+        if (no_cone_Q && d_uniform)
+        {
+            double w_val = (r_s - r_t) * INV_SQRT2;
+            double z_val = (r_s + r_t) * INV_SQRT2;
+            double sumsq = w_val * w_val;
+            for (int m = 0; m < k; ++m)
+            {
+                double vm = pdhg_primal[start + m];
+                sumsq += vm * vm;
+            }
+            double rnorm = sqrt(sumsq);
+            if (rnorm <= z_val)
+            {
+                for (int m = 0; m < len; ++m)
+                {
+                    int idx = start + m;
+                    reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+                }
+                return;
+            }
+            if (rnorm <= -z_val)
+            {
+                for (int m = 0; m < k; ++m)
+                {
+                    pdhg_primal[start + m] = 0.0;
+                    int idx = start + m;
+                    reflected_primal[idx] = -current_primal[idx];
+                }
+                pdhg_primal[start + k] = 0.0;
+                pdhg_primal[start + k + 1] = 0.0;
+                reflected_primal[start + k] = -current_primal[start + k];
+                reflected_primal[start + k + 1] = -current_primal[start + k + 1];
+                return;
+            }
+            double scale = (z_val + rnorm) / (2.0 * rnorm);
+            double w_new = scale * w_val;
+            double z_new = scale * rnorm;
+            for (int m = 0; m < k; ++m)
+            {
+                double v_new = scale * pdhg_primal[start + m];
+                pdhg_primal[start + m] = v_new;
+                int idx = start + m;
+                reflected_primal[idx] = 2.0 * v_new - current_primal[idx];
+            }
+            double s_new = (z_new + w_new) * INV_SQRT2;
+            double t_new = (z_new - w_new) * INV_SQRT2;
+            pdhg_primal[start + k] = s_new;
+            pdhg_primal[start + k + 1] = t_new;
+            reflected_primal[start + k] = 2.0 * s_new - current_primal[start + k];
+            reflected_primal[start + k + 1] = 2.0 * t_new - current_primal[start + k + 1];
+            return;
+        }
+    }
 
     {
         double lhs = 0.0;

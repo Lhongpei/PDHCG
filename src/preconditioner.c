@@ -235,10 +235,18 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-        if (problem->num_original_variables > 0 && problem->cones.num_cones == 0)
+        /* Uniform-per-cone MAX: preserves cone structure (any uniform d works) while
+           taking the most conservative scale from Ruiz. */
+        for (int b = 0; b < problem->cones.num_cones; ++b)
         {
-            for (int i = problem->num_original_variables; i < num_vars; ++i)
-                var_rescale[i] = 1.0;
+            int s = problem->cones.start_idx[b];
+            int len = (problem->cones.type[b] == CONE_EXPONENTIAL) ? 3 : (problem->cones.v_dim[b] + 2);
+            double d_max = 0.0;
+            for (int j = s; j < s + len; ++j)
+                if (var_rescale[j] > d_max)
+                    d_max = var_rescale[j];
+            for (int j = s; j < s + len; ++j)
+                var_rescale[j] = d_max;
         }
 
         scale_problem(problem, con_rescale, var_rescale);
@@ -279,10 +287,16 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
     for (int i = 0; i < num_cons; ++i)
         con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-    if (problem->num_original_variables > 0 && problem->cones.num_cones == 0)
+    for (int b = 0; b < problem->cones.num_cones; ++b)
     {
-        for (int i = problem->num_original_variables; i < num_vars; ++i)
-            var_rescale[i] = 1.0;
+        int s = problem->cones.start_idx[b];
+        int len = (problem->cones.type[b] == CONE_EXPONENTIAL) ? 3 : (problem->cones.v_dim[b] + 2);
+        double d_max = 0.0;
+        for (int j = s; j < s + len; ++j)
+            if (var_rescale[j] > d_max)
+                d_max = var_rescale[j];
+        for (int j = s; j < s + len; ++j)
+            var_rescale[j] = d_max;
     }
 
     scale_problem(problem, con_rescale, var_rescale);

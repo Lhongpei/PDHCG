@@ -575,6 +575,8 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
         {
             int w_idx = aux0;
             int z_idx = aux0 + 1;
+            bool w_pinned = (cones->is_fixed && cones->is_fixed[w_idx]);
+            bool z_pinned = (cones->is_fixed && cones->is_fixed[z_idx]);
             double w_val = -INV_SQRT2 * rescale_info->con_bound_rescale * rescale_info->var_rescale[w_idx];
             double z_val = INV_SQRT2 * rescale_info->con_bound_rescale * rescale_info->var_rescale[z_idx];
             for (int which = 0; which < 4; ++which)
@@ -583,8 +585,10 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
                                    : which == 1 ? state->current_primal_solution
                                    : which == 2 ? state->pdhg_primal_solution
                                                 : state->reflected_primal_solution);
-                CUDA_CHECK(cudaMemcpy(dst + w_idx, &w_val, sizeof(double), cudaMemcpyHostToDevice));
-                CUDA_CHECK(cudaMemcpy(dst + z_idx, &z_val, sizeof(double), cudaMemcpyHostToDevice));
+                if (!w_pinned)
+                    CUDA_CHECK(cudaMemcpy(dst + w_idx, &w_val, sizeof(double), cudaMemcpyHostToDevice));
+                if (!z_pinned)
+                    CUDA_CHECK(cudaMemcpy(dst + z_idx, &z_val, sizeof(double), cudaMemcpyHostToDevice));
             }
         }
         else if (cones->type[i] == CONE_EXPONENTIAL)
@@ -593,6 +597,7 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
         else
         {
             int t_idx = aux0 + 1;
+            bool t_pinned = (cones->is_fixed && cones->is_fixed[t_idx]);
             double t_val = rescale_info->con_bound_rescale * rescale_info->var_rescale[t_idx];
             for (int which = 0; which < 4; ++which)
             {
@@ -600,7 +605,8 @@ static void initialize_cone_blocks(pdhg_solver_state_t *state,
                                    : which == 1 ? state->current_primal_solution
                                    : which == 2 ? state->pdhg_primal_solution
                                                 : state->reflected_primal_solution);
-                CUDA_CHECK(cudaMemcpy(dst + t_idx, &t_val, sizeof(double), cudaMemcpyHostToDevice));
+                if (!t_pinned)
+                    CUDA_CHECK(cudaMemcpy(dst + t_idx, &t_val, sizeof(double), cudaMemcpyHostToDevice));
             }
         }
     }

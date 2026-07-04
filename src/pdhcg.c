@@ -397,6 +397,10 @@ qp_problem_t *create_qp_problem(const double *objective_c,
 
     int n_vars = prob->num_variables;
     int n_orig = n_vars;
+    /* A finite var bound on a cone slot makes proj_K ∘ proj_Box != proj_{K ∩ Box}; the
+       caller must lift such variables with an auxiliary (x_cone = x_box) so cone slots
+       stay free. Treat |bound| >= 1e30 as "free" (matches the +/- INFINITY sentinel and
+       the 1e30 used in tests). */
     for (int i = 0; i < num_cones; ++i)
     {
         int s = cones[i].start_idx;
@@ -411,6 +415,27 @@ qp_problem_t *create_qp_problem(const double *objective_c,
                     n_vars);
             qp_problem_free(prob);
             return NULL;
+        }
+        for (int j = s; j < s + len; ++j)
+        {
+            double lo = prob->variable_lower_bound[j];
+            double hi = prob->variable_upper_bound[j];
+            int lo_finite = isfinite(lo) && lo > -1e30;
+            int hi_finite = isfinite(hi) && hi < 1e30;
+            if (lo_finite || hi_finite)
+            {
+                fprintf(stderr,
+                        "[create_qp_problem] cone %d slot %d has a finite box bound "
+                        "(lb=%.6g, ub=%.6g); cone variables must be free. Introduce an "
+                        "auxiliary x_cone with x_cone = x_box and put the box on the "
+                        "non-cone copy.\n",
+                        i,
+                        j,
+                        lo,
+                        hi);
+                qp_problem_free(prob);
+                return NULL;
+            }
         }
         if (s < n_orig)
             n_orig = s;

@@ -168,10 +168,24 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
         total_v += k;
     }
 
+    const CsrComponent *A_orig_pre = orig->constraint_matrix;
+    char *blk_pin = (char *)safe_calloc(K, sizeof(char));
+    int num_pin = 0;
+    for (int i = 0; i < K; ++i)
+    {
+        int row = orig->quadratic_constraint_row_indices[i];
+        if (A_orig_pre->row_ptr[row + 1] - A_orig_pre->row_ptr[row] == 0)
+        {
+            blk_pin[i] = 1;
+            num_pin++;
+        }
+    }
+
     long n_ext = (long)n_orig + total_v + 2L * K;
     long m_ext = (long)m_orig + total_v + K;
-    long nnz_ext = (long)orig->constraint_matrix_num_nonzeros + (is_std ? 2L * K : (long)K) + 2L * total_v +
-        (is_std ? 2L * K : (long)K);
+    long extras_per_block = is_std ? 2L : 1L;
+    long nnz_ext = (long)orig->constraint_matrix_num_nonzeros + extras_per_block * (K - num_pin) + 2L * total_v +
+        extras_per_block * (K - num_pin);
     if (n_ext > INT32_MAX || m_ext > INT32_MAX || nnz_ext > INT32_MAX)
     {
         fprintf(stderr, "[qcqp_to_socp_qp] extended problem size overflows int32.\n");
@@ -226,7 +240,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     for (int i = 0; i < K; ++i)
     {
         int row = orig->quadratic_constraint_row_indices[i];
-        double rhs = is_std ? block_b[i] * SQRT2 : block_b[i];
+        double rhs = blk_pin[i] ? 0.0 : (is_std ? block_b[i] * SQRT2 : block_b[i]);
         out->constraint_lower_bound[row] = rhs;
         out->constraint_upper_bound[row] = rhs;
     }
@@ -237,10 +251,12 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     }
     {
         double last_rhs = is_std ? SQRT2 : 1.0;
-        for (long r = m_orig + total_v; r < m_ext; ++r)
+        long r = m_orig + total_v;
+        for (int i = 0; i < K; ++i, ++r)
         {
-            out->constraint_lower_bound[r] = last_rhs;
-            out->constraint_upper_bound[r] = last_rhs;
+            double v = blk_pin[i] ? 0.0 : last_rhs;
+            out->constraint_lower_bound[r] = v;
+            out->constraint_upper_bound[r] = v;
         }
     }
 
@@ -259,7 +275,8 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     for (int r = 0; r < m_orig; ++r)
     {
         int orig_nnz = A_orig->row_ptr[r + 1] - A_orig->row_ptr[r];
-        int extra = qc_row_to_block[r] >= 0 ? (is_std ? 2 : 1) : 0;
+        int blk_r = qc_row_to_block[r];
+        int extra = (blk_r >= 0 && !blk_pin[blk_r]) ? (is_std ? 2 : 1) : 0;
         row_ptr_ext[r + 1] = orig_nnz + extra;
     }
     long extra_row = m_orig;
@@ -273,7 +290,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     }
     for (int i = 0; i < K; ++i)
     {
-        row_ptr_ext[extra_row + 1] = is_std ? 2 : 1;
+        row_ptr_ext[extra_row + 1] = blk_pin[i] ? 0 : (is_std ? 2 : 1);
         extra_row++;
     }
     for (long r = 1; r <= m_ext; ++r)
@@ -293,7 +310,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
             val_ext[dst] = xscale * A_orig->val[k];
             dst++;
         }
-        if (blk >= 0)
+        if (blk >= 0 && !blk_pin[blk])
         {
             int aux0 = out->cones.start_idx[blk] + out->cones.v_dim[blk];
             col_ind_ext[dst] = aux0;
@@ -324,6 +341,11 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     }
     for (int i = 0; i < K; ++i)
     {
+        if (blk_pin[i])
+        {
+            extra_row++;
+            continue;
+        }
         int aux0 = out->cones.start_idx[i] + out->cones.v_dim[i];
         int dst = row_ptr_ext[extra_row];
         if (is_std)
@@ -425,6 +447,32 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     out->primal_start = NULL;
     out->dual_start = NULL;
 
+    if (num_pin > 0)
+    {
+        out->cones.is_fixed = (char *)safe_calloc(n_ext, sizeof(char));
+        out->primal_start = (double *)safe_calloc(n_ext, sizeof(double));
+        for (int i = 0; i < K; ++i)
+        {
+            if (!blk_pin[i])
+                continue;
+            int s_slot = out->cones.start_idx[i] + out->cones.v_dim[i];
+            int t_slot = s_slot + 1;
+            out->cones.is_fixed[s_slot] = 1;
+            out->cones.is_fixed[t_slot] = 1;
+            if (is_std)
+            {
+                out->primal_start[s_slot] = (block_b[i] - 1.0) * SQRT2 * 0.5;
+                out->primal_start[t_slot] = (block_b[i] + 1.0) * SQRT2 * 0.5;
+            }
+            else
+            {
+                out->primal_start[s_slot] = block_b[i];
+                out->primal_start[t_slot] = 1.0;
+            }
+        }
+    }
+
+    free(blk_pin);
     free(qc_row_to_block);
     for (int i = 0; i < K; ++i)
     {
@@ -450,5 +498,6 @@ fail_free_blocks:
     free(block_sqrt);
     free(block_flip);
     free(block_b);
+    free(blk_pin);
     return NULL;
 }
