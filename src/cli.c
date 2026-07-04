@@ -15,6 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "cbf_parser.h"
 #include "mps_parser.h"
 #include "pdhcg.h"
 #include "presolve_wrapper.h"
@@ -40,6 +41,18 @@ char *get_output_path(const char *output_dir, const char *instance_name, const c
     char *full_path = safe_malloc(path_len * sizeof(char));
     snprintf(full_path, path_len, "%s/%s%s", output_dir, instance_name, suffix);
     return full_path;
+}
+
+/* Dispatch on file extension: .cbf(.gz) -> CBF parser, else MPS parser. */
+static qp_problem_t *read_problem_file(const char *filename)
+{
+    size_t n = strlen(filename);
+    const char *tail = filename;
+    if (n > 3 && strcmp(filename + n - 3, ".gz") == 0)
+        n -= 3;
+    if (n > 4 && strncmp(tail + n - 4, ".cbf", 4) == 0)
+        return read_cbf_file(filename);
+    return read_mps_file(filename);
 }
 
 char *extract_instance_name(const char *filename)
@@ -140,10 +153,10 @@ void save_solver_summary(const pdhcg_result_t *result, const char *output_dir, c
 
 void print_usage(const char *prog_name)
 {
-    fprintf(stderr, "Usage: %s [OPTIONS] <mps_file> <output_dir>\n\n", prog_name);
+    fprintf(stderr, "Usage: %s [OPTIONS] <problem_file> <output_dir>\n\n", prog_name);
 
     fprintf(stderr, "Arguments:\n");
-    fprintf(stderr, "  <mps_file>               Path to the input problem in MPS format (.mps .QPS or .mps.gz).\n");
+    fprintf(stderr, "  <problem_file>           Input problem: MPS (.mps/.QPS/.mps.gz) or CBF (.cbf/.cbf.gz).\n");
     fprintf(stderr, "  <output_dir>             Directory where output files will be saved. It will contain:\n");
     fprintf(stderr, "                             - <basename>_summary.txt\n");
     fprintf(stderr, "                             - <basename>_primal_solution.txt\n");
@@ -161,6 +174,7 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --no_pock_chambolle  Disable Pock-Chambolle rescaling (default: enabled).\n");
     fprintf(stderr, "      --pock_chambolle_alpha Value for Pock-Chambolle alpha (default: 1.0).\n");
     fprintf(stderr, "      --no_bound_obj_rescaling Disable bound objective rescaling.\n");
+    fprintf(stderr, "      --heterogeneous_cone_scaling Keep per-element cone scales (default: uniform per cone).\n");
     fprintf(stderr, "      --eval_freq <int>    Termination evaluation frequency (default: 200).\n");
     fprintf(stderr, "      --sv_max_iter <int>  Max iterations for singular value estimation (default: 5000).\n");
     fprintf(stderr, "      --sv_tol <float>     Tolerance for singular value estimation (default: 1e-4).\n");
@@ -212,6 +226,7 @@ int run_pdhcg(int argc, char *argv[])
                                            {"presolve", required_argument, 0, 1018},
                                            {"no_diag_precond", no_argument, 0, 1019},
                                            {"soc_form", required_argument, 0, 1020},
+                                           {"heterogeneous_cone_scaling", no_argument, 0, 1021},
                                            {0, 0, 0, 0}};
 
     int opt;
@@ -305,6 +320,9 @@ int run_pdhcg(int argc, char *argv[])
                     return 1;
                 }
                 break;
+            case 1021:
+                params.heterogeneous_cone_scaling = true;
+                break;
             case '?':
                 return 1;
         }
@@ -324,7 +342,7 @@ int run_pdhcg(int argc, char *argv[])
     if (instance_name == NULL)
         return 1;
 
-    qp_problem_t *problem = read_mps_file(filename);
+    qp_problem_t *problem = read_problem_file(filename);
     if (problem == NULL)
     {
         fprintf(stderr, "Failed to read or parse the file.\n");
@@ -397,6 +415,7 @@ int run_d_pdhcg(int argc, char *argv[])
                                            {"inner_min_tol", required_argument, 0, 1017},
                                            {"presolve", required_argument, 0, 1018},
                                            {"no_diag_precond", no_argument, 0, 1019},
+                                           {"heterogeneous_cone_scaling", no_argument, 0, 1021},
                                            {"grid_size", required_argument, 0, 2001},
                                            {"partition_method", required_argument, 0, 2002},
                                            {"permute_method", required_argument, 0, 2003},
@@ -485,6 +504,9 @@ int run_d_pdhcg(int argc, char *argv[])
                 break;
             case 1019:
                 params.diag_jacobi_precond = false;
+                break;
+            case 1021:
+                params.heterogeneous_cone_scaling = true;
                 break;
             case 2001: // --grid_size r,c
             {
@@ -588,8 +610,8 @@ int run_d_pdhcg(int argc, char *argv[])
     if (rank_global == 0)
     {
         if (params.verbose)
-            printf("Rank 0: Loading MPS file '%s'...\n", filename);
-        problem = read_mps_file(filename);
+            printf("Rank 0: Loading problem file '%s'...\n", filename);
+        problem = read_problem_file(filename);
 
         if (problem == NULL)
         {

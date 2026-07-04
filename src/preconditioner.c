@@ -25,9 +25,10 @@ limitations under the License.
 #define SCALING_EPSILON 1e-12
 
 static void scale_problem(qp_problem_t *problem, const double *con_rescale, const double *var_rescale);
-static void ruiz_rescaling(qp_problem_t *problem, int num_iters, double *cum_con_rescale, double *cum_var_rescale);
-static void
-pock_chambolle_rescaling(qp_problem_t *problem, double alpha, double *cum_con_rescale, double *cum_var_rescale);
+static void ruiz_rescaling(
+    qp_problem_t *problem, int num_iters, bool uniform_cone_d, double *cum_con_rescale, double *cum_var_rescale);
+static void pock_chambolle_rescaling(
+    qp_problem_t *problem, double alpha, bool uniform_cone_d, double *cum_con_rescale, double *cum_var_rescale);
 
 qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
 {
@@ -191,6 +192,7 @@ static void scale_problem(qp_problem_t *problem, const double *constraint_rescal
 
 static void ruiz_rescaling(qp_problem_t *problem,
                            int num_iterations,
+                           bool uniform_cone_d,
                            double *cum_constraint_rescaling,
                            double *cum_variable_rescaling)
 {
@@ -235,18 +237,23 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-        /* Uniform-per-cone MAX: preserves cone structure (any uniform d works) while
-           taking the most conservative scale from Ruiz. */
-        for (int b = 0; b < problem->cones.num_cones; ++b)
+        /* Uniform-per-cone GEOMEAN: preserves cone structure (any uniform d works).
+           Geomean is unbiased under multiplicative scale changes and avoids the
+           over-shrinking that MAX produces on high-dim cones. When uniform_cone_d
+           is false, keep per-element scales; kernels' bisection paths handle it. */
+        if (uniform_cone_d)
         {
-            int s = problem->cones.start_idx[b];
-            int len = (problem->cones.type[b] == CONE_EXPONENTIAL) ? 3 : (problem->cones.v_dim[b] + 2);
-            double d_max = 0.0;
-            for (int j = s; j < s + len; ++j)
-                if (var_rescale[j] > d_max)
-                    d_max = var_rescale[j];
-            for (int j = s; j < s + len; ++j)
-                var_rescale[j] = d_max;
+            for (int b = 0; b < problem->cones.num_cones; ++b)
+            {
+                int s = problem->cones.start_idx[b];
+                int len = (problem->cones.type[b] == CONE_EXPONENTIAL) ? 3 : (problem->cones.v_dim[b] + 2);
+                double log_sum = 0.0;
+                for (int j = s; j < s + len; ++j)
+                    log_sum += log(var_rescale[j]);
+                double d_geo = exp(log_sum / (double)len);
+                for (int j = s; j < s + len; ++j)
+                    var_rescale[j] = d_geo;
+            }
         }
 
         scale_problem(problem, con_rescale, var_rescale);
@@ -261,6 +268,7 @@ static void ruiz_rescaling(qp_problem_t *problem,
 
 static void pock_chambolle_rescaling(qp_problem_t *problem,
                                      double alpha,
+                                     bool uniform_cone_d,
                                      double *cum_constraint_rescaling,
                                      double *cum_variable_rescaling)
 {
@@ -287,16 +295,19 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
     for (int i = 0; i < num_cons; ++i)
         con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-    for (int b = 0; b < problem->cones.num_cones; ++b)
+    if (uniform_cone_d)
     {
-        int s = problem->cones.start_idx[b];
-        int len = (problem->cones.type[b] == CONE_EXPONENTIAL) ? 3 : (problem->cones.v_dim[b] + 2);
-        double d_max = 0.0;
-        for (int j = s; j < s + len; ++j)
-            if (var_rescale[j] > d_max)
-                d_max = var_rescale[j];
-        for (int j = s; j < s + len; ++j)
-            var_rescale[j] = d_max;
+        for (int b = 0; b < problem->cones.num_cones; ++b)
+        {
+            int s = problem->cones.start_idx[b];
+            int len = (problem->cones.type[b] == CONE_EXPONENTIAL) ? 3 : (problem->cones.v_dim[b] + 2);
+            double log_sum = 0.0;
+            for (int j = s; j < s + len; ++j)
+                log_sum += log(var_rescale[j]);
+            double d_geo = exp(log_sum / (double)len);
+            for (int j = s; j < s + len; ++j)
+                var_rescale[j] = d_geo;
+        }
     }
 
     scale_problem(problem, con_rescale, var_rescale);
@@ -379,10 +390,12 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
     for (int i = 0; i < num_vars; ++i)
         rescale_info->var_rescale[i] = 1.0;
 
+    bool uniform_cone_d = !params->heterogeneous_cone_scaling;
     if (params->l_inf_ruiz_iterations > 0)
     {
         ruiz_rescaling(rescale_info->scaled_problem,
                        params->l_inf_ruiz_iterations,
+                       uniform_cone_d,
                        rescale_info->con_rescale,
                        rescale_info->var_rescale);
     }
@@ -390,6 +403,7 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
     {
         pock_chambolle_rescaling(rescale_info->scaled_problem,
                                  params->pock_chambolle_alpha,
+                                 uniform_cone_d,
                                  rescale_info->con_rescale,
                                  rescale_info->var_rescale);
     }

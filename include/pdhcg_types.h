@@ -182,6 +182,7 @@ extern "C"
         bool has_pock_chambolle_alpha;
         double pock_chambolle_alpha;
         bool bound_objective_rescaling;
+        bool heterogeneous_cone_scaling;
         int verbose;
         int termination_evaluation_frequency;
         int sv_max_iter;

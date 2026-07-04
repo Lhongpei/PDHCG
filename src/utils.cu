@@ -307,6 +307,7 @@ void set_default_parameters(pdhg_parameters_t *params)
     params->has_pock_chambolle_alpha = true;
     params->pock_chambolle_alpha = 1.0;
     params->bound_objective_rescaling = true;
+    params->heterogeneous_cone_scaling = false;
     params->verbose = 1;
     params->termination_evaluation_frequency = 200;
     params->feasibility_polishing = false;
