@@ -266,6 +266,13 @@ typedef struct
 
     /* b vector for CBF Ax + b ∈ K_con (CBF ordering) */
     double *b;
+
+    /* OBJQCOORD symmetric fill; objective is 0.5 * x^T Q x. CBF variable ordering. */
+    int nnz_Q;
+    int cap_Q;
+    int *Q_row;
+    int *Q_col;
+    double *Q_val;
 } cbf_state_t;
 
 static void cbf_state_free(cbf_state_t *s)
@@ -277,6 +284,9 @@ static void cbf_state_free(cbf_state_t *s)
     free(s->A_col);
     free(s->A_val);
     free(s->b);
+    free(s->Q_row);
+    free(s->Q_col);
+    free(s->Q_val);
 }
 
 static bool cbf_read_ver(cbf_reader_t *r, cbf_state_t *s)
@@ -446,6 +456,81 @@ static bool cbf_read_objbcoord(cbf_reader_t *r, cbf_state_t *s)
         return false;
     }
     s->obj_constant += val;
+    return true;
+}
+
+static void cbf_reserve_Q(cbf_state_t *s, int need)
+{
+    if (s->cap_Q >= need)
+        return;
+    int new_cap = (s->cap_Q > 0) ? s->cap_Q : 16;
+    while (new_cap < need)
+        new_cap *= 2;
+    s->Q_row = (int *)safe_realloc(s->Q_row, (size_t)new_cap * sizeof(int));
+    s->Q_col = (int *)safe_realloc(s->Q_col, (size_t)new_cap * sizeof(int));
+    s->Q_val = (double *)safe_realloc(s->Q_val, (size_t)new_cap * sizeof(double));
+    s->cap_Q = new_cap;
+}
+
+/* OBJQCOORD: nnz lines of "i j val". Off-diagonal entries are symmetric-filled
+   into (i,j) and (j,i). Objective is 0.5 * x^T Q x + c^T x + f. */
+static bool cbf_read_objqcoord(cbf_reader_t *r, cbf_state_t *s)
+{
+    char *ln = cbf_next_line(r);
+    if (!ln)
+        return false;
+    int nnz = 0;
+    if (sscanf(ln, "%d", &nnz) != 1 || nnz < 0)
+    {
+        fprintf(stderr, "[cbf] bad OBJQCOORD header '%s'\n", ln);
+        return false;
+    }
+    if (!s->var_blocks)
+    {
+        fprintf(stderr, "[cbf] OBJQCOORD before VAR\n");
+        return false;
+    }
+    /* Worst case: all off-diagonal, so up to 2*nnz internal entries. */
+    cbf_reserve_Q(s, s->nnz_Q + 2 * nnz);
+    for (int k = 0; k < nnz; ++k)
+    {
+        ln = cbf_next_line(r);
+        if (!ln)
+        {
+            fprintf(stderr, "[cbf] OBJQCOORD truncated at %d/%d\n", k, nnz);
+            return false;
+        }
+        int i, j;
+        double val;
+        if (sscanf(ln, "%d %d %lf", &i, &j, &val) != 3)
+        {
+            fprintf(stderr, "[cbf] bad OBJQCOORD entry '%s'\n", ln);
+            return false;
+        }
+        if (i < 0 || i >= s->num_vars || j < 0 || j >= s->num_vars)
+        {
+            fprintf(stderr, "[cbf] OBJQCOORD entry (%d,%d) out of range\n", i, j);
+            return false;
+        }
+        if (i == j)
+        {
+            s->Q_row[s->nnz_Q] = i;
+            s->Q_col[s->nnz_Q] = j;
+            s->Q_val[s->nnz_Q] = val;
+            s->nnz_Q++;
+        }
+        else
+        {
+            s->Q_row[s->nnz_Q] = i;
+            s->Q_col[s->nnz_Q] = j;
+            s->Q_val[s->nnz_Q] = val;
+            s->nnz_Q++;
+            s->Q_row[s->nnz_Q] = j;
+            s->Q_col[s->nnz_Q] = i;
+            s->Q_val[s->nnz_Q] = val;
+            s->nnz_Q++;
+        }
+    }
     return true;
 }
 
@@ -806,6 +891,7 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
         out->cones.start_idx = (int *)safe_malloc(num_cones * sizeof(int));
         out->cones.v_dim = (int *)safe_malloc(num_cones * sizeof(int));
         out->cones.type = (cone_type_t *)safe_malloc(num_cones * sizeof(cone_type_t));
+        out->cones.power_alpha = NULL;
         /* CBF Q is (t, v_0..v_{n-2}) with t >= ||v||. Embed in internal SOC
            ||v, w|| <= z as (v_0..v_{n-2}, w, z) with phantom w pinned to 0
            via is_fixed. Reduces the cone by one dof and tightens the constraint
@@ -913,6 +999,27 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
     out->quadratic_constraint_matrices = NULL;
     out->quadratic_constraint_matrix_num_nonzeros = NULL;
 
+    /* MAX objsense negates Q too since max f = min -f. */
+    if (s->nnz_Q > 0)
+    {
+        int *qrows = (int *)safe_malloc((size_t)s->nnz_Q * sizeof(int));
+        int *qcols = (int *)safe_malloc((size_t)s->nnz_Q * sizeof(int));
+        double *qvals = (double *)safe_malloc((size_t)s->nnz_Q * sizeof(double));
+        for (int i = 0; i < s->nnz_Q; ++i)
+        {
+            qrows[i] = cbf_to_qp[s->Q_row[i]];
+            qcols[i] = cbf_to_qp[s->Q_col[i]];
+            qvals[i] = c_sign * s->Q_val[i];
+        }
+        int q_final_nnz = 0;
+        CsrComponent *Q = cbf_coo_to_csr(total_vars, total_vars, s->nnz_Q, qrows, qcols, qvals, &q_final_nnz);
+        free(qrows);
+        free(qcols);
+        free(qvals);
+        out->objective_sparse_matrix = Q;
+        out->objective_sparse_matrix_num_nonzeros = q_final_nnz;
+    }
+
     free(lp_off);
     free(cone_off);
     free(cbf_to_qp);
@@ -967,6 +1074,10 @@ qp_problem_t *read_cbf_file(const char *filename)
         else if (strcmp(kw, "OBJBCOORD") == 0)
         {
             ok = cbf_read_objbcoord(r, &s);
+        }
+        else if (strcmp(kw, "OBJQCOORD") == 0)
+        {
+            ok = cbf_read_objqcoord(r, &s);
         }
         else if (strcmp(kw, "ACOORD") == 0)
         {

@@ -209,6 +209,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     out->cones.start_idx = (int *)safe_malloc(K * sizeof(int));
     out->cones.v_dim = (int *)safe_malloc(K * sizeof(int));
     out->cones.type = (cone_type_t *)safe_malloc(K * sizeof(cone_type_t));
+    out->cones.power_alpha = NULL;
     out->num_original_variables = n_orig;
     {
         long idx = n_orig;

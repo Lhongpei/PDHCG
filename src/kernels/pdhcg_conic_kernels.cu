@@ -2484,6 +2484,294 @@ __global__ void compute_cone_dual_residual_exp_kernel(double *__restrict__ dual_
     dual_residual[s_idx + 2] = -zo * variable_rescaling[s_idx + 2];
 }
 
+/* 3-dim alpha-power cone K_a = {(x,y,z) : x >= 0, y >= 0, x^a * y^(1-a) >= |z|}.
+   Weighted projection: solves
+     min_{(x,y,z) in K_a}  0.5 * ( wx*(x-rx)^2 + wy*(y-ry)^2 + wz*(z-rz)^2 )
+   with wi > 0. In-cone test is metric-independent; opposite-cone test is not.
+   Bisection on rho = |z_proj| in [0, |r_z|] using KKT-derived formulas
+     x(rho) = 0.5 (rx + sqrt(rx^2 + 4 a (wz/wx) rho (|rz|-rho)))
+     y(rho) = 0.5 (ry + sqrt(ry^2 + 4 (1-a) (wz/wy) rho (|rz|-rho)))
+     G(rho) = x^a y^(1-a) - rho. */
+__device__ static inline void project_power_cone_point(
+    double rx, double ry, double rz, double wx, double wy, double wz, double alpha, double *xo, double *yo, double *zo)
+{
+    double abs_rz = fabs(rz);
+    double sgn_rz = (rz >= 0.0) ? 1.0 : -1.0;
+    double om = 1.0 - alpha;
+
+    if (rx >= 0.0 && ry >= 0.0)
+    {
+        double t = (rx > 0.0 ? pow(rx, alpha) : 0.0) * (ry > 0.0 ? pow(ry, om) : 0.0);
+        if (t >= abs_rz)
+        {
+            *xo = rx;
+            *yo = ry;
+            *zo = rz;
+            return;
+        }
+    }
+
+    /* Opposite cone under weighted inner product:
+       proj^w(r) = 0 iff (wx*rx, wy*ry, wz*rz) in -K_a^*, i.e.,
+         (-wx*rx)/a)^a * ((-wy*ry)/(1-a))^(1-a) >= wz*|rz|,  rx <= 0, ry <= 0. */
+    if (rx <= 0.0 && ry <= 0.0)
+    {
+        double u = (rx < 0.0) ? (-wx * rx) / alpha : 0.0;
+        double v = (ry < 0.0) ? (-wy * ry) / om : 0.0;
+        double t = (u > 0.0 ? pow(u, alpha) : 0.0) * (v > 0.0 ? pow(v, om) : 0.0);
+        if (t >= wz * abs_rz)
+        {
+            *xo = 0.0;
+            *yo = 0.0;
+            *zo = 0.0;
+            return;
+        }
+    }
+
+    double c_x = 4.0 * alpha * (wz / wx);
+    double c_y = 4.0 * om * (wz / wy);
+    double lo = 0.0;
+    double hi = abs_rz;
+    /* If r_x <= 0 or r_y <= 0, G(0) = 0 (spurious root at origin); skip it. */
+    if (rx <= 0.0 || ry <= 0.0)
+    {
+        lo = 1e-15 * abs_rz;
+        if (lo < 1e-300)
+            lo = 1e-300;
+    }
+    for (int it = 0; it < 60; ++it)
+    {
+        double rho = 0.5 * (lo + hi);
+        double disc_x = rx * rx + c_x * rho * (abs_rz - rho);
+        double disc_y = ry * ry + c_y * rho * (abs_rz - rho);
+        double x = 0.5 * (rx + sqrt(disc_x));
+        double y = 0.5 * (ry + sqrt(disc_y));
+        double tp = (x > 0.0 ? pow(x, alpha) : 0.0) * (y > 0.0 ? pow(y, om) : 0.0);
+        double g = tp - rho;
+        if (g > 0.0)
+            lo = rho;
+        else
+            hi = rho;
+        if (hi - lo < 1e-14 * (1.0 + abs_rz))
+            break;
+    }
+    double rho = 0.5 * (lo + hi);
+    double disc_x = rx * rx + c_x * rho * (abs_rz - rho);
+    double disc_y = ry * ry + c_y * rho * (abs_rz - rho);
+    double x = 0.5 * (rx + sqrt(disc_x));
+    double y = 0.5 * (ry + sqrt(disc_y));
+    if (x < 0.0)
+        x = 0.0;
+    if (y < 0.0)
+        y = 0.0;
+    *xo = x;
+    *yo = y;
+    *zo = sgn_rz * rho;
+}
+
+__global__ void project_power_cone_kernel(double *__restrict__ primal_solution,
+                                          const double *__restrict__ variable_rescaling,
+                                          double *__restrict__ warm_start,
+                                          const int *__restrict__ start_idx,
+                                          const int *__restrict__ v_dim,
+                                          const double *__restrict__ power_alpha,
+                                          const char *__restrict__ is_fixed,
+                                          int num_blocks)
+{
+    (void)warm_start;
+    (void)v_dim;
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int s_idx = start_idx[blk];
+    double r1 = primal_solution[s_idx + 0];
+    double r2 = primal_solution[s_idx + 1];
+    double r3 = primal_solution[s_idx + 2];
+
+    double d1 = variable_rescaling[s_idx + 0];
+    double d2 = variable_rescaling[s_idx + 1];
+    double d3 = variable_rescaling[s_idx + 2];
+    double alpha = power_alpha[blk];
+
+    /* z pinned to 0 -> cone reduces to {x,y >= 0}; clip. */
+    if (is_fixed && is_fixed[s_idx + 2])
+    {
+        double x_new = (r1 > 0.0) ? r1 : 0.0;
+        double y_new = (r2 > 0.0) ? r2 : 0.0;
+        primal_solution[s_idx + 0] = x_new;
+        primal_solution[s_idx + 1] = y_new;
+        return;
+    }
+    /* x,y pinned -> cone reduces to |z| <= R*d3 with R = (r1/d1)^a * (r2/d2)^(1-a). */
+    if (is_fixed && is_fixed[s_idx + 0] && is_fixed[s_idx + 1])
+    {
+        double x_a = r1 / d1;
+        double y_a = r2 / d2;
+        double R = (x_a > 0.0 && y_a > 0.0) ? pow(x_a, alpha) * pow(y_a, 1.0 - alpha) : 0.0;
+        double rz = r3 / d3;
+        double bound = R * d3;
+        double z_new = r3;
+        if (rz > R)
+            z_new = bound;
+        else if (rz < -R)
+            z_new = -bound;
+        primal_solution[s_idx + 2] = z_new;
+        return;
+    }
+
+    /* Prox in scaled space with metric I equals prox in actual space with metric diag(d^2). */
+    double rx = r1 / d1;
+    double ry = r2 / d2;
+    double rz = r3 / d3;
+    double wx = d1 * d1;
+    double wy = d2 * d2;
+    double wz = d3 * d3;
+    double xo, yo, zo;
+    project_power_cone_point(rx, ry, rz, wx, wy, wz, alpha, &xo, &yo, &zo);
+    primal_solution[s_idx + 0] = xo * d1;
+    primal_solution[s_idx + 1] = yo * d2;
+    primal_solution[s_idx + 2] = zo * d3;
+}
+
+__global__ void compute_cone_dual_residual_power_kernel(double *__restrict__ dual_residual,
+                                                        const double *__restrict__ objective_vector,
+                                                        const double *__restrict__ dual_product,
+                                                        const double *__restrict__ variable_rescaling,
+                                                        double *__restrict__ warm_start,
+                                                        const int *__restrict__ start_idx,
+                                                        const int *__restrict__ v_dim,
+                                                        const double *__restrict__ power_alpha,
+                                                        const char *__restrict__ is_fixed,
+                                                        int num_blocks)
+{
+    (void)warm_start;
+    (void)v_dim;
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int s_idx = start_idx[blk];
+    double r1 = objective_vector[s_idx + 0] - dual_product[s_idx + 0];
+    double r2 = objective_vector[s_idx + 1] - dual_product[s_idx + 1];
+    double r3 = objective_vector[s_idx + 2] - dual_product[s_idx + 2];
+    double alpha = power_alpha[blk];
+
+    /* z pinned -> reduced cone is {x,y >= 0}, dual is {u,v >= 0} on x,y; free on z. */
+    if (is_fixed && is_fixed[s_idx + 2])
+    {
+        dual_residual[s_idx + 0] = ((r1 > 0.0) ? r1 : 0.0) * variable_rescaling[s_idx + 0];
+        dual_residual[s_idx + 1] = ((r2 > 0.0) ? r2 : 0.0) * variable_rescaling[s_idx + 1];
+        dual_residual[s_idx + 2] = 0.0;
+        return;
+    }
+    /* x,y pinned -> no cone constraint remains; residual is zero. */
+    if (is_fixed && is_fixed[s_idx + 0] && is_fixed[s_idx + 1])
+    {
+        dual_residual[s_idx + 0] = 0.0;
+        dual_residual[s_idx + 1] = 0.0;
+        dual_residual[s_idx + 2] = 0.0;
+        return;
+    }
+
+    double vr1 = variable_rescaling[s_idx + 0];
+    double vr2 = variable_rescaling[s_idx + 1];
+    double vr3 = variable_rescaling[s_idx + 2];
+
+    /* Moreau via primal projection: dual_res = -Proj_K(-r * vr). */
+    double xo, yo, zo;
+    project_power_cone_point(-r1 * vr1, -r2 * vr2, -r3 * vr3, 1.0, 1.0, 1.0, alpha, &xo, &yo, &zo);
+
+    dual_residual[s_idx + 0] = -xo;
+    dual_residual[s_idx + 1] = -yo;
+    dual_residual[s_idx + 2] = -zo;
+}
+
+__global__ void project_power_cone_diag_q_kernel(double *__restrict__ pdhg_primal,
+                                                 double *__restrict__ reflected_primal,
+                                                 const double *__restrict__ current_primal,
+                                                 const double *__restrict__ variable_rescaling,
+                                                 const double *__restrict__ Q_diag,
+                                                 double tau,
+                                                 double *__restrict__ warm_start,
+                                                 const int *__restrict__ start_idx,
+                                                 const int *__restrict__ v_dim,
+                                                 const double *__restrict__ power_alpha,
+                                                 const char *__restrict__ is_fixed,
+                                                 int num_blocks)
+{
+    (void)warm_start;
+    (void)v_dim;
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int s_idx = start_idx[blk];
+    double r1 = pdhg_primal[s_idx + 0];
+    double r2 = pdhg_primal[s_idx + 1];
+    double r3 = pdhg_primal[s_idx + 2];
+
+    double d1 = variable_rescaling[s_idx + 0];
+    double d2 = variable_rescaling[s_idx + 1];
+    double d3 = variable_rescaling[s_idx + 2];
+    double alpha = power_alpha[blk];
+
+    if (is_fixed && is_fixed[s_idx + 2])
+    {
+        double x_new = (r1 > 0.0) ? r1 : 0.0;
+        double y_new = (r2 > 0.0) ? r2 : 0.0;
+        pdhg_primal[s_idx + 0] = x_new;
+        pdhg_primal[s_idx + 1] = y_new;
+        for (int m = 0; m < 3; ++m)
+        {
+            int idx = s_idx + m;
+            reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+        }
+        return;
+    }
+    if (is_fixed && is_fixed[s_idx + 0] && is_fixed[s_idx + 1])
+    {
+        double x_a = r1 / d1;
+        double y_a = r2 / d2;
+        double R = (x_a > 0.0 && y_a > 0.0) ? pow(x_a, alpha) * pow(y_a, 1.0 - alpha) : 0.0;
+        double rz = r3 / d3;
+        double bound = R * d3;
+        double z_new = r3;
+        if (rz > R)
+            z_new = bound;
+        else if (rz < -R)
+            z_new = -bound;
+        pdhg_primal[s_idx + 2] = z_new;
+        for (int m = 0; m < 3; ++m)
+        {
+            int idx = s_idx + m;
+            reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+        }
+        return;
+    }
+
+    /* Effective weight in actual space: omega_i = (1 + tau*Q_ii) * d_i^2. */
+    double w1 = 1.0 + tau * Q_diag[s_idx + 0];
+    double w2 = 1.0 + tau * Q_diag[s_idx + 1];
+    double w3 = 1.0 + tau * Q_diag[s_idx + 2];
+    double om_x = w1 * d1 * d1;
+    double om_y = w2 * d2 * d2;
+    double om_z = w3 * d3 * d3;
+    double rx = r1 / d1;
+    double ry = r2 / d2;
+    double rz = r3 / d3;
+    double xo, yo, zo;
+    project_power_cone_point(rx, ry, rz, om_x, om_y, om_z, alpha, &xo, &yo, &zo);
+    pdhg_primal[s_idx + 0] = xo * d1;
+    pdhg_primal[s_idx + 1] = yo * d2;
+    pdhg_primal[s_idx + 2] = zo * d3;
+    for (int m = 0; m < 3; ++m)
+    {
+        int idx = s_idx + m;
+        reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+    }
+}
+
 __global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,
                                            const double *__restrict__ objective_vector,
                                            const double *__restrict__ dual_product,

@@ -42,6 +42,7 @@ typedef void (*cone_proj_launcher_t)(double *primal,
                                      double *warm_start,
                                      const int *start_idx,
                                      const int *v_dim,
+                                     const double *power_alpha,
                                      const char *is_fixed,
                                      int count);
 
@@ -53,43 +54,52 @@ typedef void (*cone_dual_res_launcher_t)(double *dual_residual,
                                          double *warm_start,
                                          const int *start_idx,
                                          const int *v_dim,
+                                         const double *power_alpha,
                                          const char *is_fixed,
                                          int count);
 
 static void launch_rotated_thread_proj(
-    double *p, const double *vr, double *ws, const int *si, const int *vd, const char *isf, int n)
+    double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     project_rotated_soc_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
 }
-static void
-launch_rotated_warp_proj(double *p, const double *vr, double *ws, const int *si, const int *vd, const char *isf, int n)
+static void launch_rotated_warp_proj(
+    double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
     int t = THREADS_PER_BLOCK;
     int b = (n * 32 + t - 1) / t;
     project_rotated_soc_warp_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
 }
 static void launch_standard_thread_proj(
-    double *p, const double *vr, double *ws, const int *si, const int *vd, const char *isf, int n)
+    double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     project_standard_soc_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
 }
-static void
-launch_standard_warp_proj(double *p, const double *vr, double *ws, const int *si, const int *vd, const char *isf, int n)
+static void launch_standard_warp_proj(
+    double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
     int t = THREADS_PER_BLOCK;
     int b = (n * 32 + t - 1) / t;
     project_standard_soc_warp_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
 }
-static void
-launch_exp_thread_proj(double *p, const double *vr, double *ws, const int *si, const int *vd, const char *isf, int n)
+static void launch_exp_thread_proj(
+    double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     project_exp_cone_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
+}
+static void launch_power_thread_proj(
+    double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
+{
+    int t = THREADS_PER_BLOCK;
+    int b = (n + t - 1) / t;
+    project_power_cone_kernel<<<b, t>>>(p, vr, ws, si, vd, pa, isf, n);
 }
 
 static const cone_proj_launcher_t proj_launch_table[NUM_CONE_TYPES][NUM_PROJ_METHODS] = {
@@ -108,6 +118,11 @@ static const cone_proj_launcher_t proj_launch_table[NUM_CONE_TYPES][NUM_PROJ_MET
             [PROJ_METHOD_THREAD] = launch_exp_thread_proj,
             [PROJ_METHOD_WARP] = NULL,
         },
+    [CONE_POWER] =
+        {
+            [PROJ_METHOD_THREAD] = launch_power_thread_proj,
+            [PROJ_METHOD_WARP] = NULL,
+        },
 };
 
 static void launch_rotated_thread_dual(double *dr,
@@ -118,6 +133,7 @@ static void launch_rotated_thread_dual(double *dr,
                                        double *ws,
                                        const int *si,
                                        const int *vd,
+                                       const double *pa,
                                        const char *isf,
                                        int n)
 {
@@ -133,6 +149,7 @@ static void launch_rotated_warp_dual(double *dr,
                                      double *ws,
                                      const int *si,
                                      const int *vd,
+                                     const double *pa,
                                      const char *isf,
                                      int n)
 {
@@ -148,6 +165,7 @@ static void launch_standard_thread_dual(double *dr,
                                         double *ws,
                                         const int *si,
                                         const int *vd,
+                                        const double *pa,
                                         const char *isf,
                                         int n)
 {
@@ -163,6 +181,7 @@ static void launch_standard_warp_dual(double *dr,
                                       double *ws,
                                       const int *si,
                                       const int *vd,
+                                      const double *pa,
                                       const char *isf,
                                       int n)
 {
@@ -178,13 +197,32 @@ static void launch_exp_thread_dual(double *dr,
                                    double *ws,
                                    const int *si,
                                    const int *vd,
+                                   const double *pa,
                                    const char *isf,
                                    int n)
 {
     (void)ps;
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     compute_cone_dual_residual_exp_kernel<<<b, t>>>(dr, obj, dp, vr, ws, si, vd, isf, n);
+}
+static void launch_power_thread_dual(double *dr,
+                                     const double *obj,
+                                     const double *dp,
+                                     const double *vr,
+                                     const double *ps,
+                                     double *ws,
+                                     const int *si,
+                                     const int *vd,
+                                     const double *pa,
+                                     const char *isf,
+                                     int n)
+{
+    (void)ps;
+    int t = THREADS_PER_BLOCK;
+    int b = (n + t - 1) / t;
+    compute_cone_dual_residual_power_kernel<<<b, t>>>(dr, obj, dp, vr, ws, si, vd, pa, isf, n);
 }
 
 typedef void (*cone_proj_diag_q_launcher_t)(double *pdhg_primal,
@@ -196,6 +234,7 @@ typedef void (*cone_proj_diag_q_launcher_t)(double *pdhg_primal,
                                             double *warm_start,
                                             const int *start_idx,
                                             const int *v_dim,
+                                            const double *power_alpha,
                                             const char *is_fixed,
                                             int count);
 
@@ -208,6 +247,7 @@ static void launch_rotated_thread_proj_diag_q(double *pp,
                                               double *ws,
                                               const int *si,
                                               const int *vd,
+                                              const double *pa,
                                               const char *isf,
                                               int n)
 {
@@ -224,6 +264,7 @@ static void launch_standard_thread_proj_diag_q(double *pp,
                                                double *ws,
                                                const int *si,
                                                const int *vd,
+                                               const double *pa,
                                                const char *isf,
                                                int n)
 {
@@ -240,12 +281,31 @@ static void launch_exp_thread_proj_diag_q(double *pp,
                                           double *ws,
                                           const int *si,
                                           const int *vd,
+                                          const double *pa,
                                           const char *isf,
                                           int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     project_exp_cone_diag_q_kernel<<<b, t>>>(pp, rp, cp, vr, qd, tau, ws, si, vd, isf, n);
+}
+static void launch_power_thread_proj_diag_q(double *pp,
+                                            double *rp,
+                                            const double *cp,
+                                            const double *vr,
+                                            const double *qd,
+                                            double tau,
+                                            double *ws,
+                                            const int *si,
+                                            const int *vd,
+                                            const double *pa,
+                                            const char *isf,
+                                            int n)
+{
+    int t = THREADS_PER_BLOCK;
+    int b = (n + t - 1) / t;
+    project_power_cone_diag_q_kernel<<<b, t>>>(pp, rp, cp, vr, qd, tau, ws, si, vd, pa, isf, n);
 }
 
 static const cone_proj_diag_q_launcher_t proj_diag_q_launch_table[NUM_CONE_TYPES][NUM_PROJ_METHODS] = {
@@ -262,6 +322,11 @@ static const cone_proj_diag_q_launcher_t proj_diag_q_launch_table[NUM_CONE_TYPES
     [CONE_EXPONENTIAL] =
         {
             [PROJ_METHOD_THREAD] = launch_exp_thread_proj_diag_q,
+            [PROJ_METHOD_WARP] = NULL,
+        },
+    [CONE_POWER] =
+        {
+            [PROJ_METHOD_THREAD] = launch_power_thread_proj_diag_q,
             [PROJ_METHOD_WARP] = NULL,
         },
 };
@@ -282,6 +347,11 @@ static const cone_dual_res_launcher_t dual_res_launch_table[NUM_CONE_TYPES][NUM_
             [PROJ_METHOD_THREAD] = launch_exp_thread_dual,
             [PROJ_METHOD_WARP] = NULL,
         },
+    [CONE_POWER] =
+        {
+            [PROJ_METHOD_THREAD] = launch_power_thread_dual,
+            [PROJ_METHOD_WARP] = NULL,
+        },
 };
 
 static void dispatch_cone_projection(pdhg_solver_state_t *state, double *primal_solution)
@@ -289,11 +359,13 @@ static void dispatch_cone_projection(pdhg_solver_state_t *state, double *primal_
     for (int b = 0; b < state->num_cone_buckets; ++b)
     {
         const cone_bucket_t *bk = &state->cone_buckets[b];
+        const double *pa = state->cone_power_alpha ? state->cone_power_alpha + bk->offset : NULL;
         proj_launch_table[bk->type][bk->method](primal_solution,
                                                 state->variable_rescaling,
                                                 state->cone_warm_start_primal + bk->offset,
                                                 state->cone_start_idx + bk->offset,
                                                 state->cone_v_dim + bk->offset,
+                                                pa,
                                                 state->cone_is_fixed,
                                                 bk->count);
     }
@@ -309,6 +381,7 @@ static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state,
     for (int b = 0; b < state->num_cone_buckets; ++b)
     {
         const cone_bucket_t *bk = &state->cone_buckets[b];
+        const double *pa = state->cone_power_alpha ? state->cone_power_alpha + bk->offset : NULL;
         proj_diag_q_launch_table[bk->type][PROJ_METHOD_THREAD](pdhg_primal,
                                                                reflected_primal,
                                                                current_primal,
@@ -318,6 +391,7 @@ static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state,
                                                                state->cone_warm_start_primal + bk->offset,
                                                                state->cone_start_idx + bk->offset,
                                                                state->cone_v_dim + bk->offset,
+                                                               pa,
                                                                state->cone_is_fixed,
                                                                bk->count);
     }
@@ -328,6 +402,7 @@ static void dispatch_cone_dual_residual(pdhg_solver_state_t *state, const double
     for (int b = 0; b < state->num_cone_buckets; ++b)
     {
         const cone_bucket_t *bk = &state->cone_buckets[b];
+        const double *pa = state->cone_power_alpha ? state->cone_power_alpha + bk->offset : NULL;
         dual_res_launch_table[bk->type][bk->method](state->dual_residual,
                                                     effective_obj,
                                                     state->dual_product,
@@ -336,6 +411,7 @@ static void dispatch_cone_dual_residual(pdhg_solver_state_t *state, const double
                                                     state->cone_warm_start_dual + bk->offset,
                                                     state->cone_start_idx + bk->offset,
                                                     state->cone_v_dim + bk->offset,
+                                                    pa,
                                                     state->cone_is_fixed,
                                                     bk->count);
     }

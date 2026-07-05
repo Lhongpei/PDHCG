@@ -43,6 +43,8 @@ extern "C"
 
     int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value);
 
+    int set_power_cone_alpha(qp_problem_t *prob, int cone_idx, double alpha);
+
     qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig_qcqp, cone_type_t default_type);
 
     // solve the LP problem using PDHG

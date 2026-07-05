@@ -389,6 +389,7 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->cones.start_idx = NULL;
     prob->cones.v_dim = NULL;
     prob->cones.type = NULL;
+    prob->cones.power_alpha = NULL;
     prob->cones.is_fixed = NULL;
     prob->num_original_variables = 0;
 
@@ -404,7 +405,11 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     for (int i = 0; i < num_cones; ++i)
     {
         int s = cones[i].start_idx;
-        int len = (cones[i].type == CONE_EXPONENTIAL) ? 3 : (cones[i].v_dim + 2);
+        int len;
+        if (cones[i].type == CONE_EXPONENTIAL || cones[i].type == CONE_POWER)
+            len = 3;
+        else
+            len = cones[i].v_dim + 2;
         if (s < 0 || s + len > n_vars)
         {
             fprintf(stderr,
@@ -446,13 +451,26 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->cones.v_dim = (int *)safe_malloc(num_cones * sizeof(int));
     prob->cones.type = (cone_type_t *)safe_malloc(num_cones * sizeof(cone_type_t));
     int any_fix = 0;
+    int any_power = 0;
     for (int i = 0; i < num_cones; ++i)
     {
         prob->cones.start_idx[i] = cones[i].start_idx;
-        prob->cones.v_dim[i] = (cones[i].type == CONE_EXPONENTIAL) ? 1 : cones[i].v_dim;
+        if (cones[i].type == CONE_EXPONENTIAL || cones[i].type == CONE_POWER)
+            prob->cones.v_dim[i] = 1;
+        else
+            prob->cones.v_dim[i] = cones[i].v_dim;
         prob->cones.type[i] = cones[i].type;
         if (cones[i].is_fixed)
             any_fix = 1;
+        if (cones[i].type == CONE_POWER)
+            any_power = 1;
+    }
+    if (any_power)
+    {
+        prob->cones.power_alpha = (double *)safe_calloc(num_cones, sizeof(double));
+        for (int i = 0; i < num_cones; ++i)
+            if (cones[i].type == CONE_POWER)
+                prob->cones.power_alpha[i] = 0.5;
     }
     if (any_fix)
     {
@@ -462,7 +480,11 @@ qp_problem_t *create_qp_problem(const double *objective_c,
             if (!cones[i].is_fixed)
                 continue;
             int s = cones[i].start_idx;
-            int len = (cones[i].type == CONE_EXPONENTIAL) ? 3 : (cones[i].v_dim + 2);
+            int len;
+            if (cones[i].type == CONE_EXPONENTIAL || cones[i].type == CONE_POWER)
+                len = 3;
+            else
+                len = cones[i].v_dim + 2;
             for (int j = 0; j < len; ++j)
                 prob->cones.is_fixed[s + j] = cones[i].is_fixed[j] ? 1 : 0;
         }
@@ -470,6 +492,39 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->num_original_variables = n_orig;
 
     return prob;
+}
+
+int set_power_cone_alpha(qp_problem_t *prob, int cone_idx, double alpha)
+{
+    if (!prob)
+    {
+        fprintf(stderr, "[set_power_cone_alpha] prob is NULL\n");
+        return -1;
+    }
+    if (cone_idx < 0 || cone_idx >= prob->cones.num_cones)
+    {
+        fprintf(stderr, "[set_power_cone_alpha] cone_idx %d out of range [0, %d)\n", cone_idx, prob->cones.num_cones);
+        return -1;
+    }
+    if (prob->cones.type[cone_idx] != CONE_POWER)
+    {
+        fprintf(stderr, "[set_power_cone_alpha] cone %d is not CONE_POWER\n", cone_idx);
+        return -1;
+    }
+    if (!(alpha > 0.0 && alpha < 1.0))
+    {
+        fprintf(stderr, "[set_power_cone_alpha] cone %d: alpha must be in (0,1); got %.6g\n", cone_idx, alpha);
+        return -1;
+    }
+    if (!prob->cones.power_alpha)
+    {
+        prob->cones.power_alpha = (double *)safe_calloc(prob->cones.num_cones, sizeof(double));
+        for (int i = 0; i < prob->cones.num_cones; ++i)
+            if (prob->cones.type[i] == CONE_POWER)
+                prob->cones.power_alpha[i] = 0.5;
+    }
+    prob->cones.power_alpha[cone_idx] = alpha;
+    return 0;
 }
 
 void pdhcg_result_free(pdhcg_result_t *results)
@@ -522,6 +577,7 @@ void qp_problem_free(qp_problem_t *prob)
     free(prob->cones.start_idx);
     free(prob->cones.v_dim);
     free(prob->cones.type);
+    free(prob->cones.power_alpha);
     free(prob->cones.is_fixed);
     memset(prob, 0, sizeof(*prob));
     free(prob);
@@ -587,7 +643,11 @@ int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
         fprintf(stderr, "[set_cone_fixed] cone_idx %d out of range [0, %d)\n", cone_idx, prob->cones.num_cones);
         return -1;
     }
-    int len = (prob->cones.type[cone_idx] == CONE_EXPONENTIAL) ? 3 : (prob->cones.v_dim[cone_idx] + 2);
+    int len;
+    if (prob->cones.type[cone_idx] == CONE_EXPONENTIAL || prob->cones.type[cone_idx] == CONE_POWER)
+        len = 3;
+    else
+        len = prob->cones.v_dim[cone_idx] + 2;
     if (slot < 0 || slot >= len)
     {
         fprintf(stderr, "[set_cone_fixed] slot %d out of range [0, %d) for cone %d\n", slot, len, cone_idx);

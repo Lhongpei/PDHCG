@@ -198,9 +198,10 @@ typedef struct
 
     variable_set_type_t var_set_type;
     int num_cone_blocks;
-    int *cone_start_idx; /* permuted by bucket */
-    int *cone_v_dim;     /* permuted by bucket */
-    char *cone_is_fixed; /* NULL if no fixes */
+    int *cone_start_idx;      /* permuted by bucket */
+    int *cone_v_dim;          /* permuted by bucket */
+    double *cone_power_alpha; /* permuted by bucket; NULL if no power cones */
+    char *cone_is_fixed;      /* NULL if no fixes */
     double *cone_warm_start_primal;
     double *cone_warm_start_dual;
     double *effective_obj_grad;

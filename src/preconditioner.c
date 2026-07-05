@@ -116,6 +116,7 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
     new_prob->cones.start_idx = NULL;
     new_prob->cones.v_dim = NULL;
     new_prob->cones.type = NULL;
+    new_prob->cones.power_alpha = NULL;
     new_prob->cones.is_fixed = NULL;
     if (prob->cones.num_cones > 0)
     {
@@ -126,6 +127,11 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
         memcpy(new_prob->cones.start_idx, prob->cones.start_idx, K * sizeof(int));
         memcpy(new_prob->cones.v_dim, prob->cones.v_dim, K * sizeof(int));
         memcpy(new_prob->cones.type, prob->cones.type, K * sizeof(cone_type_t));
+        if (prob->cones.power_alpha)
+        {
+            new_prob->cones.power_alpha = safe_malloc(K * sizeof(double));
+            memcpy(new_prob->cones.power_alpha, prob->cones.power_alpha, K * sizeof(double));
+        }
         if (prob->cones.is_fixed)
         {
             new_prob->cones.is_fixed = safe_malloc(prob->num_variables * sizeof(char));
@@ -246,7 +252,9 @@ static void ruiz_rescaling(qp_problem_t *problem,
             for (int b = 0; b < problem->cones.num_cones; ++b)
             {
                 int s = problem->cones.start_idx[b];
-                int len = (problem->cones.type[b] == CONE_EXPONENTIAL) ? 3 : (problem->cones.v_dim[b] + 2);
+                int len = (problem->cones.type[b] == CONE_EXPONENTIAL || problem->cones.type[b] == CONE_POWER)
+                    ? 3
+                    : (problem->cones.v_dim[b] + 2);
                 double log_sum = 0.0;
                 for (int j = s; j < s + len; ++j)
                     log_sum += log(var_rescale[j]);
@@ -300,7 +308,9 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
         for (int b = 0; b < problem->cones.num_cones; ++b)
         {
             int s = problem->cones.start_idx[b];
-            int len = (problem->cones.type[b] == CONE_EXPONENTIAL) ? 3 : (problem->cones.v_dim[b] + 2);
+            int len = (problem->cones.type[b] == CONE_EXPONENTIAL || problem->cones.type[b] == CONE_POWER)
+                ? 3
+                : (problem->cones.v_dim[b] + 2);
             double log_sum = 0.0;
             for (int j = s; j < s + len; ++j)
                 log_sum += log(var_rescale[j]);

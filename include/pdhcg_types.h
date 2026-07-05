@@ -71,15 +71,17 @@ extern "C"
         CONE_ROTATED_SOC = 0,
         CONE_STANDARD_SOC = 1,
         CONE_EXPONENTIAL = 2,
-        NUM_CONE_TYPES = 3
+        CONE_POWER = 3, /* 3-dim: x^alpha * y^(1-alpha) >= |z|, x,y >= 0 */
+        NUM_CONE_TYPES = 4
     } cone_type_t;
 
     typedef struct
     {
         int num_cones;
-        int *start_idx;    /* [num_cones] */
-        int *v_dim;        /* [num_cones] */
-        cone_type_t *type; /* [num_cones] */
+        int *start_idx;      /* [num_cones] */
+        int *v_dim;          /* [num_cones] */
+        cone_type_t *type;   /* [num_cones] */
+        double *power_alpha; /* [num_cones]; alpha in (0,1) for CONE_POWER, else unused */
         char *is_fixed;
     } cone_blocks_t;
 
