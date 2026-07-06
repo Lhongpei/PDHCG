@@ -15,6 +15,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "cbf_parser.h"
+#include "mps_parser.h"
 #include "pdhcg.h"
 #include <csignal>
 #include <cstdint>
@@ -774,12 +776,139 @@ static py::dict solve_once(py::object Q,
     return info;
 }
 
+/* Convert a CsrComponent + shape (m, n, nnz) into a Python dict suitable for
+   passing to scipy.sparse.csr_matrix(...). Returns None if the matrix is empty. */
+static py::object csr_to_py(const CsrComponent *csr, int rows, int cols, int nnz)
+{
+    if (!csr || nnz <= 0 || !csr->row_ptr)
+        return py::none();
+    py::array_t<int32_t> indptr({rows + 1});
+    py::array_t<int32_t> indices({nnz});
+    py::array_t<double> vals({nnz});
+    std::memcpy(indptr.request().ptr, csr->row_ptr, sizeof(int) * (rows + 1));
+    std::memcpy(indices.request().ptr, csr->col_ind, sizeof(int) * nnz);
+    std::memcpy(vals.request().ptr, csr->val, sizeof(double) * nnz);
+    py::dict d;
+    d["indptr"] = indptr;
+    d["indices"] = indices;
+    d["data"] = vals;
+    d["shape"] = py::make_tuple(rows, cols);
+    return d;
+}
+
+/* Read an MPS or CBF problem file. Dispatches on file extension (.cbf/.cbf.gz -> CBF,
+   otherwise MPS). Returns a dict with keys: c, obj_const, Q, A, constr_lb, constr_ub,
+   var_lb, var_ub, cones. Sparse matrices are returned as {indptr, indices, data, shape}
+   dicts so the Python caller assembles scipy.sparse.csr_matrix without importing here. */
+static py::dict read_problem_file_py(const std::string &path)
+{
+    qp_problem_t *prob = nullptr;
+    size_t n = path.size();
+    bool is_cbf = false;
+    size_t stem_end = n;
+    if (n > 3 && path.compare(n - 3, 3, ".gz") == 0)
+        stem_end = n - 3;
+    if (stem_end >= 4 && path.compare(stem_end - 4, 4, ".cbf") == 0)
+        is_cbf = true;
+
+    prob = is_cbf ? read_cbf_file(path.c_str()) : read_mps_file(path.c_str());
+    if (!prob)
+        throw std::runtime_error("failed to read problem file: " + path);
+
+    /* QCQP files: transform quadratic constraints to SOCP cones so the extracted
+       problem is directly solvable via solve_once. Default to rotated SOC form. */
+    if (prob->num_quadratic_constraints > 0)
+    {
+        qp_problem_t *lifted = qcqp_to_socp_qp(prob, CONE_ROTATED_SOC);
+        qp_problem_free(prob);
+        if (!lifted)
+            throw std::runtime_error("QCQP -> SOCP transform failed for: " + path);
+        prob = lifted;
+    }
+
+    py::dict out;
+    int n_var = prob->num_variables;
+    int m_con = prob->num_constraints;
+
+    py::array_t<double> c({n_var});
+    std::memcpy(c.request().ptr, prob->objective_vector, sizeof(double) * n_var);
+    out["c"] = c;
+    out["obj_const"] = prob->objective_constant;
+
+    out["Q"] = csr_to_py(prob->objective_sparse_matrix, n_var, n_var, prob->objective_sparse_matrix_num_nonzeros);
+    out["A"] = csr_to_py(prob->constraint_matrix, m_con, n_var, prob->constraint_matrix_num_nonzeros);
+
+    py::array_t<double> constr_lb({m_con});
+    py::array_t<double> constr_ub({m_con});
+    py::array_t<double> var_lb({n_var});
+    py::array_t<double> var_ub({n_var});
+    if (m_con > 0)
+    {
+        std::memcpy(constr_lb.request().ptr, prob->constraint_lower_bound, sizeof(double) * m_con);
+        std::memcpy(constr_ub.request().ptr, prob->constraint_upper_bound, sizeof(double) * m_con);
+    }
+    std::memcpy(var_lb.request().ptr, prob->variable_lower_bound, sizeof(double) * n_var);
+    std::memcpy(var_ub.request().ptr, prob->variable_upper_bound, sizeof(double) * n_var);
+    out["constr_lb"] = constr_lb;
+    out["constr_ub"] = constr_ub;
+    out["var_lb"] = var_lb;
+    out["var_ub"] = var_ub;
+
+    py::list cones_list;
+    int K = prob->cones.num_cones;
+    for (int i = 0; i < K; ++i)
+    {
+        py::dict cd;
+        cone_type_t t = prob->cones.type[i];
+        const char *ty = "unknown";
+        if (t == CONE_ROTATED_SOC)
+            ty = "rsoc";
+        else if (t == CONE_STANDARD_SOC)
+            ty = "soc";
+        else if (t == CONE_EXPONENTIAL)
+            ty = "exp";
+        else if (t == CONE_POWER)
+            ty = "power";
+        cd["type"] = py::str(ty);
+        cd["start_idx"] = prob->cones.start_idx[i];
+        cd["v_dim"] = prob->cones.v_dim[i];
+        if (t == CONE_POWER && prob->cones.power_alpha)
+            cd["alpha"] = prob->cones.power_alpha[i];
+        if (prob->cones.is_fixed)
+        {
+            int slot_count = (t == CONE_EXPONENTIAL || t == CONE_POWER) ? 3 : (prob->cones.v_dim[i] + 2);
+            py::list mask;
+            for (int j = 0; j < slot_count; ++j)
+                mask.append(prob->cones.is_fixed[prob->cones.start_idx[i] + j] ? true : false);
+            cd["is_fixed"] = mask;
+        }
+        cones_list.append(cd);
+    }
+    out["cones"] = cones_list;
+
+    if (prob->primal_start)
+    {
+        py::array_t<double> ps({n_var});
+        std::memcpy(ps.request().ptr, prob->primal_start, sizeof(double) * n_var);
+        out["primal_start"] = ps;
+    }
+
+    qp_problem_free(prob);
+    return out;
+}
+
 PYBIND11_MODULE(_pdhcg_core, m)
 {
     m.doc() = "pdhcg core bindings (auto-detect dense/CSR/CSC/COO; initialize "
               "default params here)";
 
     m.def("get_default_params", &get_default_params_py, "Return default PDHG parameters as a dict");
+
+    m.def("read_problem_file",
+          &read_problem_file_py,
+          py::arg("path"),
+          "Read an MPS or CBF file (.mps/.mps.gz/.cbf/.cbf.gz) and return a dict with "
+          "c, obj_const, Q, A, constr_lb, constr_ub, var_lb, var_ub, cones, primal_start.");
 
     m.def("solve_once",
           &solve_once,

@@ -19,4 +19,13 @@ limitations under the License.
 
 #include "pdhcg_types.h"
 
-qp_problem_t *read_mps_file(const char *filename);
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+    qp_problem_t *read_mps_file(const char *filename);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif

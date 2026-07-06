@@ -22,7 +22,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from . import PDHCG
-from ._core import get_default_params, solve_once
+from ._core import get_default_params, read_problem_file, solve_once
 
 # array-like type
 ArrayLike = Union[np.ndarray, list, tuple]
@@ -210,6 +210,8 @@ class Model:
         self.setConstraintUpperBound(constraint_upper_bound)
         self.setVariableLowerBound(variable_lower_bound)
         self.setVariableUpperBound(variable_upper_bound)
+        # cones: list of dicts (see solve_once binding), populated by from_file for conic files
+        self._cones: Optional[list[dict]] = None
         # initialize warm start values
         self._primal_start: Optional[np.ndarray] = None  # warm start primal solution
         self._dual_start: Optional[np.ndarray] = None  # warm start dual solution
@@ -231,6 +233,43 @@ class Model:
         self._max_d_ray: Optional[float] = None  # maximum dual ray
         self._p_ray_lin_obj: Optional[float] = None  # primal ray linear objective
         self._d_ray_obj: Optional[float] = None  # dual ray objective
+
+    @classmethod
+    def read_file(cls, path: str) -> Model:
+        """
+        Read a problem file (.mps/.mps.gz/.cbf/.cbf.gz) and construct a Model.
+        Cones (SOC/RSOC/EXP/POWER) present in the file are preserved and passed
+        through to the solver.
+        """
+        raw = read_problem_file(path)
+
+        def _to_csr(d):
+            if d is None:
+                return None
+            return sp.csr_matrix(
+                (d["data"], d["indices"], d["indptr"]),
+                shape=d["shape"],
+            )
+
+        Q = _to_csr(raw.get("Q"))
+        A = _to_csr(raw.get("A"))
+        m = cls(
+            objective_vector=raw["c"],
+            constraint_matrix=A,
+            constraint_lower_bound=raw["constr_lb"] if A is not None else None,
+            constraint_upper_bound=raw["constr_ub"] if A is not None else None,
+            objective_matrix=Q,
+            variable_lower_bound=raw["var_lb"],
+            variable_upper_bound=raw["var_ub"],
+            objective_constant=raw.get("obj_const", 0.0),
+        )
+        cones = raw.get("cones")
+        if cones:
+            m._cones = list(cones)
+        ps = raw.get("primal_start")
+        if ps is not None:
+            m._primal_start = np.asarray(ps, dtype=np.float64)
+        return m
 
     def setObjectiveVector(self, c: ArrayLike) -> None:
         """
@@ -577,6 +616,7 @@ class Model:
             primal_start=self._primal_start,
             dual_start=self._dual_start,
             D=getattr(self, "D", None),
+            cones=self._cones,
         )
         # solutions
         self._x = np.asarray(info.get("X")) if info.get("X") is not None else None
