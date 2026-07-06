@@ -90,6 +90,7 @@ extern "C"
         cone_type_t type;
         int start_idx;
         int v_dim;
+        double alpha; /* required for CONE_POWER (in (0,1)); ignored otherwise */
         const char *is_fixed;
     } cone_spec_t;
 

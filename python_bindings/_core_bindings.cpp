@@ -484,9 +484,12 @@ static PyMatrixView get_matrix_from_python(py::object A, double zero_tol)
 }
 // solve function
 /* Parse a Python list of dicts into a vector of cone_spec_t plus per-cone is_fixed byte
-   storage (kept alive in cones_keep_alive until create_qp_problem returns).  Each entry:
-       {"type": "soc" | "rsoc" | "exp", "start_idx": int, "v_dim": int (omitted for exp),
-        "is_fixed": optional bytes/list of length v_dim+2 (or 3 for exp)} */
+   storage (kept alive in cones_keep_alive until create_qp_problem returns). Each entry:
+       {"type": "soc" | "rsoc" | "exp" | "power",
+        "start_idx": int,
+        "v_dim": int (omitted for exp/power),
+        "alpha": float in (0,1) (required for power),
+        "is_fixed": optional bytes/list of length slot_count} */
 static std::vector<cone_spec_t> parse_cone_specs(py::object cones, std::vector<std::vector<char>> &keep_alive)
 {
     std::vector<cone_spec_t> out;
@@ -506,15 +509,27 @@ static std::vector<cone_spec_t> parse_cone_specs(py::object cones, std::vector<s
             cs.type = CONE_ROTATED_SOC;
         else if (ty == "exp")
             cs.type = CONE_EXPONENTIAL;
+        else if (ty == "power")
+        {
+            cs.type = CONE_POWER;
+            if (!d.contains("alpha") || d["alpha"].is_none())
+                throw std::invalid_argument("cone 'power' requires 'alpha' in (0,1)");
+            cs.alpha = py::cast<double>(d["alpha"]);
+            if (!(cs.alpha > 0.0 && cs.alpha < 1.0))
+                throw std::invalid_argument("cone 'power' alpha must be in (0,1)");
+        }
         else
-            throw std::invalid_argument("cone type must be 'soc', 'rsoc', or 'exp'; got '" + ty + "'");
+            throw std::invalid_argument("cone type must be 'soc', 'rsoc', 'exp' or 'power'; got '" + ty + "'");
         cs.start_idx = py::cast<int>(d["start_idx"]);
-        cs.v_dim = (cs.type == CONE_EXPONENTIAL) ? 1 : py::cast<int>(d["v_dim"]);
+        if (cs.type == CONE_EXPONENTIAL || cs.type == CONE_POWER)
+            cs.v_dim = 1;
+        else
+            cs.v_dim = py::cast<int>(d["v_dim"]);
         cs.is_fixed = nullptr;
         if (d.contains("is_fixed") && !d["is_fixed"].is_none())
         {
             py::sequence seq = py::cast<py::sequence>(d["is_fixed"]);
-            int slot_count = (cs.type == CONE_EXPONENTIAL) ? 3 : (cs.v_dim + 2);
+            int slot_count = (cs.type == CONE_EXPONENTIAL || cs.type == CONE_POWER) ? 3 : (cs.v_dim + 2);
             if ((int)seq.size() != slot_count)
                 throw std::invalid_argument("is_fixed length must equal cone slot count (" +
                                             std::to_string(slot_count) + ")");

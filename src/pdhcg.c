@@ -469,8 +469,18 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     {
         prob->cones.power_alpha = (double *)safe_calloc(num_cones, sizeof(double));
         for (int i = 0; i < num_cones; ++i)
-            if (cones[i].type == CONE_POWER)
-                prob->cones.power_alpha[i] = 0.5;
+        {
+            if (cones[i].type != CONE_POWER)
+                continue;
+            double a = cones[i].alpha;
+            if (!(a > 0.0 && a < 1.0))
+            {
+                fprintf(stderr, "[create_qp_problem] cone %d: CONE_POWER requires alpha in (0,1); got %.6g\n", i, a);
+                qp_problem_free(prob);
+                return NULL;
+            }
+            prob->cones.power_alpha[i] = a;
+        }
     }
     if (any_fix)
     {
@@ -492,39 +502,6 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->num_original_variables = n_orig;
 
     return prob;
-}
-
-int set_power_cone_alpha(qp_problem_t *prob, int cone_idx, double alpha)
-{
-    if (!prob)
-    {
-        fprintf(stderr, "[set_power_cone_alpha] prob is NULL\n");
-        return -1;
-    }
-    if (cone_idx < 0 || cone_idx >= prob->cones.num_cones)
-    {
-        fprintf(stderr, "[set_power_cone_alpha] cone_idx %d out of range [0, %d)\n", cone_idx, prob->cones.num_cones);
-        return -1;
-    }
-    if (prob->cones.type[cone_idx] != CONE_POWER)
-    {
-        fprintf(stderr, "[set_power_cone_alpha] cone %d is not CONE_POWER\n", cone_idx);
-        return -1;
-    }
-    if (!(alpha > 0.0 && alpha < 1.0))
-    {
-        fprintf(stderr, "[set_power_cone_alpha] cone %d: alpha must be in (0,1); got %.6g\n", cone_idx, alpha);
-        return -1;
-    }
-    if (!prob->cones.power_alpha)
-    {
-        prob->cones.power_alpha = (double *)safe_calloc(prob->cones.num_cones, sizeof(double));
-        for (int i = 0; i < prob->cones.num_cones; ++i)
-            if (prob->cones.type[i] == CONE_POWER)
-                prob->cones.power_alpha[i] = 0.5;
-    }
-    prob->cones.power_alpha[cone_idx] = alpha;
-    return 0;
 }
 
 void pdhcg_result_free(pdhcg_result_t *results)
