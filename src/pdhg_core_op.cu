@@ -61,6 +61,7 @@ typedef void (*cone_dual_res_launcher_t)(double *dual_residual,
 static void launch_rotated_thread_proj(
     double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     project_rotated_soc_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
@@ -68,6 +69,7 @@ static void launch_rotated_thread_proj(
 static void launch_rotated_warp_proj(
     double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n * 32 + t - 1) / t;
     project_rotated_soc_warp_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
@@ -75,6 +77,7 @@ static void launch_rotated_warp_proj(
 static void launch_standard_thread_proj(
     double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     project_standard_soc_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
@@ -82,6 +85,7 @@ static void launch_standard_thread_proj(
 static void launch_standard_warp_proj(
     double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n * 32 + t - 1) / t;
     project_standard_soc_warp_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
@@ -137,6 +141,7 @@ static void launch_rotated_thread_dual(double *dr,
                                        const char *isf,
                                        int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     compute_cone_dual_residual_kernel<<<b, t>>>(dr, obj, dp, vr, ps, ws, si, vd, isf, n);
@@ -153,6 +158,7 @@ static void launch_rotated_warp_dual(double *dr,
                                      const char *isf,
                                      int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n * 32 + t - 1) / t;
     compute_cone_dual_residual_warp_kernel<<<b, t>>>(dr, obj, dp, vr, ps, ws, si, vd, isf, n);
@@ -169,6 +175,7 @@ static void launch_standard_thread_dual(double *dr,
                                         const char *isf,
                                         int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     compute_cone_dual_residual_standard_kernel<<<b, t>>>(dr, obj, dp, vr, ps, ws, si, vd, isf, n);
@@ -185,6 +192,7 @@ static void launch_standard_warp_dual(double *dr,
                                       const char *isf,
                                       int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n * 32 + t - 1) / t;
     compute_cone_dual_residual_standard_warp_kernel<<<b, t>>>(dr, obj, dp, vr, ps, ws, si, vd, isf, n);
@@ -251,6 +259,7 @@ static void launch_rotated_thread_proj_diag_q(double *pp,
                                               const char *isf,
                                               int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     project_rotated_soc_diag_q_kernel<<<b, t>>>(pp, rp, cp, vr, qd, tau, ws, si, vd, isf, n);
@@ -268,6 +277,7 @@ static void launch_standard_thread_proj_diag_q(double *pp,
                                                const char *isf,
                                                int n)
 {
+    (void)pa;
     int t = THREADS_PER_BLOCK;
     int b = (n + t - 1) / t;
     project_standard_soc_diag_q_kernel<<<b, t>>>(pp, rp, cp, vr, qd, tau, ws, si, vd, isf, n);
