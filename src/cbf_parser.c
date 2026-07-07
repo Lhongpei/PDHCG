@@ -16,7 +16,9 @@ limitations under the License.
 
 /* MOSEK Conic Benchmark Format (CBF) parser.
    Supports variable-side cones L=, L+, L-, F, Q, QR, EXP;
-   constraint-side cones L=, L+, L- (mapped to row bounds).
+   constraint-side cones L=, L+, L-, Q, QR, EXP.
+   Nonlinear constraint-side cones are converted to auxiliary cone variables
+   y in K plus linear equalities A x - y = -b.
    Rejects: PSDVAR, PSDCON, HCOORD, DCOORD, FCOORD, OBJFCOORD, INT,
    POW, POW*, EXP*, CHANGE blocks. */
 
@@ -165,6 +167,66 @@ static bool cbf_parse_cone_name(const char *tok, cbf_cone_t *out)
         return true;
     }
     return false;
+}
+
+static bool cbf_is_lp_cone(cbf_cone_t ct)
+{
+    return ct == CBF_CONE_LEQ || ct == CBF_CONE_LPOS || ct == CBF_CONE_LNEG;
+}
+
+static bool cbf_is_nonlinear_cone(cbf_cone_t ct)
+{
+    return ct == CBF_CONE_SOC || ct == CBF_CONE_RSOC || ct == CBF_CONE_EXP;
+}
+
+static int cbf_internal_cone_slots(cbf_cone_t ct, int dim)
+{
+    if (ct == CBF_CONE_SOC)
+        return dim + 1; /* phantom w slot pinned to 0 */
+    if (ct == CBF_CONE_RSOC)
+        return dim;
+    if (ct == CBF_CONE_EXP)
+        return 3;
+    return dim;
+}
+
+static int cbf_internal_cone_v_dim(cbf_cone_t ct, int dim)
+{
+    if (ct == CBF_CONE_SOC)
+        return dim - 1;
+    if (ct == CBF_CONE_RSOC)
+        return dim - 2;
+    return 1; /* EXP */
+}
+
+static cone_type_t cbf_internal_cone_type(cbf_cone_t ct)
+{
+    if (ct == CBF_CONE_SOC)
+        return CONE_STANDARD_SOC;
+    if (ct == CBF_CONE_RSOC)
+        return CONE_ROTATED_SOC;
+    return CONE_EXPONENTIAL;
+}
+
+static int cbf_map_cone_component(cbf_cone_t ct, int dim, int base, int local_idx)
+{
+    if (ct == CBF_CONE_SOC)
+    {
+        /* CBF Q: (t, v...). Internal SOC: [v..., w, z]. */
+        return local_idx == 0 ? base + dim : base + local_idx - 1;
+    }
+    if (ct == CBF_CONE_RSOC)
+    {
+        /* CBF QR: (s, t, v...). Internal RSOC: [v..., s, t]. */
+        int vd = dim - 2;
+        if (local_idx == 0)
+            return base + vd;
+        if (local_idx == 1)
+            return base + vd + 1;
+        return base + local_idx - 2;
+    }
+    /* CBF EXP: (x0, x1, x2), internal: (r1=x2, r2=x1, r3=x0). */
+    return base + (2 - local_idx);
 }
 
 /* Read n blocks of "CONE_NAME dim" pairs. Rejects unsupported cones. */
@@ -386,16 +448,6 @@ static bool cbf_read_con(cbf_reader_t *r, cbf_state_t *s)
     {
         fprintf(stderr, "[cbf] CON cone sum %d != m=%d\n", total, m);
         return false;
-    }
-    /* Phase 1: only LP-side cones allowed in CON. */
-    for (int i = 0; i < k; ++i)
-    {
-        cbf_cone_t ct = s->con_blocks[i].type;
-        if (ct != CBF_CONE_LEQ && ct != CBF_CONE_LPOS && ct != CBF_CONE_LNEG)
-        {
-            fprintf(stderr, "[cbf] CON block %d has non-linear cone; constraint-side Q/QR/EXP not yet supported\n", i);
-            return false;
-        }
     }
     s->num_con_blocks = k;
     s->num_cons = m;
@@ -656,14 +708,21 @@ static void cbf_consume_change(cbf_reader_t *r)
 }
 
 /* Compute qp_problem column layout:
-     [ LP vars: L=/L+/L- (in CBF appearance order) | cone-block vars (in CBF order) ]
+     [ LP vars | VAR cone-block vars | auxiliary CON cone-block vars ]
    Return arrays:
      lp_offset[b] = column start of block b if LP, else -1
-     cone_offset[b] = column start of block b if cone, else -1
+     cone_offset[b] = column start of VAR block b if cone, else -1
+     con_cone_offset[b] = column start of CON block b if nonlinear cone, else -1
      total_vars = final variable count
-     cbf_to_qp[i] = mapping from CBF-index i to internal qp column index */
-static void
-cbf_build_layout(const cbf_state_t *s, int **lp_off_out, int **cone_off_out, int *total_vars_out, int **cbf_to_qp_out)
+     cbf_to_qp[i] = mapping from CBF variable index i to internal qp column index
+     con_to_qp[r] = mapping from nonlinear CBF constraint component r to its aux y column */
+static void cbf_build_layout(const cbf_state_t *s,
+                             int **lp_off_out,
+                             int **cone_off_out,
+                             int **con_cone_off_out,
+                             int *total_vars_out,
+                             int **cbf_to_qp_out,
+                             int **con_to_qp_out)
 {
     int nb = s->num_var_blocks;
     int *lp_off = (int *)safe_malloc(nb * sizeof(int));
@@ -678,7 +737,7 @@ cbf_build_layout(const cbf_state_t *s, int **lp_off_out, int **cone_off_out, int
     for (int i = 0; i < nb; ++i)
     {
         cbf_cone_t ct = s->var_blocks[i].type;
-        if (ct == CBF_CONE_LEQ || ct == CBF_CONE_LPOS || ct == CBF_CONE_LNEG)
+        if (cbf_is_lp_cone(ct))
         {
             lp_off[i] = col;
             col += s->var_blocks[i].dim;
@@ -688,17 +747,10 @@ cbf_build_layout(const cbf_state_t *s, int **lp_off_out, int **cone_off_out, int
     for (int i = 0; i < nb; ++i)
     {
         cbf_cone_t ct = s->var_blocks[i].type;
-        int extra;
-        if (ct == CBF_CONE_SOC)
-            extra = s->var_blocks[i].dim + 1; /* v_dim=(dim-1), plus w, z: total dim+1 */
-        else if (ct == CBF_CONE_RSOC)
-            extra = s->var_blocks[i].dim; /* v_dim=(dim-2), plus s, t: total dim */
-        else if (ct == CBF_CONE_EXP)
-            extra = 3;
-        else
+        if (!cbf_is_nonlinear_cone(ct))
             continue;
         cone_off[i] = col;
-        col += extra;
+        col += cbf_internal_cone_slots(ct, s->var_blocks[i].dim);
     }
     int *cbf_to_qp = (int *)safe_malloc(s->num_vars * sizeof(int));
     for (int i = 0; i < nb; ++i)
@@ -706,49 +758,54 @@ cbf_build_layout(const cbf_state_t *s, int **lp_off_out, int **cone_off_out, int
         cbf_cone_t ct = s->var_blocks[i].type;
         int start = s->var_blocks[i].start;
         int dim = s->var_blocks[i].dim;
-        if (ct == CBF_CONE_LEQ || ct == CBF_CONE_LPOS || ct == CBF_CONE_LNEG)
+        if (cbf_is_lp_cone(ct))
         {
             int base = lp_off[i];
             for (int j = 0; j < dim; ++j)
                 cbf_to_qp[start + j] = base + j;
         }
-        else if (ct == CBF_CONE_SOC)
+        else
         {
-            /* CBF Q: (t=x[0], v_0..v_{dim-2}=x[1..dim-1]).
-               Internal SOC layout: [v_0, ..., v_{v_dim-1}, w, z], v_dim = dim-1.
-               Pin w=0. Map CBF x[0] -> z (base+dim), CBF x[j>=1] -> v_{j-1} (base+j-1). */
             int base = cone_off[i];
-            cbf_to_qp[start + 0] = base + dim; /* z slot */
-            for (int j = 1; j < dim; ++j)
-                cbf_to_qp[start + j] = base + (j - 1); /* v_{j-1} */
-            /* w slot at base + dim - 1 is not addressable via CBF idx (pinned) */
-        }
-        else if (ct == CBF_CONE_RSOC)
-        {
-            /* CBF QR: (s=x[0], t=x[1], v_0..v_{dim-3}=x[2..dim-1]).
-               Internal RSOC: [v_0, ..., v_{v_dim-1}, s, t], v_dim = dim-2. */
-            int base = cone_off[i];
-            int vd = dim - 2;
-            cbf_to_qp[start + 0] = base + vd;     /* s slot */
-            cbf_to_qp[start + 1] = base + vd + 1; /* t slot */
-            for (int j = 2; j < dim; ++j)
-                cbf_to_qp[start + j] = base + (j - 2);
-        }
-        else if (ct == CBF_CONE_EXP)
-        {
-            /* CBF EXP: (x[0], x[1], x[2]) with x[0] >= x[1] * exp(x[2]/x[1]).
-               Internal EXP layout at (r1, r2, r3) with r3 >= r2 * exp(r1/r2).
-               Map: CBF x[0] -> r3, x[1] -> r2, x[2] -> r1. */
-            int base = cone_off[i];
-            cbf_to_qp[start + 0] = base + 2;
-            cbf_to_qp[start + 1] = base + 1;
-            cbf_to_qp[start + 2] = base + 0;
+            for (int j = 0; j < dim; ++j)
+                cbf_to_qp[start + j] = cbf_map_cone_component(ct, dim, base, j);
         }
     }
+
+    int ncb = s->num_con_blocks;
+    int *con_cone_off = (int *)safe_malloc((size_t)(ncb > 0 ? ncb : 1) * sizeof(int));
+    for (int i = 0; i < ncb; ++i)
+        con_cone_off[i] = -1;
+    for (int i = 0; i < ncb; ++i)
+    {
+        cbf_cone_t ct = s->con_blocks[i].type;
+        if (!cbf_is_nonlinear_cone(ct))
+            continue;
+        con_cone_off[i] = col;
+        col += cbf_internal_cone_slots(ct, s->con_blocks[i].dim);
+    }
+
+    int *con_to_qp = (int *)safe_malloc((size_t)(s->num_cons > 0 ? s->num_cons : 1) * sizeof(int));
+    for (int r = 0; r < s->num_cons; ++r)
+        con_to_qp[r] = -1;
+    for (int i = 0; i < ncb; ++i)
+    {
+        cbf_cone_t ct = s->con_blocks[i].type;
+        if (!cbf_is_nonlinear_cone(ct))
+            continue;
+        int start = s->con_blocks[i].start;
+        int dim = s->con_blocks[i].dim;
+        int base = con_cone_off[i];
+        for (int j = 0; j < dim; ++j)
+            con_to_qp[start + j] = cbf_map_cone_component(ct, dim, base, j);
+    }
+
     *lp_off_out = lp_off;
     *cone_off_out = cone_off;
+    *con_cone_off_out = con_cone_off;
     *total_vars_out = col;
     *cbf_to_qp_out = cbf_to_qp;
+    *con_to_qp_out = con_to_qp;
 }
 
 /* Sort (row, col) coordinates and coalesce duplicates into a CSR matrix.
@@ -767,8 +824,9 @@ cbf_coo_to_csr(int m, int n, int nnz, const int *rows, const int *cols, const do
     int *row_ptr = (int *)safe_malloc((m + 1) * sizeof(int));
     memcpy(row_ptr, row_count, (m + 1) * sizeof(int));
 
-    int *col_ind = (int *)safe_malloc(nnz * sizeof(int));
-    double *val = (double *)safe_malloc(nnz * sizeof(double));
+    int alloc_nnz = nnz > 0 ? nnz : 1;
+    int *col_ind = (int *)safe_malloc((size_t)alloc_nnz * sizeof(int));
+    double *val = (double *)safe_malloc((size_t)alloc_nnz * sizeof(double));
     int *cursor = row_count;
     for (int i = 0; i < nnz; ++i)
     {
@@ -834,9 +892,9 @@ cbf_coo_to_csr(int m, int n, int nnz, const int *rows, const int *cols, const do
 
 static qp_problem_t *cbf_finalize(cbf_state_t *s)
 {
-    int *lp_off, *cone_off, *cbf_to_qp;
+    int *lp_off, *cone_off, *con_cone_off, *cbf_to_qp, *con_to_qp;
     int total_vars;
-    cbf_build_layout(s, &lp_off, &cone_off, &total_vars, &cbf_to_qp);
+    cbf_build_layout(s, &lp_off, &cone_off, &con_cone_off, &total_vars, &cbf_to_qp, &con_to_qp);
 
     qp_problem_t *out = (qp_problem_t *)safe_calloc(1, sizeof(qp_problem_t));
     out->num_variables = total_vars;
@@ -882,7 +940,13 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
     for (int b = 0; b < s->num_var_blocks; ++b)
     {
         cbf_cone_t ct = s->var_blocks[b].type;
-        if (ct == CBF_CONE_SOC || ct == CBF_CONE_RSOC || ct == CBF_CONE_EXP)
+        if (cbf_is_nonlinear_cone(ct))
+            num_cones++;
+    }
+    for (int b = 0; b < s->num_con_blocks; ++b)
+    {
+        cbf_cone_t ct = s->con_blocks[b].type;
+        if (cbf_is_nonlinear_cone(ct))
             num_cones++;
     }
     out->cones.num_cones = num_cones;
@@ -897,38 +961,40 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
            via is_fixed. Reduces the cone by one dof and tightens the constraint
            on v (||v|| <= z instead of sqrt(v^2+w^2) <= z with free w). */
         bool has_soc_wpin = false;
-        for (int b = 0, k = 0; b < s->num_var_blocks; ++b)
+        int k = 0;
+        for (int b = 0; b < s->num_var_blocks; ++b)
         {
             cbf_cone_t ct = s->var_blocks[b].type;
-            if (ct != CBF_CONE_SOC && ct != CBF_CONE_RSOC && ct != CBF_CONE_EXP)
+            if (!cbf_is_nonlinear_cone(ct))
                 continue;
             out->cones.start_idx[k] = cone_off[b];
+            out->cones.v_dim[k] = cbf_internal_cone_v_dim(ct, s->var_blocks[b].dim);
+            out->cones.type[k] = cbf_internal_cone_type(ct);
             if (ct == CBF_CONE_SOC)
-            {
-                out->cones.v_dim[k] = s->var_blocks[b].dim - 1;
-                out->cones.type[k] = CONE_STANDARD_SOC;
                 has_soc_wpin = true;
-            }
-            else if (ct == CBF_CONE_RSOC)
-            {
-                out->cones.v_dim[k] = s->var_blocks[b].dim - 2;
-                out->cones.type[k] = CONE_ROTATED_SOC;
-            }
-            else
-            {
-                out->cones.v_dim[k] = 1;
-                out->cones.type[k] = CONE_EXPONENTIAL;
-            }
+            k++;
+        }
+        for (int b = 0; b < s->num_con_blocks; ++b)
+        {
+            cbf_cone_t ct = s->con_blocks[b].type;
+            if (!cbf_is_nonlinear_cone(ct))
+                continue;
+            out->cones.start_idx[k] = con_cone_off[b];
+            out->cones.v_dim[k] = cbf_internal_cone_v_dim(ct, s->con_blocks[b].dim);
+            out->cones.type[k] = cbf_internal_cone_type(ct);
+            if (ct == CBF_CONE_SOC)
+                has_soc_wpin = true;
             k++;
         }
         if (has_soc_wpin)
         {
             out->cones.is_fixed = (char *)safe_calloc(total_vars, sizeof(char));
             out->primal_start = (double *)safe_calloc(total_vars, sizeof(double));
-            for (int b = 0, k = 0; b < s->num_var_blocks; ++b)
+            k = 0;
+            for (int b = 0; b < s->num_var_blocks; ++b)
             {
                 cbf_cone_t ct = s->var_blocks[b].type;
-                if (ct != CBF_CONE_SOC && ct != CBF_CONE_RSOC && ct != CBF_CONE_EXP)
+                if (!cbf_is_nonlinear_cone(ct))
                     continue;
                 if (ct == CBF_CONE_SOC)
                 {
@@ -936,6 +1002,19 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
                     int w_slot = cone_off[b] + vd;
                     out->cones.is_fixed[w_slot] = 1;
                     /* primal_start[w_slot] = 0.0 already from calloc */
+                }
+                k++;
+            }
+            for (int b = 0; b < s->num_con_blocks; ++b)
+            {
+                cbf_cone_t ct = s->con_blocks[b].type;
+                if (!cbf_is_nonlinear_cone(ct))
+                    continue;
+                if (ct == CBF_CONE_SOC)
+                {
+                    int vd = out->cones.v_dim[k];
+                    int w_slot = con_cone_off[b] + vd;
+                    out->cones.is_fixed[w_slot] = 1;
                 }
                 k++;
             }
@@ -948,25 +1027,48 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
          L=  ->  A x = -b   (l = u = -b)
          L+  ->  A x >= -b  (l = -b, u = +inf)
          L-  ->  A x <= -b  (l = -inf, u = -b) */
-    int *rows = (int *)safe_malloc((size_t)s->nnz_A * sizeof(int));
-    int *cols = (int *)safe_malloc((size_t)s->nnz_A * sizeof(int));
-    double *vals = (double *)safe_malloc((size_t)s->nnz_A * sizeof(double));
+    int con_aux_nnz = 0;
+    for (int b = 0; b < s->num_con_blocks; ++b)
+    {
+        if (cbf_is_nonlinear_cone(s->con_blocks[b].type))
+            con_aux_nnz += s->con_blocks[b].dim;
+    }
+    int work_nnz = s->nnz_A + con_aux_nnz;
+    int *rows = (int *)safe_malloc((size_t)(work_nnz > 0 ? work_nnz : 1) * sizeof(int));
+    int *cols = (int *)safe_malloc((size_t)(work_nnz > 0 ? work_nnz : 1) * sizeof(int));
+    double *vals = (double *)safe_malloc((size_t)(work_nnz > 0 ? work_nnz : 1) * sizeof(double));
     for (int i = 0; i < s->nnz_A; ++i)
     {
         rows[i] = s->A_row[i];
         cols[i] = cbf_to_qp[s->A_col[i]];
         vals[i] = s->A_val[i];
     }
+    int write = s->nnz_A;
+    for (int b = 0; b < s->num_con_blocks; ++b)
+    {
+        cbf_cone_t ct = s->con_blocks[b].type;
+        if (!cbf_is_nonlinear_cone(ct))
+            continue;
+        int start = s->con_blocks[b].start;
+        int dim = s->con_blocks[b].dim;
+        for (int j = 0; j < dim; ++j)
+        {
+            rows[write] = start + j;
+            cols[write] = con_to_qp[start + j];
+            vals[write] = -1.0;
+            write++;
+        }
+    }
     int final_nnz = 0;
-    CsrComponent *A = cbf_coo_to_csr(s->num_cons, total_vars, s->nnz_A, rows, cols, vals, &final_nnz);
+    CsrComponent *A = cbf_coo_to_csr(s->num_cons, total_vars, work_nnz, rows, cols, vals, &final_nnz);
     free(rows);
     free(cols);
     free(vals);
     out->constraint_matrix = A;
     out->constraint_matrix_num_nonzeros = final_nnz;
 
-    out->constraint_lower_bound = (double *)safe_malloc(s->num_cons * sizeof(double));
-    out->constraint_upper_bound = (double *)safe_malloc(s->num_cons * sizeof(double));
+    out->constraint_lower_bound = (double *)safe_malloc((size_t)(s->num_cons > 0 ? s->num_cons : 1) * sizeof(double));
+    out->constraint_upper_bound = (double *)safe_malloc((size_t)(s->num_cons > 0 ? s->num_cons : 1) * sizeof(double));
     for (int b = 0; b < s->num_con_blocks; ++b)
     {
         cbf_cone_t ct = s->con_blocks[b].type;
@@ -976,7 +1078,7 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
         {
             int r = start + j;
             double neg_b = -s->b[r];
-            if (ct == CBF_CONE_LEQ)
+            if (ct == CBF_CONE_LEQ || cbf_is_nonlinear_cone(ct))
             {
                 out->constraint_lower_bound[r] = neg_b;
                 out->constraint_upper_bound[r] = neg_b;
@@ -1022,7 +1124,9 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
 
     free(lp_off);
     free(cone_off);
+    free(con_cone_off);
     free(cbf_to_qp);
+    free(con_to_qp);
     return out;
 }
 
