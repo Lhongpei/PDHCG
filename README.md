@@ -73,14 +73,14 @@ This requires MPI and NCCL to be installed on your system.
 Run the solver from the command line:
 
 ```bash
-./build/bin/pdhcg <MPS_FILE> <OUTPUT_DIR> [OPTIONS]
+./build/bin/pdhcg <FILE_NAME> <OUTPUT_DIR> [OPTIONS]
 ```
 
 ### Command Line Arguments
 
 **Positional Arguments:**
 
-1. `<MPS_FILE>`: Path to the input QP (supports `.mps`, `.qps`, and `.mps.gz`).
+1. `<FILE_NAME>`: Path to the input problem file (supports `.mps`, `.qps`, `.cbf`, and gzip-compressed variants).
 2. `<OUTPUT_DIR>`: Directory where solution files will be saved.
 
 Solver Parameters:
@@ -97,15 +97,19 @@ Solver Parameters:
 | --pock_chambolle_alpha | double | Value for Pock-Chambolle step size parameter $\alpha$. | 1.0 |
 | --no_pock_chambolle | flag | Disable Pock-Chambolle rescaling (enabled by default). | false |
 | --no_bound_obj_rescaling | flag | Disable bound objective rescaling (enabled by default). | false |
+| --heterogeneous_cone_scaling | flag | Keep per-element cone scaling instead of forcing one scaling value per cone block. | false |
 | --sv_max_iter | int | Max iterations for singular value estimation (Power Method). | 5000 |
 | --sv_tol | double | Tolerance for singular value estimation. | 1e-4 |
 | --eval_freq | int | Frequency of termination criteria evaluation (in iterations). | 200 |
+| --artificial_restart_threshold | double | Threshold for artificial restart. | 0.36 |
+| --sufficient_reduction_for_restart | double | Sufficient reduction factor to justify a restart. | 0.2 |
+| --necessary_reduction_for_restart | double | Necessary reduction factor required for a restart. | 0.8 |
 | --opt_norm | string | Norm for optimality criteria (l2 or linf). | linf |
 | --inner_iter_limit | int | Max iterations for the inner solver. | 1000 |
 | --inner_init_tol | double | Initial tolerance for the inner solver. | 1e-3 |
 | --inner_min_tol | double | Minimum tolerance for the inner solver. | 1e-9 |
-| --presolve | int | Enable (1) or disable (0) presolve. | 1 |
 | --no_diag_precond | flag | Disable the Jacobi diagonal preconditioner used in the inner subproblem (enabled by default). | false |
+| --soc_form | string | Cone formulation for QCQP transformations: rotated or standard. | rotated |
 
 **Distributed Options** (only available when built with `-DPDHCG_COMPILE_DISTRIBUTED=ON`):
 | Option | Type | Description | Default |

@@ -156,7 +156,7 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "Usage: %s [OPTIONS] <problem_file> <output_dir>\n\n", prog_name);
 
     fprintf(stderr, "Arguments:\n");
-    fprintf(stderr, "  <problem_file>           Input problem: MPS (.mps/.QPS/.mps.gz) or CBF (.cbf/.cbf.gz).\n");
+    fprintf(stderr, "  <problem_file>           Input problem: .mps, .qps, .cbf, and gzip-compressed variants.\n");
     fprintf(stderr, "  <output_dir>             Directory where output files will be saved. It will contain:\n");
     fprintf(stderr, "                             - <basename>_summary.txt\n");
     fprintf(stderr, "                             - <basename>_primal_solution.txt\n");
@@ -176,13 +176,16 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --no_bound_obj_rescaling Disable bound objective rescaling.\n");
     fprintf(stderr, "      --heterogeneous_cone_scaling Keep per-element cone scales (default: uniform per cone).\n");
     fprintf(stderr, "      --eval_freq <int>    Termination evaluation frequency (default: 200).\n");
+    fprintf(stderr, "      --artificial_restart_threshold Artificial restart threshold (default: 0.36).\n");
+    fprintf(stderr,
+            "      --sufficient_reduction_for_restart Sufficient reduction factor for restart (default: 0.2).\n");
+    fprintf(stderr, "      --necessary_reduction_for_restart Necessary reduction factor for restart (default: 0.8).\n");
     fprintf(stderr, "      --sv_max_iter <int>  Max iterations for singular value estimation (default: 5000).\n");
     fprintf(stderr, "      --sv_tol <float>     Tolerance for singular value estimation (default: 1e-4).\n");
     fprintf(stderr, "      --opt_norm <type>    Norm for optimality criteria: l2 or linf (default: linf).\n");
     fprintf(stderr, "      --inner_iter_limit   Max iterations for the inner solver (default: 1000).\n");
     fprintf(stderr, "      --inner_init_tol     Initial tolerance for the inner solver (default: 1e-3).\n");
     fprintf(stderr, "      --inner_min_tol      Minimum tolerance for the inner solver (default: 1e-9).\n");
-    fprintf(stderr, "      --presolve <int>     Enable (1) or disable (0) presolve (default: 1).\n");
     fprintf(
         stderr,
         "      --no_diag_precond    Disable Jacobi diagonal preconditioner for inner subproblem (default: enabled).\n");
@@ -227,6 +230,9 @@ int run_pdhcg(int argc, char *argv[])
                                            {"no_diag_precond", no_argument, 0, 1019},
                                            {"soc_form", required_argument, 0, 1020},
                                            {"heterogeneous_cone_scaling", no_argument, 0, 1021},
+                                           {"artificial_restart_threshold", required_argument, 0, 1022},
+                                           {"sufficient_reduction_for_restart", required_argument, 0, 1023},
+                                           {"necessary_reduction_for_restart", required_argument, 0, 1024},
                                            {0, 0, 0, 0}};
 
     int opt;
@@ -323,6 +329,15 @@ int run_pdhcg(int argc, char *argv[])
             case 1021:
                 params.heterogeneous_cone_scaling = true;
                 break;
+            case 1022:
+                params.restart_params.artificial_restart_threshold = atof(optarg);
+                break;
+            case 1023:
+                params.restart_params.sufficient_reduction_for_restart = atof(optarg);
+                break;
+            case 1024:
+                params.restart_params.necessary_reduction_for_restart = atof(optarg);
+                break;
             case '?':
                 return 1;
         }
@@ -416,6 +431,9 @@ int run_d_pdhcg(int argc, char *argv[])
                                            {"presolve", required_argument, 0, 1018},
                                            {"no_diag_precond", no_argument, 0, 1019},
                                            {"heterogeneous_cone_scaling", no_argument, 0, 1021},
+                                           {"artificial_restart_threshold", required_argument, 0, 1022},
+                                           {"sufficient_reduction_for_restart", required_argument, 0, 1023},
+                                           {"necessary_reduction_for_restart", required_argument, 0, 1024},
                                            {"grid_size", required_argument, 0, 2001},
                                            {"partition_method", required_argument, 0, 2002},
                                            {"permute_method", required_argument, 0, 2003},
@@ -507,6 +525,15 @@ int run_d_pdhcg(int argc, char *argv[])
                 break;
             case 1021:
                 params.heterogeneous_cone_scaling = true;
+                break;
+            case 1022:
+                params.restart_params.artificial_restart_threshold = atof(optarg);
+                break;
+            case 1023:
+                params.restart_params.sufficient_reduction_for_restart = atof(optarg);
+                break;
+            case 1024:
+                params.restart_params.necessary_reduction_for_restart = atof(optarg);
                 break;
             case 2001: // --grid_size r,c
             {

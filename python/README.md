@@ -190,7 +190,7 @@ Below is a list of commonly used parameters, their internal keys, and descriptio
 | `IterationLimit` | `iteration_limit` | int | `2147483647` | Maximum number of iterations. |
 | `LogLevel`, `Verbosity` | `verbose` | int | `1` | Verbosity level: `0` (Silent), `1` (Summary), or `2` (Detailed iteration info). |
 | `TermCheckFreq` | `termination_evaluation_frequency` | int | `200` | Frequency (in iterations) at which termination conditions are evaluated. |
-| `OptimalityNorm` | `optimality_norm` | string | `"l2"` | Norm for optimality criteria. Use `"l2"` for L2 norm or `"linf"` for infinity norm. |
+| `OptimalityNorm` | `optimality_norm` | string | `"linf"` | Norm for optimality criteria. Use `"l2"` for L2 norm or `"linf"` for infinity norm. |
 | `OptimalityTol` | `eps_optimal_relative` | float | `1e-4` | Relative tolerance for optimality gap. Solver stops if the relative primal-dual gap ≤ this value. |
 | `FeasibilityTol` | `eps_feasible_relative` | float | `1e-4` | Relative feasibility tolerance for primal/dual residuals. |
 | `RuizIters` | `l_inf_ruiz_iterations` | int | `10` | Number of iterations for L∞ Ruiz scaling. Improves numerical conditioning. |
@@ -199,7 +199,7 @@ Below is a list of commonly used parameters, their internal keys, and descriptio
 | `BoundObjRescaling` | `bound_objective_rescaling` | bool | `True` | Whether to rescale the objective vector during preprocessing. |
 | `RestartArtificialThresh` | `artificial_restart_threshold` | float | `0.36` | Threshold for artificial restart. |
 | `RestartSufficientReduction` | `sufficient_reduction_for_restart` | float | `0.2` | Sufficient reduction factor to justify a restart. |
-| `RestartNecessaryReduction` | `necessary_reduction_for_restart` | float | `0.5` | Necessary reduction factor required for a restart. |
+| `RestartNecessaryReduction` | `necessary_reduction_for_restart` | float | `0.8` | Necessary reduction factor required for a restart. |
 | `RestartKp` | `k_p` | float | `0.99` | Proportional coefficient for PID-controlled primal weight updates. |
 | `ReflectionCoeff` | `reflection_coefficient` | float | `1.0` | Reflection coefficient. |
 | `SVMaxIter` | `sv_max_iter` | int | `5000` | Maximum number of iterations for the power method. |
