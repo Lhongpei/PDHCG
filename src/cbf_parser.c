@@ -36,12 +36,13 @@ limitations under the License.
 
 typedef enum
 {
-    CBF_CONE_LEQ = 0, /* L= (or F): free */
-    CBF_CONE_LPOS,    /* L+ : x >= 0 */
-    CBF_CONE_LNEG,    /* L- : x <= 0 */
-    CBF_CONE_SOC,     /* Q  : standard SOC, x[0] >= ||x[1:]|| */
-    CBF_CONE_RSOC,    /* QR : rotated SOC, 2*x[0]*x[1] >= ||x[2:]||^2 */
-    CBF_CONE_EXP,     /* EXP: x[0] >= x[1] * exp(x[2]/x[1]), x[1] > 0 */
+    CBF_CONE_FREE = 0, /* F  : free domain */
+    CBF_CONE_ZERO,     /* L= : fixed at zero */
+    CBF_CONE_LPOS,     /* L+ : x >= 0 */
+    CBF_CONE_LNEG,     /* L- : x <= 0 */
+    CBF_CONE_SOC,      /* Q  : standard SOC, x[0] >= ||x[1:]|| */
+    CBF_CONE_RSOC,     /* QR : rotated SOC, 2*x[0]*x[1] >= ||x[2:]||^2 */
+    CBF_CONE_EXP,      /* EXP: x[0] >= x[1] * exp(x[2]/x[1]), x[1] > 0 */
 } cbf_cone_t;
 
 typedef struct
@@ -136,9 +137,14 @@ static char *cbf_next_line(cbf_reader_t *r)
 
 static bool cbf_parse_cone_name(const char *tok, cbf_cone_t *out)
 {
-    if (strcmp(tok, "L=") == 0 || strcmp(tok, "F") == 0)
+    if (strcmp(tok, "F") == 0)
     {
-        *out = CBF_CONE_LEQ;
+        *out = CBF_CONE_FREE;
+        return true;
+    }
+    if (strcmp(tok, "L=") == 0)
+    {
+        *out = CBF_CONE_ZERO;
         return true;
     }
     if (strcmp(tok, "L+") == 0)
@@ -171,7 +177,7 @@ static bool cbf_parse_cone_name(const char *tok, cbf_cone_t *out)
 
 static bool cbf_is_lp_cone(cbf_cone_t ct)
 {
-    return ct == CBF_CONE_LEQ || ct == CBF_CONE_LPOS || ct == CBF_CONE_LNEG;
+    return ct == CBF_CONE_FREE || ct == CBF_CONE_ZERO || ct == CBF_CONE_LPOS || ct == CBF_CONE_LNEG;
 }
 
 static bool cbf_is_nonlinear_cone(cbf_cone_t ct)
@@ -182,7 +188,7 @@ static bool cbf_is_nonlinear_cone(cbf_cone_t ct)
 static int cbf_internal_cone_slots(cbf_cone_t ct, int dim)
 {
     if (ct == CBF_CONE_SOC)
-        return dim + 1; /* phantom w slot pinned to 0 */
+        return dim;
     if (ct == CBF_CONE_RSOC)
         return dim;
     if (ct == CBF_CONE_EXP)
@@ -193,7 +199,7 @@ static int cbf_internal_cone_slots(cbf_cone_t ct, int dim)
 static int cbf_internal_cone_v_dim(cbf_cone_t ct, int dim)
 {
     if (ct == CBF_CONE_SOC)
-        return dim - 1;
+        return dim - 2;
     if (ct == CBF_CONE_RSOC)
         return dim - 2;
     return 1; /* EXP */
@@ -213,7 +219,11 @@ static int cbf_map_cone_component(cbf_cone_t ct, int dim, int base, int local_id
     if (ct == CBF_CONE_SOC)
     {
         /* CBF Q: (t, v...). Internal SOC: [v..., w, z]. */
-        return local_idx == 0 ? base + dim : base + local_idx - 1;
+        if (local_idx == 0)
+            return base + dim - 1;
+        if (local_idx == dim - 1)
+            return base + dim - 2;
+        return base + local_idx - 1;
     }
     if (ct == CBF_CONE_RSOC)
     {
@@ -733,7 +743,7 @@ static void cbf_build_layout(const cbf_state_t *s,
         cone_off[i] = -1;
     }
     int col = 0;
-    /* LP-side first, preserving CBF order for L=, L+, L- blocks. */
+    /* LP-side first, preserving CBF order for F, L=, L+, L- blocks. */
     for (int i = 0; i < nb; ++i)
     {
         cbf_cone_t ct = s->var_blocks[i].type;
@@ -743,7 +753,7 @@ static void cbf_build_layout(const cbf_state_t *s,
             col += s->var_blocks[i].dim;
         }
     }
-    /* Then cone-slot blocks. Each takes: SOC -> dim+1, RSOC -> dim, EXP -> 3. */
+    /* Then cone-slot blocks. Each takes its CBF cone dimension. */
     for (int i = 0; i < nb; ++i)
     {
         cbf_cone_t ct = s->var_blocks[i].type;
@@ -927,15 +937,23 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
             for (int j = 0; j < dim; ++j)
                 out->variable_lower_bound[base + j] = 0.0;
         }
+        else if (ct == CBF_CONE_ZERO)
+        {
+            for (int j = 0; j < dim; ++j)
+            {
+                out->variable_lower_bound[base + j] = 0.0;
+                out->variable_upper_bound[base + j] = 0.0;
+            }
+        }
         else if (ct == CBF_CONE_LNEG)
         {
             for (int j = 0; j < dim; ++j)
                 out->variable_upper_bound[base + j] = 0.0;
         }
-        /* CBF_CONE_LEQ / F: free, leave -inf/inf. */
+        /* CBF_CONE_FREE: leave -inf/inf. */
     }
 
-    /* Cone-block descriptors + is_fixed pin for CBF Q (w slot = 0). */
+    /* Cone-block descriptors. */
     int num_cones = 0;
     for (int b = 0; b < s->num_var_blocks; ++b)
     {
@@ -956,11 +974,6 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
         out->cones.v_dim = (int *)safe_malloc(num_cones * sizeof(int));
         out->cones.type = (cone_type_t *)safe_malloc(num_cones * sizeof(cone_type_t));
         out->cones.power_alpha = NULL;
-        /* CBF Q is (t, v_0..v_{n-2}) with t >= ||v||. Embed in internal SOC
-           ||v, w|| <= z as (v_0..v_{n-2}, w, z) with phantom w pinned to 0
-           via is_fixed. Reduces the cone by one dof and tightens the constraint
-           on v (||v|| <= z instead of sqrt(v^2+w^2) <= z with free w). */
-        bool has_soc_wpin = false;
         int k = 0;
         for (int b = 0; b < s->num_var_blocks; ++b)
         {
@@ -970,8 +983,6 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
             out->cones.start_idx[k] = cone_off[b];
             out->cones.v_dim[k] = cbf_internal_cone_v_dim(ct, s->var_blocks[b].dim);
             out->cones.type[k] = cbf_internal_cone_type(ct);
-            if (ct == CBF_CONE_SOC)
-                has_soc_wpin = true;
             k++;
         }
         for (int b = 0; b < s->num_con_blocks; ++b)
@@ -982,48 +993,14 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
             out->cones.start_idx[k] = con_cone_off[b];
             out->cones.v_dim[k] = cbf_internal_cone_v_dim(ct, s->con_blocks[b].dim);
             out->cones.type[k] = cbf_internal_cone_type(ct);
-            if (ct == CBF_CONE_SOC)
-                has_soc_wpin = true;
             k++;
-        }
-        if (has_soc_wpin)
-        {
-            out->cones.is_fixed = (char *)safe_calloc(total_vars, sizeof(char));
-            out->primal_start = (double *)safe_calloc(total_vars, sizeof(double));
-            k = 0;
-            for (int b = 0; b < s->num_var_blocks; ++b)
-            {
-                cbf_cone_t ct = s->var_blocks[b].type;
-                if (!cbf_is_nonlinear_cone(ct))
-                    continue;
-                if (ct == CBF_CONE_SOC)
-                {
-                    int vd = out->cones.v_dim[k];
-                    int w_slot = cone_off[b] + vd;
-                    out->cones.is_fixed[w_slot] = 1;
-                    /* primal_start[w_slot] = 0.0 already from calloc */
-                }
-                k++;
-            }
-            for (int b = 0; b < s->num_con_blocks; ++b)
-            {
-                cbf_cone_t ct = s->con_blocks[b].type;
-                if (!cbf_is_nonlinear_cone(ct))
-                    continue;
-                if (ct == CBF_CONE_SOC)
-                {
-                    int vd = out->cones.v_dim[k];
-                    int w_slot = con_cone_off[b] + vd;
-                    out->cones.is_fixed[w_slot] = 1;
-                }
-                k++;
-            }
         }
     }
 
     /* Build A (num_cons x total_vars) from COO in internal column indexing.
        CBF states: A x + b ∈ K_con, i.e., (Ax + b) participates in the cone.
        For LP CON cones:
+         F   ->  no row restriction
          L=  ->  A x = -b   (l = u = -b)
          L+  ->  A x >= -b  (l = -b, u = +inf)
          L-  ->  A x <= -b  (l = -inf, u = -b) */
@@ -1078,7 +1055,12 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
         {
             int r = start + j;
             double neg_b = -s->b[r];
-            if (ct == CBF_CONE_LEQ || cbf_is_nonlinear_cone(ct))
+            if (ct == CBF_CONE_FREE)
+            {
+                out->constraint_lower_bound[r] = -INFINITY;
+                out->constraint_upper_bound[r] = INFINITY;
+            }
+            else if (ct == CBF_CONE_ZERO || cbf_is_nonlinear_cone(ct))
             {
                 out->constraint_lower_bound[r] = neg_b;
                 out->constraint_upper_bound[r] = neg_b;
