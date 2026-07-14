@@ -18,7 +18,7 @@ PDHCG solves convex quadratic programs in the following form, which allows a fle
 \begin{aligned}
 \min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top D R) x + c^\top x \\
 \text{s.t.} \quad & \ell_c \le Ax \le u_c, \\
-                  & \ell_v \le x \le u_v, \\
+                  & \ell_v \le x_I \le u_v, \\
                   & x_J \in \mathcal{K} \quad \text{for cone blocks } J.
 \end{aligned}
 ```
