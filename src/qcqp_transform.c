@@ -8,12 +8,57 @@ You may obtain a copy of the License at
         http://www.apache.org/licenses/LICENSE-2.0
 */
 
+#include "qcqp_transform.h"
 #include "pdhcg.h"
 #include "utils.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+void restore_qcqp_result_dimensions(pdhcg_result_t *result, const qp_problem_t *original)
+{
+    if (!result || !original)
+        return;
+
+    int n_orig = original->num_variables;
+    int m_orig = original->num_constraints;
+
+    if (n_orig >= 0 && n_orig < result->num_variables)
+    {
+        if (result->primal_solution)
+        {
+            double *new_primal = n_orig > 0 ? (double *)safe_malloc((size_t)n_orig * sizeof(double)) : NULL;
+            if (n_orig > 0)
+                memcpy(new_primal, result->primal_solution, (size_t)n_orig * sizeof(double));
+            free(result->primal_solution);
+            result->primal_solution = new_primal;
+        }
+
+        if (result->reduced_cost)
+        {
+            double *new_rc = n_orig > 0 ? (double *)safe_malloc((size_t)n_orig * sizeof(double)) : NULL;
+            if (n_orig > 0)
+                memcpy(new_rc, result->reduced_cost, (size_t)n_orig * sizeof(double));
+            free(result->reduced_cost);
+            result->reduced_cost = new_rc;
+        }
+        result->num_variables = n_orig;
+    }
+    if (m_orig >= 0 && m_orig < result->num_constraints)
+    {
+        if (result->dual_solution)
+        {
+            double *new_dual = m_orig > 0 ? (double *)safe_malloc((size_t)m_orig * sizeof(double)) : NULL;
+            if (m_orig > 0)
+                memcpy(new_dual, result->dual_solution, (size_t)m_orig * sizeof(double));
+            free(result->dual_solution);
+            result->dual_solution = new_dual;
+        }
+        result->num_constraints = m_orig;
+    }
+    result->num_nonzeros = original->constraint_matrix_num_nonzeros;
+}
 
 static int
 extract_diag_signed(const CsrComponent *Q, int n, int nnz_max, int *out_cols, double *out_vals, int *sign_out)

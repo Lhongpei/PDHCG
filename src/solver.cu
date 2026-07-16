@@ -20,6 +20,7 @@ limitations under the License.
 #include "pdhg_core_op.h"
 #include "preconditioner.h"
 #include "presolve_wrapper.h"
+#include "qcqp_transform.h"
 #include "solver.h"
 #include "solver_state.h"
 #include "utils.h"
@@ -35,6 +36,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
 {
     pdhg_parameters_t copyed_params = *input_params;
     pdhg_parameters_t *params = &copyed_params;
+    const qp_problem_t *input_problem = original_problem;
 
     print_initial_info(input_params, original_problem);
 
@@ -76,11 +78,16 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
             if (presolve_info->problem_solved_during_presolve)
             {
                 pdhcg_result_t *result = pdhcg_create_result_from_presolve(presolve_info, original_problem);
+                restore_qcqp_result_dimensions(result, transformed ? input_problem : NULL);
                 if (result)
                 {
                     pdhg_final_log(result, params);
                 }
                 pdhcg_presolve_info_free(presolve_info);
+                if (transformed)
+                {
+                    qp_problem_free(transformed);
+                }
                 return result;
             }
 
@@ -93,7 +100,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
 
     if (working_problem->num_constraints == 0 || working_problem->constraint_matrix == NULL)
     {
-        working_problem = create_problem_with_dummy_constraint(original_problem);
+        working_problem = create_problem_with_dummy_constraint(working_problem);
         working_problem_needs_free = true;
     }
 
@@ -117,7 +124,8 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
             (state->total_count % get_print_frequency(state->total_count) == 0))
         {
             compute_residual(state, params->optimality_norm);
-            if (state->is_this_major_iteration && state->total_count < 3 * params->termination_evaluation_frequency)
+            if (state->num_cone_blocks == 0 && state->is_this_major_iteration &&
+                state->total_count < 3 * params->termination_evaluation_frequency)
             {
                 compute_infeasibility_information(state);
             }
@@ -176,44 +184,18 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
 
     if (presolve_info && presolve_info->reduced_problem)
     {
-        pdhcg_postsolve(presolve_info, result, original_problem);
+        if (!pdhcg_postsolve(presolve_info, result, original_problem))
+        {
+            fprintf(stderr, "Error: PreFOS primal-dual postsolve failed.\n");
+            result->termination_reason = TERMINATION_REASON_UNSPECIFIED;
+        }
     }
     if (working_problem_needs_free)
     {
         qp_problem_free((qp_problem_t *)working_problem);
     }
 
-    if (transformed && result && result->primal_solution)
-    {
-        int n_orig = transformed->num_original_variables;
-        int m_ext = transformed->num_constraints;
-        int m_orig = m_ext - (transformed->num_variables - n_orig - 2 * transformed->cones.num_cones);
-
-        if (n_orig > 0 && n_orig < result->num_variables)
-        {
-            double *new_primal = (double *)safe_malloc((size_t)n_orig * sizeof(double));
-            memcpy(new_primal, result->primal_solution, (size_t)n_orig * sizeof(double));
-            free(result->primal_solution);
-            result->primal_solution = new_primal;
-            result->num_variables = n_orig;
-
-            if (result->reduced_cost)
-            {
-                double *new_rc = (double *)safe_malloc((size_t)n_orig * sizeof(double));
-                memcpy(new_rc, result->reduced_cost, (size_t)n_orig * sizeof(double));
-                free(result->reduced_cost);
-                result->reduced_cost = new_rc;
-            }
-        }
-        if (m_orig > 0 && m_orig < result->num_constraints && result->dual_solution)
-        {
-            double *new_dual = (double *)safe_malloc((size_t)m_orig * sizeof(double));
-            memcpy(new_dual, result->dual_solution, (size_t)m_orig * sizeof(double));
-            free(result->dual_solution);
-            result->dual_solution = new_dual;
-            result->num_constraints = m_orig;
-        }
-    }
+    restore_qcqp_result_dimensions(result, transformed ? input_problem : NULL);
 
     pdhg_final_log(result, params);
     pdhg_solver_state_free(state);

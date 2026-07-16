@@ -246,15 +246,21 @@ void check_termination_criteria(pdhg_solver_state_t *solver_state, const termina
         solver_state->termination_reason = TERMINATION_REASON_OPTIMAL;
         return;
     }
-    if (primal_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
+    /* The current ray projection handles box recession directions only. Direct
+       cones require cone/dual-cone membership checks before either certificate
+       is valid. */
+    if (solver_state->num_cone_blocks == 0)
     {
-        solver_state->termination_reason = TERMINATION_REASON_PRIMAL_INFEASIBLE;
-        return;
-    }
-    if (dual_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
-    {
-        solver_state->termination_reason = TERMINATION_REASON_DUAL_INFEASIBLE;
-        return;
+        if (primal_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
+        {
+            solver_state->termination_reason = TERMINATION_REASON_PRIMAL_INFEASIBLE;
+            return;
+        }
+        if (dual_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
+        {
+            solver_state->termination_reason = TERMINATION_REASON_DUAL_INFEASIBLE;
+            return;
+        }
     }
     if (solver_state->total_count >= criteria->iteration_limit)
     {
