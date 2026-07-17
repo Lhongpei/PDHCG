@@ -21,7 +21,7 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 | `IterationLimit` | int | 2147483647 | Maximum number of iterations |
 | `OptTol` | float | 1e-4 | Relative optimality tolerance |
 | `FeasTol` | float | 1e-4 | Relative feasibility tolerance |
-| `InfeasTol` | float | 1e-10 | Infeasibility detection tolerance |
+| `InfeasTol` | float | 1e-12 | Infeasibility detection tolerance |
 
 ### Algorithm Parameters
 

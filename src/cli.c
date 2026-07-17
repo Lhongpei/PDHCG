@@ -169,7 +169,7 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --iter_limit <int>   Iteration limit (default: %d).\n", INT32_MAX);
     fprintf(stderr, "      --eps_opt <float>    Relative optimality tolerance (default: 1e-4).\n");
     fprintf(stderr, "      --eps_feas <float>   Relative feasibility tolerance (default: 1e-4).\n");
-    fprintf(stderr, "      --eps_infeas_detect  Infeasibility detection tolerance (default: 1e-10).\n");
+    fprintf(stderr, "      --eps_infeas_detect  Infeasibility detection tolerance (default: 1e-12).\n");
     fprintf(stderr, "      --l_inf_ruiz_iter    Iterations for L-inf Ruiz rescaling (default: 10).\n");
     fprintf(stderr, "      --no_pock_chambolle  Disable Pock-Chambolle rescaling (default: enabled).\n");
     fprintf(stderr, "      --pock_chambolle_alpha Value for Pock-Chambolle alpha (default: 1.0).\n");

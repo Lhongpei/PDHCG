@@ -243,10 +243,9 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-        /* Uniform-per-cone GEOMEAN: preserves cone structure (any uniform d works).
-           Geomean is unbiased under multiplicative scale changes and avoids the
-           over-shrinking that MAX produces on high-dim cones. When uniform_cone_d
-           is false, keep per-element scales; kernels' bisection paths handle it. */
+        /* A single scale per cone preserves the cone geometry. Use the largest
+           coordinate scale during Ruiz equilibration so one weakly scaled
+           coordinate cannot dominate a small cone. */
         if (uniform_cone_d)
         {
             for (int b = 0; b < problem->cones.num_cones; ++b)
@@ -255,12 +254,11 @@ static void ruiz_rescaling(qp_problem_t *problem,
                 int len = (problem->cones.type[b] == CONE_EXPONENTIAL || problem->cones.type[b] == CONE_POWER)
                     ? 3
                     : (problem->cones.v_dim[b] + 2);
-                double log_sum = 0.0;
+                double d_max = 0.0;
                 for (int j = s; j < s + len; ++j)
-                    log_sum += log(var_rescale[j]);
-                double d_geo = exp(log_sum / (double)len);
+                    d_max = fmax(d_max, var_rescale[j]);
                 for (int j = s; j < s + len; ++j)
-                    var_rescale[j] = d_geo;
+                    var_rescale[j] = d_max;
             }
         }
 
@@ -311,12 +309,12 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
             int len = (problem->cones.type[b] == CONE_EXPONENTIAL || problem->cones.type[b] == CONE_POWER)
                 ? 3
                 : (problem->cones.v_dim[b] + 2);
-            double log_sum = 0.0;
+            double sum_sq = 0.0;
             for (int j = s; j < s + len; ++j)
-                log_sum += log(var_rescale[j]);
-            double d_geo = exp(log_sum / (double)len);
+                sum_sq += var_rescale[j] * var_rescale[j];
+            double d_rms = sqrt(sum_sq / (double)len);
             for (int j = s; j < s + len; ++j)
-                var_rescale[j] = d_geo;
+                var_rescale[j] = d_rms;
         }
     }
 
