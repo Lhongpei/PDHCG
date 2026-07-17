@@ -900,6 +900,91 @@ cbf_coo_to_csr(int m, int n, int nnz, const int *rows, const int *cols, const do
     return csr;
 }
 
+static bool cbf_same_fixed_value(double first, double second)
+{
+    double scale = 1.0 + fmax(fabs(first), fabs(second));
+    return fabs(first - second) <= 1e-12 * scale;
+}
+
+/* Mark singleton equalities fixing the radius coordinate of a standard SOC so
+   the cone projection can use its fixed-radius fast path. The original matrix
+   and all bounds remain unchanged. */
+static int cbf_mark_fixed_soc_radii(qp_problem_t *problem)
+{
+    int n = problem->num_variables;
+    int m = problem->num_constraints;
+    if (problem->cones.num_cones == 0 || n == 0 || m == 0 || !problem->constraint_matrix)
+        return 0;
+
+    unsigned char *is_radius = (unsigned char *)safe_calloc((size_t)n, sizeof(unsigned char));
+    unsigned char *candidate_state = (unsigned char *)safe_calloc((size_t)n, sizeof(unsigned char));
+    double *candidate_value = (double *)safe_calloc((size_t)n, sizeof(double));
+    CsrComponent *A = problem->constraint_matrix;
+
+    for (int cone = 0; cone < problem->cones.num_cones; ++cone)
+    {
+        if (problem->cones.type[cone] != CONE_STANDARD_SOC)
+            continue;
+        int z = problem->cones.start_idx[cone] + problem->cones.v_dim[cone] + 1;
+        if (z >= 0 && z < n)
+            is_radius[z] = 1;
+    }
+
+    for (int row = 0; row < m; ++row)
+    {
+        int begin = A->row_ptr[row];
+        int end = A->row_ptr[row + 1];
+        double lower = problem->constraint_lower_bound[row];
+        double upper = problem->constraint_upper_bound[row];
+        if (end - begin != 1 || !isfinite(lower) || lower != upper)
+            continue;
+
+        int column = A->col_ind[begin];
+        double coefficient = A->val[begin];
+        if (column < 0 || column >= n || !is_radius[column] || !isfinite(coefficient) || coefficient == 0.0)
+            continue;
+
+        double value = lower / coefficient;
+        if (!isfinite(value) || value < 0.0)
+            continue;
+
+        if (candidate_state[column] == 0)
+        {
+            candidate_state[column] = 1;
+            candidate_value[column] = value;
+        }
+        else if (candidate_state[column] == 1 && !cbf_same_fixed_value(candidate_value[column], value))
+        {
+            candidate_state[column] = 2;
+        }
+    }
+
+    int fixed = 0;
+    for (int column = 0; column < n; ++column)
+        fixed += candidate_state[column] == 1;
+
+    if (fixed > 0)
+    {
+        if (!problem->cones.is_fixed)
+            problem->cones.is_fixed = (char *)safe_calloc((size_t)n, sizeof(char));
+        if (!problem->primal_start)
+            problem->primal_start = (double *)safe_calloc((size_t)n, sizeof(double));
+
+        for (int column = 0; column < n; ++column)
+        {
+            if (candidate_state[column] != 1)
+                continue;
+            problem->cones.is_fixed[column] = 1;
+            problem->primal_start[column] = candidate_value[column];
+        }
+    }
+
+    free(is_radius);
+    free(candidate_state);
+    free(candidate_value);
+    return fixed;
+}
+
 static qp_problem_t *cbf_finalize(cbf_state_t *s)
 {
     int *lp_off, *cone_off, *con_cone_off, *cbf_to_qp, *con_to_qp;
@@ -1077,6 +1162,8 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
             }
         }
     }
+
+    (void)cbf_mark_fixed_soc_radii(out);
 
     out->num_quadratic_constraints = 0;
     out->quadratic_constraint_row_indices = NULL;

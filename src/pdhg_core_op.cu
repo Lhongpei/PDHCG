@@ -366,6 +366,12 @@ static const cone_dual_res_launcher_t dual_res_launch_table[NUM_CONE_TYPES][NUM_
 
 static void dispatch_cone_projection(pdhg_solver_state_t *state, double *primal_solution)
 {
+    if (state->cone_is_fixed)
+    {
+        restore_fixed_cone_slots_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+            primal_solution, state->initial_primal_solution, state->cone_is_fixed, state->num_variables);
+    }
+
     for (int b = 0; b < state->num_cone_buckets; ++b)
     {
         const cone_bucket_t *bk = &state->cone_buckets[b];
@@ -388,6 +394,12 @@ static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state,
                                             double *reflected_primal,
                                             const double *current_primal)
 {
+    if (state->cone_is_fixed)
+    {
+        restore_fixed_cone_slots_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+            pdhg_primal, state->initial_primal_solution, state->cone_is_fixed, state->num_variables);
+    }
+
     for (int b = 0; b < state->num_cone_buckets; ++b)
     {
         const cone_bucket_t *bk = &state->cone_buckets[b];

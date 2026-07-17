@@ -413,6 +413,16 @@ void print_initial_info(const pdhg_parameters_t *params, const qp_problem_t *pro
            problem->num_constraints,
            problem->num_variables,
            problem->constraint_matrix_num_nonzeros);
+    if (problem->cones.num_cones > 0)
+    {
+        int fixed_slots = 0;
+        if (problem->cones.is_fixed)
+        {
+            for (int i = 0; i < problem->num_variables; ++i)
+                fixed_slots += problem->cones.is_fixed[i] != 0;
+        }
+        printf("         + %d cone block(s), %d fixed slot(s)\n", problem->cones.num_cones, fixed_slots);
+    }
     if (problem->num_quadratic_constraints > 0)
     {
         long total_q_nnz = 0;

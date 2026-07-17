@@ -595,6 +595,91 @@ __global__ void project_standard_soc_kernel(double *__restrict__ primal_solution
         return;
     }
 
+    /* Fixed z turns the SOC into an ellipsoidal ball on [v, w]. */
+    if (is_fixed && is_fixed[start + k + 1])
+    {
+        double d_z_p = variable_rescaling[start + k + 1];
+        double radius = z / d_z_p;
+        if (!(radius > 0.0))
+        {
+            for (int m = 0; m < k; ++m)
+                v[m] = 0.0;
+            *wptr = 0.0;
+            return;
+        }
+
+        double radius2 = radius * radius;
+        double d_ref = variable_rescaling[start + k];
+        double lhs = (w / d_ref) * (w / d_ref);
+        bool uniform = true;
+        for (int m = 0; m < k; ++m)
+        {
+            double d_m = variable_rescaling[start + m];
+            double y = v[m] / d_m;
+            lhs += y * y;
+            if (d_m != d_ref)
+                uniform = false;
+        }
+        if (lhs <= radius2)
+            return;
+
+        if (uniform)
+        {
+            double scale = sqrt(radius2 / lhs);
+            for (int m = 0; m < k; ++m)
+                v[m] *= scale;
+            *wptr *= scale;
+            return;
+        }
+
+        double lo = 0.0, hi = 1.0;
+        for (int doubling = 0; doubling < 80; ++doubling)
+        {
+            double d_w2 = d_ref * d_ref;
+            double term_w = w * d_ref / (d_w2 + hi);
+            double sum = term_w * term_w;
+            for (int m = 0; m < k; ++m)
+            {
+                double d_m = variable_rescaling[start + m];
+                double d_m2 = d_m * d_m;
+                double term = v[m] * d_m / (d_m2 + hi);
+                sum += term * term;
+            }
+            if (sum <= radius2)
+                break;
+            hi *= 2.0;
+        }
+        for (int it = 0; it < 60; ++it)
+        {
+            double lambda = 0.5 * (lo + hi);
+            double d_w2 = d_ref * d_ref;
+            double term_w = w * d_ref / (d_w2 + lambda);
+            double sum = term_w * term_w;
+            for (int m = 0; m < k; ++m)
+            {
+                double d_m = variable_rescaling[start + m];
+                double d_m2 = d_m * d_m;
+                double term = v[m] * d_m / (d_m2 + lambda);
+                sum += term * term;
+            }
+            if (sum > radius2)
+                lo = lambda;
+            else
+                hi = lambda;
+        }
+        double lambda = 0.5 * (lo + hi);
+        warm_start[blk] = lambda;
+        for (int m = 0; m < k; ++m)
+        {
+            double d_m = variable_rescaling[start + m];
+            double d_m2 = d_m * d_m;
+            v[m] *= d_m2 / (d_m2 + lambda);
+        }
+        double d_w2 = d_ref * d_ref;
+        *wptr *= d_w2 / (d_w2 + lambda);
+        return;
+    }
+
     double d_z = variable_rescaling[start + k + 1];
     double dhat_w = variable_rescaling[start + k] / d_z;
     double dhat_w2 = dhat_w * dhat_w;
@@ -827,6 +912,46 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
             dual_residual[idx] = (r + lambda * n_m) * d_m;
         }
         dual_residual[w_off] = 0.0;
+        dual_residual[z_off] = 0.0;
+        return;
+    }
+
+    if (is_fixed && is_fixed[z_off])
+    {
+        double d_z = variable_rescaling[z_off];
+        double radius = primal_solution[z_off] / d_z;
+        double radius2 = radius * radius;
+        double norm2 = 0.0, dot = 0.0, normal2 = 0.0;
+        for (int m = 0; m < k + 1; ++m)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double x_m = primal_solution[idx] / d_m;
+            double normal = primal_solution[idx] / (d_m * d_m);
+            double residual = objective_vector[idx] - dual_product[idx];
+            norm2 += x_m * x_m;
+            dot += residual * normal;
+            normal2 += normal * normal;
+        }
+
+        if (!(radius2 > 0.0))
+        {
+            for (int m = 0; m < k + 1; ++m)
+                dual_residual[start + m] = 0.0;
+            dual_residual[z_off] = 0.0;
+            return;
+        }
+
+        bool on_boundary = norm2 >= radius2 - 1e-10 * (1.0 + radius2);
+        double lambda = (on_boundary && dot < 0.0 && normal2 > 0.0) ? -dot / normal2 : 0.0;
+        for (int m = 0; m < k + 1; ++m)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double normal = primal_solution[idx] / (d_m * d_m);
+            double residual = objective_vector[idx] - dual_product[idx];
+            dual_residual[idx] = (residual + lambda * normal) * d_m;
+        }
         dual_residual[z_off] = 0.0;
         return;
     }
@@ -1689,6 +1814,113 @@ __global__ void project_standard_soc_warp_kernel(double *__restrict__ primal_sol
         return;
     }
 
+    if (is_fixed && is_fixed[start + k + 1])
+    {
+        int w_off = start + k;
+        int z_off = w_off + 1;
+        double radius = z / variable_rescaling[z_off];
+        if (!(radius > 0.0))
+        {
+            for (int m = lane; m < k; m += 32)
+                primal_solution[start + m] = 0.0;
+            if (lane == 0)
+                primal_solution[w_off] = 0.0;
+            return;
+        }
+
+        double radius2 = radius * radius;
+        double d_ref = variable_rescaling[w_off];
+        double lhs_p = (lane == 0) ? (w / d_ref) * (w / d_ref) : 0.0;
+        int nonuniform = 0;
+        for (int m = lane; m < k; m += 32)
+        {
+            double d_m = variable_rescaling[start + m];
+            double value = primal_solution[start + m] / d_m;
+            lhs_p += value * value;
+            if (d_m != d_ref)
+                nonuniform = 1;
+        }
+        for (int off = 16; off > 0; off >>= 1)
+        {
+            lhs_p += __shfl_xor_sync(MASK, lhs_p, off);
+            nonuniform |= __shfl_xor_sync(MASK, nonuniform, off);
+        }
+        if (lhs_p <= radius2)
+            return;
+
+        if (!nonuniform)
+        {
+            double scale = sqrt(radius2 / lhs_p);
+            for (int m = lane; m < k; m += 32)
+                primal_solution[start + m] *= scale;
+            if (lane == 0)
+                primal_solution[w_off] *= scale;
+            return;
+        }
+
+        double lo = 0.0, hi = 1.0;
+        for (int doubling = 0; doubling < 80; ++doubling)
+        {
+            double sum_p = 0.0;
+            if (lane == 0)
+            {
+                double d_w2 = d_ref * d_ref;
+                double term = w * d_ref / (d_w2 + hi);
+                sum_p = term * term;
+            }
+            for (int m = lane; m < k; m += 32)
+            {
+                double d_m = variable_rescaling[start + m];
+                double d_m2 = d_m * d_m;
+                double term = primal_solution[start + m] * d_m / (d_m2 + hi);
+                sum_p += term * term;
+            }
+            for (int off = 16; off > 0; off >>= 1)
+                sum_p += __shfl_xor_sync(MASK, sum_p, off);
+            if (sum_p <= radius2)
+                break;
+            hi *= 2.0;
+        }
+        for (int it = 0; it < 60; ++it)
+        {
+            double lambda = 0.5 * (lo + hi);
+            double sum_p = 0.0;
+            if (lane == 0)
+            {
+                double d_w2 = d_ref * d_ref;
+                double term = w * d_ref / (d_w2 + lambda);
+                sum_p = term * term;
+            }
+            for (int m = lane; m < k; m += 32)
+            {
+                double d_m = variable_rescaling[start + m];
+                double d_m2 = d_m * d_m;
+                double term = primal_solution[start + m] * d_m / (d_m2 + lambda);
+                sum_p += term * term;
+            }
+            for (int off = 16; off > 0; off >>= 1)
+                sum_p += __shfl_xor_sync(MASK, sum_p, off);
+            if (sum_p > radius2)
+                lo = lambda;
+            else
+                hi = lambda;
+        }
+        double lambda = 0.5 * (lo + hi);
+        for (int m = lane; m < k; m += 32)
+        {
+            double d_m = variable_rescaling[start + m];
+            double d_m2 = d_m * d_m;
+            primal_solution[start + m] *= d_m2 / (d_m2 + lambda);
+        }
+        if (lane == 0)
+        {
+            double d_w2 = d_ref * d_ref;
+            primal_solution[w_off] *= d_w2 / (d_w2 + lambda);
+            warm_start[blk] = lambda;
+        }
+        return;
+    }
+
     double d_z = variable_rescaling[start + k + 1];
     double dhat_w = variable_rescaling[start + k] / d_z;
     double dhat_w2 = dhat_w * dhat_w;
@@ -1951,6 +2183,53 @@ __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restri
             dual_residual[w_off] = 0.0;
             dual_residual[z_off] = 0.0;
         }
+        return;
+    }
+
+    if (is_fixed && is_fixed[z_off])
+    {
+        double radius = primal_solution[z_off] / variable_rescaling[z_off];
+        double radius2 = radius * radius;
+        double norm2_p = 0.0, dot_p = 0.0, normal2_p = 0.0;
+        for (int m = lane; m < k + 1; m += 32)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double x_m = primal_solution[idx] / d_m;
+            double normal = primal_solution[idx] / (d_m * d_m);
+            double residual = objective_vector[idx] - dual_product[idx];
+            norm2_p += x_m * x_m;
+            dot_p += residual * normal;
+            normal2_p += normal * normal;
+        }
+        for (int off = 16; off > 0; off >>= 1)
+        {
+            norm2_p += __shfl_xor_sync(MASK, norm2_p, off);
+            dot_p += __shfl_xor_sync(MASK, dot_p, off);
+            normal2_p += __shfl_xor_sync(MASK, normal2_p, off);
+        }
+
+        if (!(radius2 > 0.0))
+        {
+            for (int m = lane; m < k + 1; m += 32)
+                dual_residual[start + m] = 0.0;
+            if (lane == 0)
+                dual_residual[z_off] = 0.0;
+            return;
+        }
+
+        bool on_boundary = norm2_p >= radius2 - 1e-10 * (1.0 + radius2);
+        double lambda = (on_boundary && dot_p < 0.0 && normal2_p > 0.0) ? -dot_p / normal2_p : 0.0;
+        for (int m = lane; m < k + 1; m += 32)
+        {
+            int idx = start + m;
+            double d_m = variable_rescaling[idx];
+            double normal = primal_solution[idx] / (d_m * d_m);
+            double residual = objective_vector[idx] - dual_product[idx];
+            dual_residual[idx] = (residual + lambda * normal) * d_m;
+        }
+        if (lane == 0)
+            dual_residual[z_off] = 0.0;
         return;
     }
 
@@ -2880,6 +3159,92 @@ __global__ void project_standard_soc_diag_q_kernel(double *__restrict__ pdhg_pri
             reflected_primal[idx] = 2.0 * v_new - current_primal[idx];
         }
         reflected_primal[w_off] = 2.0 * r_w - current_primal[w_off];
+        reflected_primal[z_off] = 2.0 * r_z - current_primal[z_off];
+        return;
+    }
+
+    if (is_fixed && is_fixed[z_off])
+    {
+        double radius = r_z / variable_rescaling[z_off];
+        if (!(radius > 0.0))
+        {
+            for (int m = 0; m < k + 1; ++m)
+            {
+                int idx = start + m;
+                pdhg_primal[idx] = 0.0;
+                reflected_primal[idx] = -current_primal[idx];
+            }
+            reflected_primal[z_off] = 2.0 * r_z - current_primal[z_off];
+            return;
+        }
+
+        double radius2 = radius * radius;
+        double lhs = 0.0;
+        for (int m = 0; m < k + 1; ++m)
+        {
+            int idx = start + m;
+            double actual = pdhg_primal[idx] / variable_rescaling[idx];
+            lhs += actual * actual;
+        }
+        if (lhs <= radius2)
+        {
+            for (int m = 0; m < k + 2; ++m)
+            {
+                int idx = start + m;
+                reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+            }
+            return;
+        }
+
+        double lo = 0.0, hi = 1.0;
+        for (int doubling = 0; doubling < 80; ++doubling)
+        {
+            double sum = 0.0;
+            for (int m = 0; m < k + 1; ++m)
+            {
+                int idx = start + m;
+                double weight = 1.0 + tau * Q_diag[idx];
+                double d_m = variable_rescaling[idx];
+                double e2 = weight * d_m * d_m;
+                double projected = pdhg_primal[idx] * e2 / (e2 + hi);
+                double actual = projected / d_m;
+                sum += actual * actual;
+            }
+            if (sum <= radius2)
+                break;
+            hi *= 2.0;
+        }
+        for (int it = 0; it < 60; ++it)
+        {
+            double lambda = 0.5 * (lo + hi);
+            double sum = 0.0;
+            for (int m = 0; m < k + 1; ++m)
+            {
+                int idx = start + m;
+                double weight = 1.0 + tau * Q_diag[idx];
+                double d_m = variable_rescaling[idx];
+                double e2 = weight * d_m * d_m;
+                double projected = pdhg_primal[idx] * e2 / (e2 + lambda);
+                double actual = projected / d_m;
+                sum += actual * actual;
+            }
+            if (sum > radius2)
+                lo = lambda;
+            else
+                hi = lambda;
+        }
+        double lambda = 0.5 * (lo + hi);
+        warm_start[blk] = lambda;
+        for (int m = 0; m < k + 1; ++m)
+        {
+            int idx = start + m;
+            double weight = 1.0 + tau * Q_diag[idx];
+            double d_m = variable_rescaling[idx];
+            double e2 = weight * d_m * d_m;
+            double projected = pdhg_primal[idx] * e2 / (e2 + lambda);
+            pdhg_primal[idx] = projected;
+            reflected_primal[idx] = 2.0 * projected - current_primal[idx];
+        }
         reflected_primal[z_off] = 2.0 * r_z - current_primal[z_off];
         return;
     }

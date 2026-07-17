@@ -60,6 +60,16 @@ vector_add_kernel(const double *__restrict__ a, const double *__restrict__ b, do
     }
 }
 
+__global__ void restore_fixed_cone_slots_kernel(double *__restrict__ primal_solution,
+                                                const double *__restrict__ fixed_values,
+                                                const char *__restrict__ is_fixed,
+                                                int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n && is_fixed[i])
+        primal_solution[i] = fixed_values[i];
+}
+
 __global__ void compute_lp_next_pdhg_primal_solution_kernel(const double *current_primal,
                                                             double *reflected_primal,
                                                             const double *dual_product,

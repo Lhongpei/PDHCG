@@ -42,6 +42,11 @@ extern "C"
     __global__ void
     vector_add_kernel(const double *__restrict__ a, const double *__restrict__ b, double *__restrict__ out, int n);
 
+    __global__ void restore_fixed_cone_slots_kernel(double *__restrict__ primal_solution,
+                                                    const double *__restrict__ fixed_values,
+                                                    const char *__restrict__ is_fixed,
+                                                    int n);
+
     // ======================================================================
     // Advanced Metrics & Reduced Costs
     // ======================================================================
