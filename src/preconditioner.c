@@ -23,8 +23,28 @@ limitations under the License.
 #include <time.h>
 
 #define SCALING_EPSILON 1e-12
+#define CURTIS_REID_MIN_ABS 1e-300
+#define CURTIS_REID_LOG_SCALE_LIMIT 69.07755278982137
+
+static int cone_block_length(const cone_blocks_t *cones, int block)
+{
+    return (cones->type[block] == CONE_EXPONENTIAL || cones->type[block] == CONE_POWER) ? 3 : (cones->v_dim[block] + 2);
+}
+
+static double curtis_reid_exp_clamped(double value)
+{
+    if (isnan(value))
+        return 1.0;
+    if (value > CURTIS_REID_LOG_SCALE_LIMIT)
+        value = CURTIS_REID_LOG_SCALE_LIMIT;
+    else if (value < -CURTIS_REID_LOG_SCALE_LIMIT)
+        value = -CURTIS_REID_LOG_SCALE_LIMIT;
+    return exp(value);
+}
 
 static void scale_problem(qp_problem_t *problem, const double *con_rescale, const double *var_rescale);
+static void curtis_reid_rescaling(
+    qp_problem_t *problem, int num_iters, bool uniform_cone_d, double *cum_con_rescale, double *cum_var_rescale);
 static void ruiz_rescaling(
     qp_problem_t *problem, int num_iters, bool uniform_cone_d, double *cum_con_rescale, double *cum_var_rescale);
 static void pock_chambolle_rescaling(
@@ -194,6 +214,123 @@ static void scale_problem(qp_problem_t *problem, const double *constraint_rescal
             }
         }
     }
+}
+
+/*
+ * A. R. Curtis and J. K. Reid, "On the Automatic Scaling of Matrices
+ * for Gaussian Elimination", IMA J. Appl. Math. 10(1), 118-124 (1972).
+ */
+static void curtis_reid_rescaling(qp_problem_t *problem,
+                                  int num_iterations,
+                                  bool uniform_cone_d,
+                                  double *cum_constraint_rescaling,
+                                  double *cum_variable_rescaling)
+{
+    const int num_cons = problem->num_constraints;
+    const int num_vars = problem->num_variables;
+    const int num_nonzeros = problem->constraint_matrix_num_nonzeros;
+    double *con_rescale = safe_malloc((size_t)num_cons * sizeof(double));
+    double *var_rescale = safe_malloc((size_t)num_vars * sizeof(double));
+
+    for (int row = 0; row < num_cons; ++row)
+        con_rescale[row] = 1.0;
+    for (int col = 0; col < num_vars; ++col)
+        var_rescale[col] = 1.0;
+
+    if (num_iterations > 0 && num_cons > 0 && num_vars > 0 && num_nonzeros > 0)
+    {
+        const CsrComponent *matrix = problem->constraint_matrix;
+        double *row_log_scale = safe_calloc((size_t)num_cons, sizeof(double));
+        double *col_log_scale = safe_calloc((size_t)num_vars, sizeof(double));
+        double *row_log_abs_sum = safe_calloc((size_t)num_cons, sizeof(double));
+        double *col_log_abs_sum = safe_calloc((size_t)num_vars, sizeof(double));
+        double *col_sum = safe_calloc((size_t)num_vars, sizeof(double));
+        int *col_count = safe_calloc((size_t)num_vars, sizeof(int));
+
+        for (int row = 0; row < num_cons; ++row)
+        {
+            for (int nz = matrix->row_ptr[row]; nz < matrix->row_ptr[row + 1]; ++nz)
+            {
+                const int col = matrix->col_ind[nz];
+                const double log_abs = log(fmax(fabs(matrix->val[nz]), CURTIS_REID_MIN_ABS));
+                row_log_abs_sum[row] += log_abs;
+                col_log_abs_sum[col] += log_abs;
+                ++col_count[col];
+            }
+        }
+
+        /*
+         * Minimize sum_(i,j) in nz(A) (log|A_ij| - r_i - c_j)^2 by
+         * alternating exact row and column least-squares updates.
+         */
+        for (int iter = 0; iter < num_iterations; ++iter)
+        {
+            for (int row = 0; row < num_cons; ++row)
+            {
+                const int begin = matrix->row_ptr[row];
+                const int end = matrix->row_ptr[row + 1];
+                double sum = row_log_abs_sum[row];
+                for (int nz = begin; nz < end; ++nz)
+                    sum -= col_log_scale[matrix->col_ind[nz]];
+                row_log_scale[row] = (end > begin) ? sum / (double)(end - begin) : 0.0;
+            }
+
+            memcpy(col_sum, col_log_abs_sum, (size_t)num_vars * sizeof(double));
+            for (int row = 0; row < num_cons; ++row)
+            {
+                for (int nz = matrix->row_ptr[row]; nz < matrix->row_ptr[row + 1]; ++nz)
+                    col_sum[matrix->col_ind[nz]] -= row_log_scale[row];
+            }
+            for (int col = 0; col < num_vars; ++col)
+                col_log_scale[col] = col_count[col] > 0 ? col_sum[col] / (double)col_count[col] : 0.0;
+
+            if (uniform_cone_d)
+            {
+                /*
+                 * Adding c_j = c_B for all j in cone block B gives the exact
+                 * block minimizer below. Heterogeneous mode skips this block
+                 * and retains the independent column minimizers above.
+                 */
+                for (int block = 0; block < problem->cones.num_cones; ++block)
+                {
+                    const int start = problem->cones.start_idx[block];
+                    const int length = cone_block_length(&problem->cones, block);
+                    double block_sum = 0.0;
+                    int block_count = 0;
+                    for (int col = start; col < start + length; ++col)
+                    {
+                        block_sum += col_sum[col];
+                        block_count += col_count[col];
+                    }
+                    const double block_log_scale = block_count > 0 ? block_sum / (double)block_count : 0.0;
+                    for (int col = start; col < start + length; ++col)
+                        col_log_scale[col] = block_log_scale;
+                }
+            }
+        }
+
+        for (int row = 0; row < num_cons; ++row)
+            con_rescale[row] = curtis_reid_exp_clamped(row_log_scale[row]);
+        for (int col = 0; col < num_vars; ++col)
+            var_rescale[col] = curtis_reid_exp_clamped(col_log_scale[col]);
+
+        free(row_log_scale);
+        free(col_log_scale);
+        free(row_log_abs_sum);
+        free(col_log_abs_sum);
+        free(col_sum);
+        free(col_count);
+    }
+
+    scale_problem(problem, con_rescale, var_rescale);
+
+    for (int row = 0; row < num_cons; ++row)
+        cum_constraint_rescaling[row] *= con_rescale[row];
+    for (int col = 0; col < num_vars; ++col)
+        cum_variable_rescaling[col] *= var_rescale[col];
+
+    free(con_rescale);
+    free(var_rescale);
 }
 
 static void ruiz_rescaling(qp_problem_t *problem,
@@ -399,6 +536,14 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
         rescale_info->var_rescale[i] = 1.0;
 
     bool uniform_cone_d = !params->heterogeneous_cone_scaling;
+    if (params->curtis_reid_iterations > 0)
+    {
+        curtis_reid_rescaling(rescale_info->scaled_problem,
+                              params->curtis_reid_iterations,
+                              uniform_cone_d,
+                              rescale_info->con_rescale,
+                              rescale_info->var_rescale);
+    }
     if (params->l_inf_ruiz_iterations > 0)
     {
         ruiz_rescaling(rescale_info->scaled_problem,

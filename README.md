@@ -93,6 +93,7 @@ Solver Parameters:
 | --eps_opt | double | Relative optimality tolerance. | 1e-4 |
 | --eps_feas | double | Relative feasibility tolerance. | 1e-4 |
 | --eps_infeas_detect | double | Infeasibility detection tolerance. | 1e-12 |
+| --curtis_reid_iter | int | Iterations for Curtis-Reid log-domain matrix scaling; 0 disables it. | 0 |
 | --l_inf_ruiz_iter | int | Iterations for L-inf Ruiz rescaling. | 10 |
 | --pock_chambolle_alpha | double | Value for Pock-Chambolle step size parameter $\alpha$. | 1.0 |
 | --no_pock_chambolle | flag | Disable Pock-Chambolle rescaling (enabled by default). | false |

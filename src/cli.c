@@ -170,6 +170,7 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --eps_opt <float>    Relative optimality tolerance (default: 1e-4).\n");
     fprintf(stderr, "      --eps_feas <float>   Relative feasibility tolerance (default: 1e-4).\n");
     fprintf(stderr, "      --eps_infeas_detect  Infeasibility detection tolerance (default: 1e-12).\n");
+    fprintf(stderr, "      --curtis_reid_iter   Iterations for Curtis-Reid scaling (default: 0, disabled).\n");
     fprintf(stderr, "      --l_inf_ruiz_iter    Iterations for L-inf Ruiz rescaling (default: 10).\n");
     fprintf(stderr, "      --no_pock_chambolle  Disable Pock-Chambolle rescaling (default: enabled).\n");
     fprintf(stderr, "      --pock_chambolle_alpha Value for Pock-Chambolle alpha (default: 1.0).\n");
@@ -233,6 +234,7 @@ int run_pdhcg(int argc, char *argv[])
                                            {"artificial_restart_threshold", required_argument, 0, 1022},
                                            {"sufficient_reduction_for_restart", required_argument, 0, 1023},
                                            {"necessary_reduction_for_restart", required_argument, 0, 1024},
+                                           {"curtis_reid_iter", required_argument, 0, 1025},
                                            {0, 0, 0, 0}};
 
     int opt;
@@ -338,6 +340,9 @@ int run_pdhcg(int argc, char *argv[])
             case 1024:
                 params.restart_params.necessary_reduction_for_restart = atof(optarg);
                 break;
+            case 1025:
+                params.curtis_reid_iterations = atoi(optarg);
+                break;
             case '?':
                 return 1;
         }
@@ -434,6 +439,7 @@ int run_d_pdhcg(int argc, char *argv[])
                                            {"artificial_restart_threshold", required_argument, 0, 1022},
                                            {"sufficient_reduction_for_restart", required_argument, 0, 1023},
                                            {"necessary_reduction_for_restart", required_argument, 0, 1024},
+                                           {"curtis_reid_iter", required_argument, 0, 1025},
                                            {"grid_size", required_argument, 0, 2001},
                                            {"partition_method", required_argument, 0, 2002},
                                            {"permute_method", required_argument, 0, 2003},
@@ -534,6 +540,9 @@ int run_d_pdhcg(int argc, char *argv[])
                 break;
             case 1024:
                 params.restart_params.necessary_reduction_for_restart = atof(optarg);
+                break;
+            case 1025:
+                params.curtis_reid_iterations = atoi(optarg);
                 break;
             case 2001: // --grid_size r,c
             {

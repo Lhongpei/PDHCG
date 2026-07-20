@@ -266,6 +266,7 @@ static py::dict get_default_params_py()
     d["iteration_limit"] = p.termination_criteria.iteration_limit;
 
     // rescaling
+    d["curtis_reid_iterations"] = p.curtis_reid_iterations;
     d["l_inf_ruiz_iterations"] = p.l_inf_ruiz_iterations;
     d["has_pock_chambolle_alpha"] = p.has_pock_chambolle_alpha;
     d["pock_chambolle_alpha"] = p.pock_chambolle_alpha;
@@ -355,6 +356,7 @@ static void parse_params_from_python(py::object params_obj, pdhg_parameters_t *p
     geti("iteration_limit", p->termination_criteria.iteration_limit);
 
     // rescaling
+    geti("curtis_reid_iterations", p->curtis_reid_iterations);
     geti("l_inf_ruiz_iterations", p->l_inf_ruiz_iterations);
     getb("has_pock_chambolle_alpha", p->has_pock_chambolle_alpha);
     getf("pock_chambolle_alpha", p->pock_chambolle_alpha);

@@ -27,6 +27,7 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `CurtisReidIters` | int | 0 | Iterations for Curtis-Reid log-domain matrix scaling; 0 disables it |
 | `RuizIterations` | int | 10 | Iterations for L-inf Ruiz rescaling |
 | `PockChambolleAlpha` | float | 1.0 | Pock-Chambolle step size parameter |
 | `UsePockChambolle` | bool | True | Enable Pock-Chambolle rescaling |
