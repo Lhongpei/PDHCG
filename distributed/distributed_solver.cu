@@ -24,6 +24,7 @@ limitations under the License.
 #include "permute.h"
 #include "preconditioner.h"
 #include "presolve_wrapper.h"
+#include "qcqp_transform.h"
 #include "solver.h"
 #include "solver_state.h"
 #include "spmv_backend.h"
@@ -289,6 +290,7 @@ static pdhcg_result_t *distributed_optimize_core(const pdhg_parameters_t *params
 
     pdhg_solver_state_t *state =
         initialize_solver_state(params, local_working_problem, local_rescale_info, grid_context);
+    qp_problem_free(local_working_problem);
 
     allreduce_obj_bound_norm(state, params);
 
@@ -315,7 +317,8 @@ static pdhcg_result_t *distributed_optimize_core(const pdhg_parameters_t *params
         {
             compute_residual(state, params->optimality_norm);
 
-            if (state->is_this_major_iteration && state->total_count < 3 * params->termination_evaluation_frequency)
+            if (state->var_set_type == VAR_SET_BOX_ONLY && state->is_this_major_iteration &&
+                state->total_count < 3 * params->termination_evaluation_frequency)
             {
                 compute_infeasibility_information(state);
             }
@@ -383,6 +386,50 @@ static pdhcg_result_t *distributed_optimize_core(const pdhg_parameters_t *params
 pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_problem_t *original_problem)
 {
     pdhg_parameters_t sub_params = *params;
+    int rank_global = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank_global);
+
+    const qp_problem_t *input_problem = original_problem;
+    qp_problem_t *transformed = NULL;
+    int transform_failed = 0;
+    if (rank_global == 0)
+    {
+        if (!original_problem)
+        {
+            fprintf(stderr, "Error: rank 0 did not provide a problem.\n");
+            transform_failed = 1;
+        }
+        else if (original_problem->num_quadratic_constraints > 0)
+        {
+            transformed = qcqp_to_socp_qp(original_problem, params->default_cone_type);
+            if (!transformed)
+            {
+                fprintf(stderr, "Error: distributed QCQP -> SOCP transformation failed.\n");
+                transform_failed = 1;
+            }
+            else
+            {
+                original_problem = transformed;
+                if (params->verbose >= 1)
+                {
+                    const char *form_name = params->default_cone_type == CONE_STANDARD_SOC ? "standard" : "rotated";
+                    fprintf(stderr,
+                            "[QCQP] %d quadratic constraint(s) reformulated as %d %s SOC block(s) before "
+                            "distributed partitioning.\n",
+                            input_problem->num_quadratic_constraints,
+                            transformed->cones.num_cones,
+                            form_name);
+                }
+            }
+        }
+    }
+    MPI_Bcast(&transform_failed, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (transform_failed)
+    {
+        if (transformed)
+            qp_problem_free(transformed);
+        return NULL;
+    }
 
     select_valid_grid_size(params, original_problem, &sub_params);
 
@@ -433,16 +480,12 @@ pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_p
             row_perm = (int *)malloc(working_problem->num_constraints * sizeof(int));
             col_perm = (int *)malloc(working_problem->num_variables * sizeof(int));
 
+            generate_cone_aware_permutation(
+                working_problem, params->permute_method, params->permute_block_size, col_perm);
             if (params->permute_method == FULL_RANDOM_PERMUTATION)
-            {
-                generate_random_permutation(working_problem->num_variables, col_perm);
                 generate_random_permutation(working_problem->num_constraints, row_perm);
-            }
-            else if (params->permute_method == BLOCK_RANDOM_PERMUTATION)
-            {
-                generate_block_permutation(working_problem->num_variables, params->permute_block_size, col_perm);
+            else
                 generate_block_permutation(working_problem->num_constraints, params->permute_block_size, row_perm);
-            }
 
             permuted_problem = permute_problem_return_new(working_problem, row_perm, col_perm);
             working_problem = permuted_problem;
@@ -456,12 +499,17 @@ pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_p
         if (grid_context.rank_global == 0)
         {
             result = pdhcg_create_result_from_presolve(presolve_info, original_problem);
+            restore_qcqp_result_dimensions(result, transformed ? input_problem : NULL);
             if (result)
                 pdhg_final_log(result, params);
             if (presolve_info)
                 pdhcg_presolve_info_free(presolve_info);
+            if (transformed)
+                qp_problem_free(transformed);
+            destroy_parallel_context(&grid_context);
             return result;
         }
+        destroy_parallel_context(&grid_context);
         return NULL;
     }
 
@@ -488,14 +536,31 @@ pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_p
             qp_problem_free(dummy_problem);
         }
 
+        restore_qcqp_result_dimensions(result, transformed ? input_problem : NULL);
         pdhg_final_log(result, params);
         if (presolve_info)
             pdhcg_presolve_info_free(presolve_info);
+        if (transformed)
+            qp_problem_free(transformed);
     }
     else if (grid_context.rank_global != 0)
     {
         result = NULL;
     }
+    else
+    {
+        free(row_perm);
+        free(col_perm);
+        if (permuted_problem)
+            qp_problem_free(permuted_problem);
+        if (dummy_problem)
+            qp_problem_free(dummy_problem);
+        if (presolve_info)
+            pdhcg_presolve_info_free(presolve_info);
+        if (transformed)
+            qp_problem_free(transformed);
+    }
 
+    destroy_parallel_context(&grid_context);
     return result;
 }

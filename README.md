@@ -68,6 +68,12 @@ cmake --build build --clean-first
 
 This requires MPI and NCCL to be installed on your system.
 
+Distributed conic solves preserve every cone as an ordered permutation unit. Small cones, exponential/power cones,
+heterogeneously scaled cones, unsupported fixed-slot patterns, and cones requiring a diagonal-Q metric stay on one
+column GPU. Large uniformly scaled SOC/RSOC blocks can span column GPUs; projection and dual-residual kernels reduce
+only per-cone statistics with NCCL and parallelize each local cone slice across multiple CUDA blocks. Raw QCQPs are
+reformulated on rank 0 before this partitioning step.
+
 ##  Usage (C++ Executable)
 
 Run the solver from the command line:

@@ -1173,6 +1173,405 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
     dual_residual[start + k + 1] = (r_z - p_z) * variable_rescaling[start + k + 1];
 }
 
+static __device__ __forceinline__ double large_cone_block_sum(double value)
+{
+    __shared__ double warp_sums[32];
+    const unsigned mask = 0xffffffffu;
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int num_warps = (blockDim.x + 31) >> 5;
+
+    for (int offset = 16; offset > 0; offset >>= 1)
+        value += __shfl_down_sync(mask, value, offset);
+    if (lane == 0)
+        warp_sums[warp] = value;
+    __syncthreads();
+
+    value = (warp == 0 && lane < num_warps) ? warp_sums[lane] : 0.0;
+    if (warp == 0)
+    {
+        for (int offset = 16; offset > 0; offset >>= 1)
+            value += __shfl_down_sync(mask, value, offset);
+    }
+    return value;
+}
+
+__global__ void project_rotated_soc_grid_reduce_kernel(double *__restrict__ primal_solution,
+                                                       double *__restrict__ workspace,
+                                                       const int *__restrict__ start_idx,
+                                                       const int *__restrict__ v_dim,
+                                                       int num_cones,
+                                                       int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    double sum = 0.0;
+    for (int m = part * blockDim.x + threadIdx.x; m < k; m += blocks_per_cone * blockDim.x)
+    {
+        double value = primal_solution[start + m];
+        sum += value * value;
+    }
+    sum = large_cone_block_sum(sum);
+    if (threadIdx.x == 0)
+        atomicAdd(workspace + cone, sum);
+}
+
+__global__ void project_rotated_soc_grid_finalize_kernel(double *__restrict__ primal_solution,
+                                                         double *__restrict__ workspace,
+                                                         const int *__restrict__ start_idx,
+                                                         const int *__restrict__ v_dim,
+                                                         int num_cones)
+{
+    int cone = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cone >= num_cones)
+        return;
+
+    const double INV_SQRT2 = 0.7071067811865475;
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    double s = primal_solution[start + k];
+    double t = primal_solution[start + k + 1];
+    double w = (s - t) * INV_SQRT2;
+    double z = (s + t) * INV_SQRT2;
+    double radius = sqrt(fmax(0.0, workspace[cone] + w * w));
+
+    if (radius <= z)
+    {
+        workspace[cone] = 1.0;
+        return;
+    }
+    if (radius <= -z)
+    {
+        workspace[cone] = 0.0;
+        primal_solution[start + k] = 0.0;
+        primal_solution[start + k + 1] = 0.0;
+        return;
+    }
+
+    double scale = (z + radius) / (2.0 * radius);
+    double w_new = scale * w;
+    double z_new = scale * radius;
+    workspace[cone] = scale;
+    primal_solution[start + k] = (z_new + w_new) * INV_SQRT2;
+    primal_solution[start + k + 1] = (z_new - w_new) * INV_SQRT2;
+}
+
+__global__ void project_rotated_soc_grid_apply_kernel(double *__restrict__ primal_solution,
+                                                      const double *__restrict__ workspace,
+                                                      const int *__restrict__ start_idx,
+                                                      const int *__restrict__ v_dim,
+                                                      int num_cones,
+                                                      int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    double scale = workspace[cone];
+    if (scale == 1.0)
+        return;
+
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    for (int m = part * blockDim.x + threadIdx.x; m < k; m += blocks_per_cone * blockDim.x)
+    {
+        primal_solution[start + m] *= scale;
+    }
+}
+
+__global__ void compute_cone_dual_residual_grid_reduce_kernel(const double *__restrict__ objective_vector,
+                                                              const double *__restrict__ dual_product,
+                                                              double *__restrict__ workspace,
+                                                              const int *__restrict__ start_idx,
+                                                              const int *__restrict__ v_dim,
+                                                              int num_cones,
+                                                              int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    double sum = 0.0;
+    for (int m = part * blockDim.x + threadIdx.x; m < k; m += blocks_per_cone * blockDim.x)
+    {
+        double residual = objective_vector[start + m] - dual_product[start + m];
+        sum += residual * residual;
+    }
+    sum = large_cone_block_sum(sum);
+    if (threadIdx.x == 0)
+        atomicAdd(workspace + cone, sum);
+}
+
+__global__ void compute_cone_dual_residual_grid_finalize_kernel(double *__restrict__ dual_residual,
+                                                                const double *__restrict__ objective_vector,
+                                                                const double *__restrict__ dual_product,
+                                                                const double *__restrict__ variable_rescaling,
+                                                                double *__restrict__ workspace,
+                                                                const int *__restrict__ start_idx,
+                                                                const int *__restrict__ v_dim,
+                                                                int num_cones)
+{
+    int cone = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cone >= num_cones)
+        return;
+
+    const double INV_SQRT2 = 0.7071067811865475;
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    double r_s = objective_vector[start + k] - dual_product[start + k];
+    double r_t = objective_vector[start + k + 1] - dual_product[start + k + 1];
+    double r_w = (r_s - r_t) * INV_SQRT2;
+    double r_z = (r_s + r_t) * INV_SQRT2;
+    double norm = sqrt(fmax(0.0, workspace[cone] + r_w * r_w));
+    double factor;
+    double p_s;
+    double p_t;
+
+    if (norm <= r_z)
+    {
+        factor = 0.0;
+        p_s = r_s;
+        p_t = r_t;
+    }
+    else if (norm <= -r_z)
+    {
+        factor = 1.0;
+        p_s = 0.0;
+        p_t = 0.0;
+    }
+    else
+    {
+        double scale = (r_z + norm) / (2.0 * norm);
+        double w_new = scale * r_w;
+        double z_new = scale * norm;
+        factor = 1.0 - scale;
+        p_s = (z_new + w_new) * INV_SQRT2;
+        p_t = (z_new - w_new) * INV_SQRT2;
+    }
+
+    workspace[cone] = factor;
+    dual_residual[start + k] = (r_s - p_s) * variable_rescaling[start + k];
+    dual_residual[start + k + 1] = (r_t - p_t) * variable_rescaling[start + k + 1];
+}
+
+__global__ void compute_cone_dual_residual_grid_apply_kernel(double *__restrict__ dual_residual,
+                                                             const double *__restrict__ objective_vector,
+                                                             const double *__restrict__ dual_product,
+                                                             const double *__restrict__ variable_rescaling,
+                                                             const double *__restrict__ workspace,
+                                                             const int *__restrict__ start_idx,
+                                                             const int *__restrict__ v_dim,
+                                                             int num_cones,
+                                                             int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    double factor = workspace[cone];
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    for (int m = part * blockDim.x + threadIdx.x; m < k; m += blocks_per_cone * blockDim.x)
+    {
+        int idx = start + m;
+        double residual = objective_vector[idx] - dual_product[idx];
+        dual_residual[idx] = residual * factor * variable_rescaling[idx];
+    }
+}
+
+__global__ void project_standard_soc_grid_reduce_kernel(double *__restrict__ primal_solution,
+                                                        double *__restrict__ workspace,
+                                                        const int *__restrict__ start_idx,
+                                                        const int *__restrict__ v_dim,
+                                                        int num_cones,
+                                                        int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    double sum = 0.0;
+    for (int m = part * blockDim.x + threadIdx.x; m < k; m += blocks_per_cone * blockDim.x)
+    {
+        double value = primal_solution[start + m];
+        sum += value * value;
+    }
+    sum = large_cone_block_sum(sum);
+    if (threadIdx.x == 0)
+        atomicAdd(workspace + cone, sum);
+}
+
+__global__ void project_standard_soc_grid_finalize_kernel(double *__restrict__ primal_solution,
+                                                          double *__restrict__ workspace,
+                                                          const int *__restrict__ start_idx,
+                                                          const int *__restrict__ v_dim,
+                                                          int num_cones)
+{
+    int cone = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cone >= num_cones)
+        return;
+
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    double w = primal_solution[start + k];
+    double z = primal_solution[start + k + 1];
+    double radius = sqrt(fmax(0.0, workspace[cone] + w * w));
+
+    if (radius <= z)
+    {
+        workspace[cone] = 1.0;
+        return;
+    }
+    if (radius <= -z)
+    {
+        workspace[cone] = 0.0;
+        primal_solution[start + k] = 0.0;
+        primal_solution[start + k + 1] = 0.0;
+        return;
+    }
+
+    double scale = (z + radius) / (2.0 * radius);
+    workspace[cone] = scale;
+    primal_solution[start + k] = scale * w;
+    primal_solution[start + k + 1] = scale * radius;
+}
+
+__global__ void project_standard_soc_grid_apply_kernel(double *__restrict__ primal_solution,
+                                                       const double *__restrict__ workspace,
+                                                       const int *__restrict__ start_idx,
+                                                       const int *__restrict__ v_dim,
+                                                       int num_cones,
+                                                       int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    double scale = workspace[cone];
+    if (scale == 1.0)
+        return;
+
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    for (int m = part * blockDim.x + threadIdx.x; m < k; m += blocks_per_cone * blockDim.x)
+    {
+        primal_solution[start + m] *= scale;
+    }
+}
+
+__global__ void compute_cone_dual_residual_standard_grid_reduce_kernel(const double *__restrict__ objective_vector,
+                                                                       const double *__restrict__ dual_product,
+                                                                       double *__restrict__ workspace,
+                                                                       const int *__restrict__ start_idx,
+                                                                       const int *__restrict__ v_dim,
+                                                                       int num_cones,
+                                                                       int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    double sum = 0.0;
+    for (int m = part * blockDim.x + threadIdx.x; m < k; m += blocks_per_cone * blockDim.x)
+    {
+        double residual = objective_vector[start + m] - dual_product[start + m];
+        sum += residual * residual;
+    }
+    sum = large_cone_block_sum(sum);
+    if (threadIdx.x == 0)
+        atomicAdd(workspace + cone, sum);
+}
+
+__global__ void compute_cone_dual_residual_standard_grid_finalize_kernel(double *__restrict__ dual_residual,
+                                                                         const double *__restrict__ objective_vector,
+                                                                         const double *__restrict__ dual_product,
+                                                                         const double *__restrict__ variable_rescaling,
+                                                                         double *__restrict__ workspace,
+                                                                         const int *__restrict__ start_idx,
+                                                                         const int *__restrict__ v_dim,
+                                                                         int num_cones)
+{
+    int cone = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cone >= num_cones)
+        return;
+
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    double r_w = objective_vector[start + k] - dual_product[start + k];
+    double r_z = objective_vector[start + k + 1] - dual_product[start + k + 1];
+    double radius = sqrt(fmax(0.0, workspace[cone] + r_w * r_w));
+    double factor;
+    double p_w;
+    double p_z;
+
+    if (radius <= r_z)
+    {
+        factor = 0.0;
+        p_w = r_w;
+        p_z = r_z;
+    }
+    else if (radius <= -r_z)
+    {
+        factor = 1.0;
+        p_w = 0.0;
+        p_z = 0.0;
+    }
+    else
+    {
+        double scale = (r_z + radius) / (2.0 * radius);
+        factor = 1.0 - scale;
+        p_w = scale * r_w;
+        p_z = scale * radius;
+    }
+
+    workspace[cone] = factor;
+    dual_residual[start + k] = (r_w - p_w) * variable_rescaling[start + k];
+    dual_residual[start + k + 1] = (r_z - p_z) * variable_rescaling[start + k + 1];
+}
+
+__global__ void compute_cone_dual_residual_standard_grid_apply_kernel(double *__restrict__ dual_residual,
+                                                                      const double *__restrict__ objective_vector,
+                                                                      const double *__restrict__ dual_product,
+                                                                      const double *__restrict__ variable_rescaling,
+                                                                      const double *__restrict__ workspace,
+                                                                      const int *__restrict__ start_idx,
+                                                                      const int *__restrict__ v_dim,
+                                                                      int num_cones,
+                                                                      int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    double factor = workspace[cone];
+    int start = start_idx[cone];
+    int k = v_dim[cone];
+    for (int m = part * blockDim.x + threadIdx.x; m < k; m += blocks_per_cone * blockDim.x)
+    {
+        int idx = start + m;
+        double residual = objective_vector[idx] - dual_product[idx];
+        dual_residual[idx] = residual * factor * variable_rescaling[idx];
+    }
+}
+
 __global__ void project_rotated_soc_warp_kernel(double *__restrict__ primal_solution,
                                                 const double *__restrict__ variable_rescaling,
                                                 double *__restrict__ warm_start,
@@ -3070,6 +3469,50 @@ __global__ void set_cone_dual_slack_kernel(double *__restrict__ dual_slack,
     }
 }
 
+__global__ void set_cone_dual_slack_grid_kernel(double *__restrict__ dual_slack,
+                                                const double *__restrict__ objective_vector,
+                                                const double *__restrict__ dual_product,
+                                                const int *__restrict__ start_idx,
+                                                const int *__restrict__ v_dim,
+                                                int num_cones,
+                                                int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    int part = blockIdx.x - cone * blocks_per_cone;
+    int start = start_idx[cone];
+    int n = v_dim[cone] + 2;
+    for (int m = part * blockDim.x + threadIdx.x; m < n; m += blocks_per_cone * blockDim.x)
+    {
+        int idx = start + m;
+        dual_slack[idx] = objective_vector[idx] - dual_product[idx];
+    }
+}
+
+__global__ void set_cone_dual_slack_warp_kernel(double *__restrict__ dual_slack,
+                                                const double *__restrict__ objective_vector,
+                                                const double *__restrict__ dual_product,
+                                                const int *__restrict__ start_idx,
+                                                const int *__restrict__ v_dim,
+                                                int num_cones)
+{
+    int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    int cone = global_thread >> 5;
+    if (cone >= num_cones)
+        return;
+
+    int lane = global_thread & 31;
+    int start = start_idx[cone];
+    int n = v_dim[cone] + 2;
+    for (int m = lane; m < n; m += 32)
+    {
+        int idx = start + m;
+        dual_slack[idx] = objective_vector[idx] - dual_product[idx];
+    }
+}
+
 __global__ void recompute_reflected_at_cone_kernel(double *__restrict__ reflected_primal,
                                                    const double *__restrict__ pdhg_primal,
                                                    const double *__restrict__ current_primal,
@@ -3083,6 +3526,50 @@ __global__ void recompute_reflected_at_cone_kernel(double *__restrict__ reflecte
     int start = start_idx[blk];
     int k = v_dim[blk];
     for (int m = 0; m < k + 2; ++m)
+    {
+        int idx = start + m;
+        reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+    }
+}
+
+__global__ void recompute_reflected_at_cone_warp_kernel(double *__restrict__ reflected_primal,
+                                                        const double *__restrict__ pdhg_primal,
+                                                        const double *__restrict__ current_primal,
+                                                        const int *__restrict__ start_idx,
+                                                        const int *__restrict__ v_dim,
+                                                        int num_cones)
+{
+    int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    int cone = global_thread >> 5;
+    if (cone >= num_cones)
+        return;
+
+    int lane = global_thread & 31;
+    int start = start_idx[cone];
+    int n = v_dim[cone] + 2;
+    for (int m = lane; m < n; m += 32)
+    {
+        int idx = start + m;
+        reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
+    }
+}
+
+__global__ void recompute_reflected_at_cone_grid_kernel(double *__restrict__ reflected_primal,
+                                                        const double *__restrict__ pdhg_primal,
+                                                        const double *__restrict__ current_primal,
+                                                        const int *__restrict__ start_idx,
+                                                        const int *__restrict__ v_dim,
+                                                        int num_cones,
+                                                        int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+
+    int part = blockIdx.x - cone * blocks_per_cone;
+    int start = start_idx[cone];
+    int n = v_dim[cone] + 2;
+    for (int m = part * blockDim.x + threadIdx.x; m < n; m += blocks_per_cone * blockDim.x)
     {
         int idx = start + m;
         reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];

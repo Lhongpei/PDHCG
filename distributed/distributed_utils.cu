@@ -51,6 +51,7 @@ extern "C"
     grid_context_t initialize_parallel_context(int P_row, int P_col)
     {
         grid_context_t grid;
+        memset(&grid, 0, sizeof(grid));
         int initialized;
         int world_size;
 
@@ -139,6 +140,32 @@ extern "C"
         return grid;
     }
 }
+
+void destroy_parallel_context(grid_context_t *grid)
+{
+    if (!grid)
+        return;
+
+    free(grid->variable_cuts);
+    free(grid->constraint_cuts);
+    free(grid->split_cones.global_start);
+    free(grid->split_cones.v_dim);
+    free(grid->split_cones.type);
+    free(grid->split_cones.fixed_mask);
+    free(grid->split_cones.local_start);
+    free(grid->split_cones.local_first);
+    free(grid->split_cones.local_count);
+
+    NCCL_CHECK(ncclCommDestroy(grid->nccl_row));
+    NCCL_CHECK(ncclCommDestroy(grid->nccl_col));
+    NCCL_CHECK(ncclCommDestroy(grid->nccl_global));
+    if (grid->comm_row != MPI_COMM_NULL)
+        MPI_Comm_free(&grid->comm_row);
+    if (grid->comm_col != MPI_COMM_NULL)
+        MPI_Comm_free(&grid->comm_col);
+    memset(grid, 0, sizeof(*grid));
+}
+
 int *get_balanced_cuts(const int *weights, int total_dim, int num_partitions)
 {
     int *cuts = (int *)malloc((num_partitions + 1) * sizeof(int));
@@ -176,6 +203,225 @@ int *get_balanced_cuts(const int *weights, int total_dim, int num_partitions)
     }
 
     return cuts;
+}
+
+static int distributed_cone_length(const cone_blocks_t *cones, int cone)
+{
+    return (cones->type[cone] == CONE_EXPONENTIAL || cones->type[cone] == CONE_POWER) ? 3 : cones->v_dim[cone] + 2;
+}
+
+static unsigned char distributed_cone_fixed_mask(const qp_problem_t *problem, int cone)
+{
+    if (!problem->cones.is_fixed)
+        return 0;
+
+    int start = problem->cones.start_idx[cone];
+    int k = problem->cones.v_dim[cone];
+    int length = distributed_cone_length(&problem->cones, cone);
+    unsigned char mask = 0;
+    for (int slot = 0; slot < length - 2; ++slot)
+        if (problem->cones.is_fixed[start + slot])
+            mask |= PDHCG_DIST_CONE_FIXED_VECTOR;
+    if (problem->cones.is_fixed[start + k])
+        mask |= PDHCG_DIST_CONE_FIXED_AUX0;
+    if (problem->cones.is_fixed[start + k + 1])
+        mask |= PDHCG_DIST_CONE_FIXED_AUX1;
+    return mask;
+}
+
+static bool objective_is_pure_diagonal(const qp_problem_t *problem)
+{
+    if (problem->num_rank_lowrank_obj > 0 || !problem->objective_sparse_matrix)
+        return problem->num_rank_lowrank_obj == 0;
+    for (int row = 0; row < problem->num_variables; ++row)
+    {
+        for (int nz = problem->objective_sparse_matrix->row_ptr[row];
+             nz < problem->objective_sparse_matrix->row_ptr[row + 1];
+             ++nz)
+        {
+            if (problem->objective_sparse_matrix->col_ind[nz] != row &&
+                problem->objective_sparse_matrix->val[nz] != 0.0)
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool cone_has_diagonal_objective(const qp_problem_t *problem, int cone)
+{
+    if (!problem->objective_sparse_matrix || !objective_is_pure_diagonal(problem))
+        return false;
+    int start = problem->cones.start_idx[cone];
+    int end = start + distributed_cone_length(&problem->cones, cone);
+    for (int row = start; row < end; ++row)
+    {
+        for (int nz = problem->objective_sparse_matrix->row_ptr[row];
+             nz < problem->objective_sparse_matrix->row_ptr[row + 1];
+             ++nz)
+        {
+            if (problem->objective_sparse_matrix->col_ind[nz] == row &&
+                problem->objective_sparse_matrix->val[nz] != 0.0)
+                return true;
+        }
+    }
+    return false;
+}
+
+static bool cone_can_span_gpus(const qp_problem_t *problem, int cone, const pdhg_parameters_t *params)
+{
+    cone_type_t type = problem->cones.type[cone];
+    if (type != CONE_STANDARD_SOC && type != CONE_ROTATED_SOC)
+        return false;
+    if (params->heterogeneous_cone_scaling || cone_has_diagonal_objective(problem, cone))
+        return false;
+
+    unsigned char fixed = distributed_cone_fixed_mask(problem, cone);
+    if (fixed & PDHCG_DIST_CONE_FIXED_VECTOR)
+        return false;
+    if (type == CONE_STANDARD_SOC)
+        return fixed == 0 || fixed == PDHCG_DIST_CONE_FIXED_AUX1 ||
+            fixed == (PDHCG_DIST_CONE_FIXED_AUX0 | PDHCG_DIST_CONE_FIXED_AUX1);
+    return fixed == 0 || fixed == (PDHCG_DIST_CONE_FIXED_AUX0 | PDHCG_DIST_CONE_FIXED_AUX1);
+}
+
+static int *get_uniform_cuts(int total_dim, int num_partitions)
+{
+    int *cuts = (int *)malloc((size_t)(num_partitions + 1) * sizeof(int));
+    cuts[0] = 0;
+    cuts[num_partitions] = total_dim;
+    int chunk = total_dim / num_partitions;
+    for (int part = 1; part < num_partitions; ++part)
+        cuts[part] = part * chunk;
+    return cuts;
+}
+
+static int find_partition(const int *cuts, int num_partitions, int index)
+{
+    for (int part = 0; part < num_partitions; ++part)
+        if (index >= cuts[part] && index < cuts[part + 1])
+            return part;
+    return num_partitions - 1;
+}
+
+void configure_partition_metadata(const qp_problem_t *problem, grid_context_t *grid, const pdhg_parameters_t *params)
+{
+    int n = problem->num_variables;
+    int m = problem->num_constraints;
+    int P_cols = grid->dims[1];
+    int P_rows = grid->dims[0];
+    grid->global_num_cones = problem->cones.num_cones;
+
+    free(grid->variable_cuts);
+    free(grid->constraint_cuts);
+    grid->variable_cuts = NULL;
+    grid->constraint_cuts = NULL;
+
+    if (params->partition_method == NNZ_BALANCE_PARTITION)
+    {
+        int *col_weights = (int *)calloc((size_t)n, sizeof(int));
+        int *row_weights = (int *)calloc((size_t)m, sizeof(int));
+        if (problem->constraint_matrix)
+        {
+            for (int row = 0; row < m; ++row)
+            {
+                row_weights[row] =
+                    problem->constraint_matrix->row_ptr[row + 1] - problem->constraint_matrix->row_ptr[row];
+                for (int nz = problem->constraint_matrix->row_ptr[row];
+                     nz < problem->constraint_matrix->row_ptr[row + 1];
+                     ++nz)
+                    ++col_weights[problem->constraint_matrix->col_ind[nz]];
+            }
+        }
+        grid->variable_cuts = get_balanced_cuts(col_weights, n, P_cols);
+        grid->constraint_cuts = get_balanced_cuts(row_weights, m, P_rows);
+        free(col_weights);
+        free(row_weights);
+    }
+    else
+    {
+        grid->variable_cuts = get_uniform_cuts(n, P_cols);
+        grid->constraint_cuts = get_uniform_cuts(m, P_rows);
+    }
+
+    int target_variables = (n + P_cols - 1) / P_cols;
+    for (int cone = 0; cone < problem->cones.num_cones; ++cone)
+    {
+        int start = problem->cones.start_idx[cone];
+        int end = start + distributed_cone_length(&problem->cones, cone);
+        bool may_split = cone_can_span_gpus(problem, cone, params) && (end - start > target_variables);
+        if (may_split)
+            continue;
+
+        int midpoint = start + (end - start) / 2;
+        for (int cut = 1; cut < P_cols; ++cut)
+        {
+            if (grid->variable_cuts[cut] > start && grid->variable_cuts[cut] < end)
+                grid->variable_cuts[cut] = (grid->variable_cuts[cut] <= midpoint) ? start : end;
+        }
+    }
+    for (int cut = 1; cut < P_cols; ++cut)
+        if (grid->variable_cuts[cut] < grid->variable_cuts[cut - 1])
+            grid->variable_cuts[cut] = grid->variable_cuts[cut - 1];
+
+    int my_col = grid->coords[1];
+    grid->n_start = grid->variable_cuts[my_col];
+    grid->n_end = grid->variable_cuts[my_col + 1];
+
+    distributed_cone_partition_t *split = &grid->split_cones;
+    free(split->global_start);
+    free(split->v_dim);
+    free(split->type);
+    free(split->fixed_mask);
+    free(split->local_start);
+    free(split->local_first);
+    free(split->local_count);
+    memset(split, 0, sizeof(*split));
+
+    for (int cone = 0; cone < problem->cones.num_cones; ++cone)
+    {
+        int start = problem->cones.start_idx[cone];
+        int end = start + distributed_cone_length(&problem->cones, cone);
+        if (find_partition(grid->variable_cuts, P_cols, start) != find_partition(grid->variable_cuts, P_cols, end - 1))
+            ++split->num_cones;
+    }
+
+    int K = split->num_cones;
+    if (K == 0)
+        return;
+    split->global_start = (int *)malloc((size_t)K * sizeof(int));
+    split->v_dim = (int *)malloc((size_t)K * sizeof(int));
+    split->type = (cone_type_t *)malloc((size_t)K * sizeof(cone_type_t));
+    split->fixed_mask = (unsigned char *)malloc((size_t)K * sizeof(unsigned char));
+    split->local_start = (int *)malloc((size_t)K * sizeof(int));
+    split->local_first = (int *)malloc((size_t)K * sizeof(int));
+    split->local_count = (int *)malloc((size_t)K * sizeof(int));
+
+    int out = 0;
+    for (int cone = 0; cone < problem->cones.num_cones; ++cone)
+    {
+        int start = problem->cones.start_idx[cone];
+        int length = distributed_cone_length(&problem->cones, cone);
+        int end = start + length;
+        if (find_partition(grid->variable_cuts, P_cols, start) == find_partition(grid->variable_cuts, P_cols, end - 1))
+            continue;
+        if (!cone_can_span_gpus(problem, cone, params))
+        {
+            fprintf(stderr, "Error: unsupported cone %d crossed a GPU partition boundary.\n", cone);
+            MPI_Abort(grid->comm_global, EXIT_FAILURE);
+        }
+
+        int intersection_start = (start > grid->n_start) ? start : grid->n_start;
+        int intersection_end = (end < grid->n_end) ? end : grid->n_end;
+        int local_count = (intersection_end > intersection_start) ? intersection_end - intersection_start : 0;
+        split->global_start[out] = start;
+        split->v_dim[out] = problem->cones.v_dim[cone];
+        split->type[out] = problem->cones.type[cone];
+        split->fixed_mask[out] = distributed_cone_fixed_mask(problem, cone);
+        split->local_start[out] = local_count > 0 ? intersection_start - grid->n_start : 0;
+        split->local_first[out] = local_count > 0 ? intersection_start - start : 0;
+        split->local_count[out] = local_count;
+        ++out;
+    }
 }
 
 CsrComponent *
@@ -262,48 +508,47 @@ qp_problem_t *partition_qp_problem(const qp_problem_t *global_qp,
     int m_total = global_qp->num_constraints;
     int n_start, n_end, m_start, m_end;
 
-    if (method == NNZ_BALANCE_PARTITION)
-    {
-        int *col_weights = (int *)calloc(n_total, sizeof(int));
-        if (global_qp->constraint_matrix)
-        {
-            for (int i = 0; i < global_qp->constraint_matrix_num_nonzeros; i++)
-            {
-                int c = global_qp->constraint_matrix->col_ind[i];
-                if (c < n_total)
-                    col_weights[c]++;
-            }
-        }
-        int *col_cuts = get_balanced_cuts(col_weights, n_total, P_cols);
-        n_start = col_cuts[my_col_idx];
-        n_end = col_cuts[my_col_idx + 1];
-        free(col_weights);
-        free(col_cuts);
+    int *owned_col_cuts = NULL;
+    int *owned_row_cuts = NULL;
+    const int *col_cuts = grid->variable_cuts;
+    const int *row_cuts = grid->constraint_cuts;
 
-        int *row_weights = (int *)malloc(m_total * sizeof(int));
-        if (global_qp->constraint_matrix)
-        {
-            for (int i = 0; i < m_total; i++)
-            {
-                row_weights[i] =
-                    global_qp->constraint_matrix->row_ptr[i + 1] - global_qp->constraint_matrix->row_ptr[i];
-            }
-        }
-        int *row_cuts = get_balanced_cuts(row_weights, m_total, P_rows);
-        m_start = row_cuts[my_row_idx];
-        m_end = row_cuts[my_row_idx + 1];
-        free(row_weights);
-        free(row_cuts);
-    }
-    else
+    if (!col_cuts || !row_cuts)
     {
-        int n_chunk = n_total / P_cols;
-        n_start = my_col_idx * n_chunk;
-        n_end = (my_col_idx == P_cols - 1) ? n_total : (my_col_idx + 1) * n_chunk;
-        int m_chunk = m_total / P_rows;
-        m_start = my_row_idx * m_chunk;
-        m_end = (my_row_idx == P_rows - 1) ? m_total : (my_row_idx + 1) * m_chunk;
+        if (method == NNZ_BALANCE_PARTITION)
+        {
+            int *col_weights = (int *)calloc((size_t)n_total, sizeof(int));
+            int *row_weights = (int *)calloc((size_t)m_total, sizeof(int));
+            if (global_qp->constraint_matrix)
+            {
+                for (int i = 0; i < m_total; ++i)
+                {
+                    row_weights[i] =
+                        global_qp->constraint_matrix->row_ptr[i + 1] - global_qp->constraint_matrix->row_ptr[i];
+                    for (int nz = global_qp->constraint_matrix->row_ptr[i];
+                         nz < global_qp->constraint_matrix->row_ptr[i + 1];
+                         ++nz)
+                        ++col_weights[global_qp->constraint_matrix->col_ind[nz]];
+                }
+            }
+            owned_col_cuts = get_balanced_cuts(col_weights, n_total, P_cols);
+            owned_row_cuts = get_balanced_cuts(row_weights, m_total, P_rows);
+            free(col_weights);
+            free(row_weights);
+        }
+        else
+        {
+            owned_col_cuts = get_uniform_cuts(n_total, P_cols);
+            owned_row_cuts = get_uniform_cuts(m_total, P_rows);
+        }
+        col_cuts = owned_col_cuts;
+        row_cuts = owned_row_cuts;
     }
+
+    n_start = col_cuts[my_col_idx];
+    n_end = col_cuts[my_col_idx + 1];
+    m_start = row_cuts[my_row_idx];
+    m_end = row_cuts[my_row_idx + 1];
 
     if (out_n_start)
         *out_n_start = n_start;
@@ -361,6 +606,52 @@ qp_problem_t *partition_qp_problem(const qp_problem_t *global_qp,
         loc->primal_start = copy_slice(global_qp->primal_start, n_start, loc->num_variables);
     if (global_qp->dual_start)
         loc->dual_start = copy_slice(global_qp->dual_start, m_start, loc->num_constraints);
+
+    loc->num_original_variables = 0;
+    if (global_qp->num_original_variables > n_start)
+    {
+        int original_end = global_qp->num_original_variables < n_end ? global_qp->num_original_variables : n_end;
+        loc->num_original_variables = original_end - n_start;
+    }
+
+    int local_cones = 0;
+    for (int cone = 0; cone < global_qp->cones.num_cones; ++cone)
+    {
+        int start = global_qp->cones.start_idx[cone];
+        int end = start + distributed_cone_length(&global_qp->cones, cone);
+        if (start >= n_start && end <= n_end)
+            ++local_cones;
+    }
+    loc->cones.num_cones = local_cones;
+    if (local_cones > 0)
+    {
+        loc->cones.start_idx = (int *)malloc((size_t)local_cones * sizeof(int));
+        loc->cones.v_dim = (int *)malloc((size_t)local_cones * sizeof(int));
+        loc->cones.type = (cone_type_t *)malloc((size_t)local_cones * sizeof(cone_type_t));
+        loc->cones.power_alpha = (double *)calloc((size_t)local_cones, sizeof(double));
+        int out = 0;
+        for (int cone = 0; cone < global_qp->cones.num_cones; ++cone)
+        {
+            int start = global_qp->cones.start_idx[cone];
+            int end = start + distributed_cone_length(&global_qp->cones, cone);
+            if (start < n_start || end > n_end)
+                continue;
+            loc->cones.start_idx[out] = start - n_start;
+            loc->cones.v_dim[out] = global_qp->cones.v_dim[cone];
+            loc->cones.type[out] = global_qp->cones.type[cone];
+            if (global_qp->cones.power_alpha)
+                loc->cones.power_alpha[out] = global_qp->cones.power_alpha[cone];
+            ++out;
+        }
+    }
+    if (global_qp->cones.is_fixed)
+    {
+        loc->cones.is_fixed = (char *)malloc((size_t)loc->num_variables * sizeof(char));
+        memcpy(loc->cones.is_fixed, global_qp->cones.is_fixed + n_start, (size_t)loc->num_variables * sizeof(char));
+    }
+
+    free(owned_col_cuts);
+    free(owned_row_cuts);
 
     return loc;
 }
@@ -454,6 +745,16 @@ size_t get_qp_problem_size(const qp_problem_t *qp)
     size_t size = 0;
 
     size += sizeof(int) * 6 + sizeof(double);
+    size += sizeof(int) * 2;
+
+    int num_cones = qp->cones.num_cones;
+    size += (size_t)num_cones * (sizeof(int) * 2 + sizeof(cone_type_t));
+    size += sizeof(int);
+    if (qp->cones.power_alpha)
+        size += (size_t)num_cones * sizeof(double);
+    size += sizeof(int);
+    if (qp->cones.is_fixed)
+        size += (size_t)qp->num_variables * sizeof(char);
 
     size += sizeof(double) * qp->num_variables * 3;
     size += sizeof(double) * qp->num_constraints * 2;
@@ -461,7 +762,7 @@ size_t get_qp_problem_size(const qp_problem_t *qp)
 #define ADD_CSR_SIZE(csr, num_rows, nnz)                                                                               \
     {                                                                                                                  \
         size += sizeof(int);                                                                                           \
-        if (csr)                                                                                                       \
+        if ((csr) && (csr)->row_ptr)                                                                                   \
         {                                                                                                              \
             int safe_nnz = (nnz) > 0 ? (nnz) : 1;                                                                      \
             size += sizeof(int) * ((num_rows) + 1);                                                                    \
@@ -490,13 +791,21 @@ size_t get_qp_problem_size(const qp_problem_t *qp)
 
 #define S_CSR(csr, num_rows, nnz)                                                                                      \
     {                                                                                                                  \
-        int has_csr = (csr != NULL);                                                                                   \
+        int has_csr = ((csr) != NULL && (csr)->row_ptr != NULL);                                                       \
         S_COPY(has_csr, int);                                                                                          \
         if (has_csr)                                                                                                   \
         {                                                                                                              \
             S_ARR(csr->row_ptr, num_rows + 1, int);                                                                    \
-            S_ARR(csr->col_ind, nnz > 0 ? nnz : 1, int);                                                               \
-            S_ARR(csr->val, nnz > 0 ? nnz : 1, double);                                                                \
+            if ((nnz) > 0)                                                                                             \
+            {                                                                                                          \
+                S_ARR(csr->col_ind, nnz, int);                                                                         \
+                S_ARR(csr->val, nnz, double);                                                                          \
+            }                                                                                                          \
+            else                                                                                                       \
+            {                                                                                                          \
+                S_COPY(0, int);                                                                                        \
+                S_COPY(0.0, double);                                                                                   \
+            }                                                                                                          \
         }                                                                                                              \
     }
 
@@ -522,6 +831,22 @@ void serialize_qp_problem_to_ptr(const qp_problem_t *qp, char **ptr_ref)
     S_COPY(qp->objective_sparse_matrix_num_nonzeros, int);
     S_COPY(qp->objective_lowrank_matrix_num_nonzeros, int);
     S_COPY(qp->objective_constant, double);
+    S_COPY(qp->num_original_variables, int);
+    S_COPY(qp->cones.num_cones, int);
+    if (qp->cones.num_cones > 0)
+    {
+        S_ARR(qp->cones.start_idx, qp->cones.num_cones, int);
+        S_ARR(qp->cones.v_dim, qp->cones.num_cones, int);
+        S_ARR(qp->cones.type, qp->cones.num_cones, cone_type_t);
+    }
+    int has_power_alpha = qp->cones.power_alpha != NULL;
+    S_COPY(has_power_alpha, int);
+    if (has_power_alpha)
+        S_ARR(qp->cones.power_alpha, qp->cones.num_cones, double);
+    int has_cone_fixed = qp->cones.is_fixed != NULL;
+    S_COPY(has_cone_fixed, int);
+    if (has_cone_fixed)
+        S_ARR(qp->cones.is_fixed, qp->num_variables, char);
 
     S_ARR(qp->objective_vector, qp->num_variables, double);
     S_ARR(qp->variable_lower_bound, qp->num_variables, double);
@@ -587,6 +912,22 @@ qp_problem_t *deserialize_qp_problem_from_ptr(const char **ptr_ref)
     D_VAL(qp->objective_sparse_matrix_num_nonzeros, int);
     D_VAL(qp->objective_lowrank_matrix_num_nonzeros, int);
     D_VAL(qp->objective_constant, double);
+    D_VAL(qp->num_original_variables, int);
+    D_VAL(qp->cones.num_cones, int);
+    if (qp->cones.num_cones > 0)
+    {
+        D_ARR(qp->cones.start_idx, qp->cones.num_cones, int);
+        D_ARR(qp->cones.v_dim, qp->cones.num_cones, int);
+        D_ARR(qp->cones.type, qp->cones.num_cones, cone_type_t);
+    }
+    int has_power_alpha;
+    D_VAL(has_power_alpha, int);
+    if (has_power_alpha)
+        D_ARR(qp->cones.power_alpha, qp->cones.num_cones, double);
+    int has_cone_fixed;
+    D_VAL(has_cone_fixed, int);
+    if (has_cone_fixed)
+        D_ARR(qp->cones.is_fixed, qp->num_variables, char);
 
     D_ARR(qp->objective_vector, qp->num_variables, double);
     D_ARR(qp->variable_lower_bound, qp->num_variables, double);
@@ -803,6 +1144,7 @@ void distribute_data_bcast_then_partition(const qp_problem_t *working_problem,
     }
 
     grid_context->global_num_variables = current_working_problem->num_variables;
+    configure_partition_metadata(current_working_problem, grid_context, params);
 
     {
         char *buf = NULL;
@@ -828,6 +1170,7 @@ void distribute_data_bcast_then_partition(const qp_problem_t *working_problem,
         partition_rescale_info(current_rescale_info, grid_context, params->partition_method, &real_n_start, NULL);
     *out_local_qp = partition_qp_problem(current_working_problem, grid_context, params->partition_method, NULL, NULL);
     grid_context->n_start = real_n_start;
+    grid_context->n_end = real_n_start + (*out_local_qp)->num_variables;
 
     if (grid_context->rank_global != 0)
     {

@@ -25,6 +25,10 @@ limitations under the License.
 #include "solver_state.h"
 #include "spmv_backend.h"
 #include "utils.h"
+#ifdef PDHCG_COMPILE_DISTRIBUTED
+#include "distributed_conic.h"
+#include "distributed_types.h"
+#endif
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusparse.h>
@@ -32,10 +36,6 @@ limitations under the License.
 #include <stdbool.h>
 #include <stdio.h>
 #include <time.h>
-
-#ifdef PDHCG_COMPILE_DISTRIBUTED
-#include "distributed_types.h"
-#endif
 
 typedef void (*cone_proj_launcher_t)(double *primal,
                                      const double *var_rescale,
@@ -74,6 +74,20 @@ static void launch_rotated_warp_proj(
     int b = (n * 32 + t - 1) / t;
     project_rotated_soc_warp_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
 }
+static void launch_rotated_grid_proj(
+    double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
+{
+    (void)vr;
+    (void)pa;
+    (void)isf;
+    int t = THREADS_PER_BLOCK;
+    int blocks_per_cone = PDHCG_LARGE_CONE_BLOCKS_PER_CONE;
+    int b = n * blocks_per_cone;
+    CUDA_CHECK(cudaMemsetAsync(ws, 0, (size_t)n * sizeof(double)));
+    project_rotated_soc_grid_reduce_kernel<<<b, t>>>(p, ws, si, vd, n, blocks_per_cone);
+    project_rotated_soc_grid_finalize_kernel<<<(n + t - 1) / t, t>>>(p, ws, si, vd, n);
+    project_rotated_soc_grid_apply_kernel<<<b, t>>>(p, ws, si, vd, n, blocks_per_cone);
+}
 static void launch_standard_thread_proj(
     double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
 {
@@ -89,6 +103,20 @@ static void launch_standard_warp_proj(
     int t = THREADS_PER_BLOCK;
     int b = (n * 32 + t - 1) / t;
     project_standard_soc_warp_kernel<<<b, t>>>(p, vr, ws, si, vd, isf, n);
+}
+static void launch_standard_grid_proj(
+    double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
+{
+    (void)vr;
+    (void)pa;
+    (void)isf;
+    int t = THREADS_PER_BLOCK;
+    int blocks_per_cone = PDHCG_LARGE_CONE_BLOCKS_PER_CONE;
+    int b = n * blocks_per_cone;
+    CUDA_CHECK(cudaMemsetAsync(ws, 0, (size_t)n * sizeof(double)));
+    project_standard_soc_grid_reduce_kernel<<<b, t>>>(p, ws, si, vd, n, blocks_per_cone);
+    project_standard_soc_grid_finalize_kernel<<<(n + t - 1) / t, t>>>(p, ws, si, vd, n);
+    project_standard_soc_grid_apply_kernel<<<b, t>>>(p, ws, si, vd, n, blocks_per_cone);
 }
 static void launch_exp_thread_proj(
     double *p, const double *vr, double *ws, const int *si, const int *vd, const double *pa, const char *isf, int n)
@@ -111,11 +139,13 @@ static const cone_proj_launcher_t proj_launch_table[NUM_CONE_TYPES][NUM_PROJ_MET
         {
             [PROJ_METHOD_THREAD] = launch_rotated_thread_proj,
             [PROJ_METHOD_WARP] = launch_rotated_warp_proj,
+            [PROJ_METHOD_GRID] = launch_rotated_grid_proj,
         },
     [CONE_STANDARD_SOC] =
         {
             [PROJ_METHOD_THREAD] = launch_standard_thread_proj,
             [PROJ_METHOD_WARP] = launch_standard_warp_proj,
+            [PROJ_METHOD_GRID] = launch_standard_grid_proj,
         },
     [CONE_EXPONENTIAL] =
         {
@@ -163,6 +193,29 @@ static void launch_rotated_warp_dual(double *dr,
     int b = (n * 32 + t - 1) / t;
     compute_cone_dual_residual_warp_kernel<<<b, t>>>(dr, obj, dp, vr, ps, ws, si, vd, isf, n);
 }
+static void launch_rotated_grid_dual(double *dr,
+                                     const double *obj,
+                                     const double *dp,
+                                     const double *vr,
+                                     const double *ps,
+                                     double *ws,
+                                     const int *si,
+                                     const int *vd,
+                                     const double *pa,
+                                     const char *isf,
+                                     int n)
+{
+    (void)ps;
+    (void)pa;
+    (void)isf;
+    int t = THREADS_PER_BLOCK;
+    int blocks_per_cone = PDHCG_LARGE_CONE_BLOCKS_PER_CONE;
+    int b = n * blocks_per_cone;
+    CUDA_CHECK(cudaMemsetAsync(ws, 0, (size_t)n * sizeof(double)));
+    compute_cone_dual_residual_grid_reduce_kernel<<<b, t>>>(obj, dp, ws, si, vd, n, blocks_per_cone);
+    compute_cone_dual_residual_grid_finalize_kernel<<<(n + t - 1) / t, t>>>(dr, obj, dp, vr, ws, si, vd, n);
+    compute_cone_dual_residual_grid_apply_kernel<<<b, t>>>(dr, obj, dp, vr, ws, si, vd, n, blocks_per_cone);
+}
 static void launch_standard_thread_dual(double *dr,
                                         const double *obj,
                                         const double *dp,
@@ -196,6 +249,29 @@ static void launch_standard_warp_dual(double *dr,
     int t = THREADS_PER_BLOCK;
     int b = (n * 32 + t - 1) / t;
     compute_cone_dual_residual_standard_warp_kernel<<<b, t>>>(dr, obj, dp, vr, ps, ws, si, vd, isf, n);
+}
+static void launch_standard_grid_dual(double *dr,
+                                      const double *obj,
+                                      const double *dp,
+                                      const double *vr,
+                                      const double *ps,
+                                      double *ws,
+                                      const int *si,
+                                      const int *vd,
+                                      const double *pa,
+                                      const char *isf,
+                                      int n)
+{
+    (void)ps;
+    (void)pa;
+    (void)isf;
+    int t = THREADS_PER_BLOCK;
+    int blocks_per_cone = PDHCG_LARGE_CONE_BLOCKS_PER_CONE;
+    int b = n * blocks_per_cone;
+    CUDA_CHECK(cudaMemsetAsync(ws, 0, (size_t)n * sizeof(double)));
+    compute_cone_dual_residual_standard_grid_reduce_kernel<<<b, t>>>(obj, dp, ws, si, vd, n, blocks_per_cone);
+    compute_cone_dual_residual_standard_grid_finalize_kernel<<<(n + t - 1) / t, t>>>(dr, obj, dp, vr, ws, si, vd, n);
+    compute_cone_dual_residual_standard_grid_apply_kernel<<<b, t>>>(dr, obj, dp, vr, ws, si, vd, n, blocks_per_cone);
 }
 static void launch_exp_thread_dual(double *dr,
                                    const double *obj,
@@ -346,11 +422,13 @@ static const cone_dual_res_launcher_t dual_res_launch_table[NUM_CONE_TYPES][NUM_
         {
             [PROJ_METHOD_THREAD] = launch_rotated_thread_dual,
             [PROJ_METHOD_WARP] = launch_rotated_warp_dual,
+            [PROJ_METHOD_GRID] = launch_rotated_grid_dual,
         },
     [CONE_STANDARD_SOC] =
         {
             [PROJ_METHOD_THREAD] = launch_standard_thread_dual,
             [PROJ_METHOD_WARP] = launch_standard_warp_dual,
+            [PROJ_METHOD_GRID] = launch_standard_grid_dual,
         },
     [CONE_EXPONENTIAL] =
         {
@@ -385,6 +463,14 @@ static void dispatch_cone_projection(pdhg_solver_state_t *state, double *primal_
                                                 state->cone_is_fixed,
                                                 bk->count);
     }
+#ifdef PDHCG_COMPILE_DISTRIBUTED
+    project_distributed_cones(state, primal_solution);
+#endif
+}
+
+void project_primal_onto_cones(pdhg_solver_state_t *state, double *primal_solution)
+{
+    dispatch_cone_projection(state, primal_solution);
 }
 
 static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state,
@@ -417,6 +503,10 @@ static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state,
                                                                state->cone_is_fixed,
                                                                bk->count);
     }
+#ifdef PDHCG_COMPILE_DISTRIBUTED
+    project_distributed_cones(state, pdhg_primal);
+    recompute_distributed_cone_reflected(state, reflected_primal, pdhg_primal, current_primal);
+#endif
 }
 
 static void dispatch_cone_dual_residual(pdhg_solver_state_t *state, const double *effective_obj)
@@ -436,6 +526,91 @@ static void dispatch_cone_dual_residual(pdhg_solver_state_t *state, const double
                                                     pa,
                                                     state->cone_is_fixed,
                                                     bk->count);
+    }
+#ifdef PDHCG_COMPILE_DISTRIBUTED
+    compute_distributed_cone_dual_residual(state, effective_obj);
+#endif
+}
+
+static void recompute_reflected_at_cones(pdhg_solver_state_t *state)
+{
+    int threads = THREADS_PER_BLOCK;
+    for (int b = 0; b < state->num_cone_buckets; ++b)
+    {
+        const cone_bucket_t *bk = &state->cone_buckets[b];
+        if (bk->method == PROJ_METHOD_GRID)
+        {
+            int blocks_per_cone = PDHCG_LARGE_CONE_BLOCKS_PER_CONE;
+            recompute_reflected_at_cone_grid_kernel<<<bk->count * blocks_per_cone, threads>>>(
+                state->reflected_primal_solution,
+                state->pdhg_primal_solution,
+                state->current_primal_solution,
+                state->cone_start_idx + bk->offset,
+                state->cone_v_dim + bk->offset,
+                bk->count,
+                blocks_per_cone);
+        }
+        else if (bk->method == PROJ_METHOD_WARP)
+        {
+            int blocks = (bk->count * 32 + threads - 1) / threads;
+            recompute_reflected_at_cone_warp_kernel<<<blocks, threads>>>(state->reflected_primal_solution,
+                                                                         state->pdhg_primal_solution,
+                                                                         state->current_primal_solution,
+                                                                         state->cone_start_idx + bk->offset,
+                                                                         state->cone_v_dim + bk->offset,
+                                                                         bk->count);
+        }
+        else
+        {
+            int blocks = (bk->count + threads - 1) / threads;
+            recompute_reflected_at_cone_kernel<<<blocks, threads>>>(state->reflected_primal_solution,
+                                                                    state->pdhg_primal_solution,
+                                                                    state->current_primal_solution,
+                                                                    state->cone_start_idx + bk->offset,
+                                                                    state->cone_v_dim + bk->offset,
+                                                                    bk->count);
+        }
+    }
+}
+
+static void set_cone_dual_slack(pdhg_solver_state_t *state, const double *effective_obj)
+{
+    int threads = THREADS_PER_BLOCK;
+    for (int b = 0; b < state->num_cone_buckets; ++b)
+    {
+        const cone_bucket_t *bk = &state->cone_buckets[b];
+        if (bk->method == PROJ_METHOD_GRID)
+        {
+            int blocks_per_cone = PDHCG_LARGE_CONE_BLOCKS_PER_CONE;
+            set_cone_dual_slack_grid_kernel<<<bk->count * blocks_per_cone, threads>>>(state->dual_slack,
+                                                                                      effective_obj,
+                                                                                      state->dual_product,
+                                                                                      state->cone_start_idx +
+                                                                                          bk->offset,
+                                                                                      state->cone_v_dim + bk->offset,
+                                                                                      bk->count,
+                                                                                      blocks_per_cone);
+        }
+        else if (bk->method == PROJ_METHOD_WARP)
+        {
+            int blocks = (bk->count * 32 + threads - 1) / threads;
+            set_cone_dual_slack_warp_kernel<<<blocks, threads>>>(state->dual_slack,
+                                                                 effective_obj,
+                                                                 state->dual_product,
+                                                                 state->cone_start_idx + bk->offset,
+                                                                 state->cone_v_dim + bk->offset,
+                                                                 bk->count);
+        }
+        else
+        {
+            int blocks = (bk->count + threads - 1) / threads;
+            set_cone_dual_slack_kernel<<<blocks, threads>>>(state->dual_slack,
+                                                            effective_obj,
+                                                            state->dual_product,
+                                                            state->cone_start_idx + bk->offset,
+                                                            state->cone_v_dim + bk->offset,
+                                                            bk->count);
+        }
     }
 }
 
@@ -941,14 +1116,11 @@ void pdhg_update(pdhg_solver_state_t *state)
         else
         {
             dispatch_cone_projection(state, state->pdhg_primal_solution);
-            int threads = THREADS_PER_BLOCK;
-            int all_blocks = (state->num_cone_blocks + threads - 1) / threads;
-            recompute_reflected_at_cone_kernel<<<all_blocks, threads>>>(state->reflected_primal_solution,
-                                                                        state->pdhg_primal_solution,
-                                                                        state->current_primal_solution,
-                                                                        state->cone_start_idx,
-                                                                        state->cone_v_dim,
-                                                                        state->num_cone_blocks);
+            recompute_reflected_at_cones(state);
+#ifdef PDHCG_COMPILE_DISTRIBUTED
+            recompute_distributed_cone_reflected(
+                state, state->reflected_primal_solution, state->pdhg_primal_solution, state->current_primal_solution);
+#endif
         }
     }
 
@@ -963,6 +1135,9 @@ void pdhg_update(pdhg_solver_state_t *state)
 
     pdhcg_all_reduce_array(
         state->grid_context, state->primal_product, state->num_constraints, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
+
+    if (state->num_constraints == 0)
+        return;
 
     if (state->is_this_major_iteration || ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0)
     {
@@ -1092,7 +1267,13 @@ void perform_restart(pdhg_solver_state_t *state, const pdhg_parameters_t *params
 
 void initialize_step_size_and_primal_weight(pdhg_solver_state_t *state, const pdhg_parameters_t *params)
 {
-    if (state->constraint_matrix->num_nonzeros == 0)
+    bool constraint_matrix_is_zero = state->constraint_matrix->num_nonzeros == 0;
+#ifdef PDHCG_COMPILE_DISTRIBUTED
+    double has_nonzero_tile = constraint_matrix_is_zero ? 0.0 : 1.0;
+    pdhcg_all_reduce_scalar(state->grid_context, &has_nonzero_tile, PDHCG_OP_MAX, PDHCG_SCOPE_GLOBAL, false);
+    constraint_matrix_is_zero = has_nonzero_tile == 0.0;
+#endif
+    if (constraint_matrix_is_zero)
     {
         state->step_size = 1.0;
     }
@@ -1267,7 +1448,6 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
             dispatch_cone_dual_residual(state, cone_dual_residual_effective_obj(state));
     }
-
     if (optimality_norm == NORM_TYPE_L_INF)
     {
         state->absolute_primal_residual =
@@ -1323,14 +1503,11 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
 
     if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
     {
-        int threads = THREADS_PER_BLOCK;
-        int blocks = (state->num_cone_blocks + threads - 1) / threads;
-        set_cone_dual_slack_kernel<<<blocks, threads>>>(state->dual_slack,
-                                                        cone_dual_residual_effective_obj(state),
-                                                        state->dual_product,
-                                                        state->cone_start_idx,
-                                                        state->cone_v_dim,
-                                                        state->num_cone_blocks);
+        const double *effective_obj = cone_dual_residual_effective_obj(state);
+        set_cone_dual_slack(state, effective_obj);
+#ifdef PDHCG_COMPILE_DISTRIBUTED
+        set_distributed_cone_dual_slack(state, state->dual_slack, effective_obj, state->dual_product);
+#endif
     }
 
     double base_dual_objective;

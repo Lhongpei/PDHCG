@@ -124,7 +124,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
             (state->total_count % get_print_frequency(state->total_count) == 0))
         {
             compute_residual(state, params->optimality_norm);
-            if (state->num_cone_blocks == 0 && state->is_this_major_iteration &&
+            if (state->var_set_type == VAR_SET_BOX_ONLY && state->is_this_major_iteration &&
                 state->total_count < 3 * params->termination_evaluation_frequency)
             {
                 compute_infeasibility_information(state);

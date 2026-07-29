@@ -47,6 +47,11 @@ extern "C"
                                                     const char *__restrict__ is_fixed,
                                                     int n);
 
+    __global__ void project_primal_onto_bounds_kernel(double *__restrict__ primal_solution,
+                                                      const double *__restrict__ variable_lower_bound,
+                                                      const double *__restrict__ variable_upper_bound,
+                                                      int num_variables);
+
     // ======================================================================
     // Advanced Metrics & Reduced Costs
     // ======================================================================
@@ -378,6 +383,26 @@ extern "C"
                                                     const char *__restrict__ is_fixed,
                                                     int num_blocks);
 
+    __global__ void project_rotated_soc_grid_reduce_kernel(double *__restrict__ primal_solution,
+                                                           double *__restrict__ workspace,
+                                                           const int *__restrict__ start_idx,
+                                                           const int *__restrict__ v_dim,
+                                                           int num_cones,
+                                                           int blocks_per_cone);
+
+    __global__ void project_rotated_soc_grid_finalize_kernel(double *__restrict__ primal_solution,
+                                                             double *__restrict__ workspace,
+                                                             const int *__restrict__ start_idx,
+                                                             const int *__restrict__ v_dim,
+                                                             int num_cones);
+
+    __global__ void project_rotated_soc_grid_apply_kernel(double *__restrict__ primal_solution,
+                                                          const double *__restrict__ workspace,
+                                                          const int *__restrict__ start_idx,
+                                                          const int *__restrict__ v_dim,
+                                                          int num_cones,
+                                                          int blocks_per_cone);
+
     __global__ void project_standard_soc_kernel(double *__restrict__ primal_solution,
                                                 const double *__restrict__ variable_rescaling,
                                                 double *__restrict__ warm_start,
@@ -393,6 +418,26 @@ extern "C"
                                                      const int *__restrict__ v_dim,
                                                      const char *__restrict__ is_fixed,
                                                      int num_blocks);
+
+    __global__ void project_standard_soc_grid_reduce_kernel(double *__restrict__ primal_solution,
+                                                            double *__restrict__ workspace,
+                                                            const int *__restrict__ start_idx,
+                                                            const int *__restrict__ v_dim,
+                                                            int num_cones,
+                                                            int blocks_per_cone);
+
+    __global__ void project_standard_soc_grid_finalize_kernel(double *__restrict__ primal_solution,
+                                                              double *__restrict__ workspace,
+                                                              const int *__restrict__ start_idx,
+                                                              const int *__restrict__ v_dim,
+                                                              int num_cones);
+
+    __global__ void project_standard_soc_grid_apply_kernel(double *__restrict__ primal_solution,
+                                                           const double *__restrict__ workspace,
+                                                           const int *__restrict__ start_idx,
+                                                           const int *__restrict__ v_dim,
+                                                           int num_cones,
+                                                           int blocks_per_cone);
 
     __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_residual,
                                                       const double *__restrict__ objective_vector,
@@ -416,6 +461,33 @@ extern "C"
                                                            const char *__restrict__ is_fixed,
                                                            int num_blocks);
 
+    __global__ void compute_cone_dual_residual_grid_reduce_kernel(const double *__restrict__ objective_vector,
+                                                                  const double *__restrict__ dual_product,
+                                                                  double *__restrict__ workspace,
+                                                                  const int *__restrict__ start_idx,
+                                                                  const int *__restrict__ v_dim,
+                                                                  int num_cones,
+                                                                  int blocks_per_cone);
+
+    __global__ void compute_cone_dual_residual_grid_finalize_kernel(double *__restrict__ dual_residual,
+                                                                    const double *__restrict__ objective_vector,
+                                                                    const double *__restrict__ dual_product,
+                                                                    const double *__restrict__ variable_rescaling,
+                                                                    double *__restrict__ workspace,
+                                                                    const int *__restrict__ start_idx,
+                                                                    const int *__restrict__ v_dim,
+                                                                    int num_cones);
+
+    __global__ void compute_cone_dual_residual_grid_apply_kernel(double *__restrict__ dual_residual,
+                                                                 const double *__restrict__ objective_vector,
+                                                                 const double *__restrict__ dual_product,
+                                                                 const double *__restrict__ variable_rescaling,
+                                                                 const double *__restrict__ workspace,
+                                                                 const int *__restrict__ start_idx,
+                                                                 const int *__restrict__ v_dim,
+                                                                 int num_cones,
+                                                                 int blocks_per_cone);
+
     __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restrict__ dual_residual,
                                                                     const double *__restrict__ objective_vector,
                                                                     const double *__restrict__ dual_product,
@@ -426,6 +498,34 @@ extern "C"
                                                                     const int *__restrict__ v_dim,
                                                                     const char *__restrict__ is_fixed,
                                                                     int num_blocks);
+
+    __global__ void compute_cone_dual_residual_standard_grid_reduce_kernel(const double *__restrict__ objective_vector,
+                                                                           const double *__restrict__ dual_product,
+                                                                           double *__restrict__ workspace,
+                                                                           const int *__restrict__ start_idx,
+                                                                           const int *__restrict__ v_dim,
+                                                                           int num_cones,
+                                                                           int blocks_per_cone);
+
+    __global__ void
+    compute_cone_dual_residual_standard_grid_finalize_kernel(double *__restrict__ dual_residual,
+                                                             const double *__restrict__ objective_vector,
+                                                             const double *__restrict__ dual_product,
+                                                             const double *__restrict__ variable_rescaling,
+                                                             double *__restrict__ workspace,
+                                                             const int *__restrict__ start_idx,
+                                                             const int *__restrict__ v_dim,
+                                                             int num_cones);
+
+    __global__ void compute_cone_dual_residual_standard_grid_apply_kernel(double *__restrict__ dual_residual,
+                                                                          const double *__restrict__ objective_vector,
+                                                                          const double *__restrict__ dual_product,
+                                                                          const double *__restrict__ variable_rescaling,
+                                                                          const double *__restrict__ workspace,
+                                                                          const int *__restrict__ start_idx,
+                                                                          const int *__restrict__ v_dim,
+                                                                          int num_cones,
+                                                                          int blocks_per_cone);
 
     __global__ void project_exp_cone_kernel(double *__restrict__ primal_solution,
                                             const double *__restrict__ variable_rescaling,
@@ -496,12 +596,42 @@ extern "C"
                                                const int *__restrict__ v_dim,
                                                int num_blocks);
 
+    __global__ void set_cone_dual_slack_warp_kernel(double *__restrict__ dual_slack,
+                                                    const double *__restrict__ objective_vector,
+                                                    const double *__restrict__ dual_product,
+                                                    const int *__restrict__ start_idx,
+                                                    const int *__restrict__ v_dim,
+                                                    int num_cones);
+
+    __global__ void set_cone_dual_slack_grid_kernel(double *__restrict__ dual_slack,
+                                                    const double *__restrict__ objective_vector,
+                                                    const double *__restrict__ dual_product,
+                                                    const int *__restrict__ start_idx,
+                                                    const int *__restrict__ v_dim,
+                                                    int num_cones,
+                                                    int blocks_per_cone);
+
     __global__ void recompute_reflected_at_cone_kernel(double *__restrict__ reflected_primal,
                                                        const double *__restrict__ pdhg_primal,
                                                        const double *__restrict__ current_primal,
                                                        const int *__restrict__ start_idx,
                                                        const int *__restrict__ v_dim,
                                                        int num_blocks);
+
+    __global__ void recompute_reflected_at_cone_warp_kernel(double *__restrict__ reflected_primal,
+                                                            const double *__restrict__ pdhg_primal,
+                                                            const double *__restrict__ current_primal,
+                                                            const int *__restrict__ start_idx,
+                                                            const int *__restrict__ v_dim,
+                                                            int num_cones);
+
+    __global__ void recompute_reflected_at_cone_grid_kernel(double *__restrict__ reflected_primal,
+                                                            const double *__restrict__ pdhg_primal,
+                                                            const double *__restrict__ current_primal,
+                                                            const int *__restrict__ start_idx,
+                                                            const int *__restrict__ v_dim,
+                                                            int num_cones,
+                                                            int blocks_per_cone);
 
     __global__ void project_rotated_soc_diag_q_kernel(double *__restrict__ pdhg_primal,
                                                       double *__restrict__ reflected_primal,

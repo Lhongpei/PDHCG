@@ -94,6 +94,8 @@ typedef struct
     int has_inner_loop;
 } inner_solver_t;
 
+struct distributed_cone_state_s;
+
 typedef enum
 {
     LP,
@@ -208,6 +210,8 @@ typedef struct
     double *bb_pdhg_snapshot;
     struct cone_bucket_s *cone_buckets;
     int num_cone_buckets;
+    int num_distributed_cone_blocks;
+    struct distributed_cone_state_s *distributed_cones;
     int num_original_variables;
 } pdhg_solver_state_t;
 
@@ -215,8 +219,12 @@ typedef enum
 {
     PROJ_METHOD_THREAD = 0,
     PROJ_METHOD_WARP = 1,
-    NUM_PROJ_METHODS = 2
+    PROJ_METHOD_GRID = 2,
+    NUM_PROJ_METHODS = 3
 } cone_proj_method_t;
+
+#define PDHCG_LARGE_CONE_MIN_VDIM 32768
+#define PDHCG_LARGE_CONE_BLOCKS_PER_CONE 128
 
 typedef struct cone_bucket_s
 {

@@ -209,8 +209,13 @@ const char *quad_obj_type_to_string(quad_obj_type_t type)
 
 bool optimality_criteria_met(const pdhg_solver_state_t *state, double rel_opt_tol, double rel_feas_tol)
 {
+#ifdef PDHCG_ABSOLUTE_ONLY_TERMINATION
+    return state->absolute_dual_residual < rel_feas_tol && state->absolute_primal_residual < rel_feas_tol &&
+        state->objective_gap < rel_opt_tol;
+#else
     return state->relative_dual_residual < rel_feas_tol && state->relative_primal_residual < rel_feas_tol &&
         state->relative_objective_gap < rel_opt_tol;
+#endif
 }
 
 bool primal_infeasibility_criteria_met(const pdhg_solver_state_t *state, double eps)

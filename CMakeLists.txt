@@ -52,6 +52,9 @@ option(PDHCG_BUILD_SHARED_LIB "Build the PDHCG shared library" ON)
 option(PDHCG_COMPILE_PREFOS "Download and use PreFOS for presolving" OFF)
 option(PDHCG_PREFOS_ENABLE_CUDA "Enable the PreFOS CUDA propagation backend" ON)
 option(PDHCG_COMPILE_DISTRIBUTED "Enable distributed computing with MPI" OFF)
+option(PDHCG_ABSOLUTE_ONLY_TERMINATION
+       "Use absolute residuals and objective gap for optimal termination"
+       OFF)
 
 # format: cmake_dependent_option(OPTION "docstring" DEFAULT_VALUE "DEPENDENCY_VARIABLE" FORCE_OFF_VALUE)
 cmake_dependent_option(PDHCG_BUILD_PYTHON "Build the PDHCG Python bindings" OFF
@@ -169,6 +172,10 @@ if(PDHCG_COMPILE_PREFOS AND TARGET PreFOS::PreFOS)
     endif()
 else()
     set(PDHCG_OPTIONAL_DEFINES "")
+endif()
+
+if(PDHCG_ABSOLUTE_ONLY_TERMINATION)
+    list(APPEND PDHCG_OPTIONAL_DEFINES PDHCG_ABSOLUTE_ONLY_TERMINATION)
 endif()
 
 if(PDHCG_COMPILE_DISTRIBUTED)
@@ -289,6 +296,7 @@ if(PDHCG_BUILD_TESTS)
         export_qcqp_socp
         inspect_qcqp_exportability
         qcqp_probe
+        solve_exported_qcqp_pdhcg
     )
 
     foreach(TEST_SRC ${TEST_SOURCES})
@@ -313,7 +321,12 @@ if(PDHCG_BUILD_TESTS)
 
         # Input-driven inspection/export tools are built but require explicit
         # command-line data, so they are not zero-argument CTest cases.
-        if(NOT TEST_NAME IN_LIST PDHCG_TEST_TOOLS)
+        if(TEST_NAME STREQUAL "test_distributed_conic" AND PDHCG_COMPILE_DISTRIBUTED)
+            add_test(NAME ${TEST_NAME}
+                     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                             $<TARGET_FILE:${TEST_NAME}> ${MPIEXEC_POSTFLAGS})
+            set_tests_properties(${TEST_NAME} PROPERTIES SKIP_RETURN_CODE 77 PROCESSORS 2 TIMEOUT 90)
+        elseif(NOT TEST_NAME IN_LIST PDHCG_TEST_TOOLS)
             add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
         endif()
 

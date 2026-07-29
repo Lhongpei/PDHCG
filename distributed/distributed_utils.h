@@ -36,6 +36,9 @@ extern "C"
         }                                                                                                              \
     } while (0)
     grid_context_t initialize_parallel_context(int P_row, int P_col);
+    void destroy_parallel_context(grid_context_t *grid);
+    void
+    configure_partition_metadata(const qp_problem_t *problem, grid_context_t *grid, const pdhg_parameters_t *params);
     rescale_info_t *partition_rescale_info(rescale_info_t *global_info,
                                            const grid_context_t *grid,
                                            partition_method_t method,

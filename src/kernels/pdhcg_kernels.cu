@@ -70,6 +70,18 @@ __global__ void restore_fixed_cone_slots_kernel(double *__restrict__ primal_solu
         primal_solution[i] = fixed_values[i];
 }
 
+__global__ void project_primal_onto_bounds_kernel(double *__restrict__ primal_solution,
+                                                  const double *__restrict__ variable_lower_bound,
+                                                  const double *__restrict__ variable_upper_bound,
+                                                  int num_variables)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_variables)
+    {
+        primal_solution[i] = fmax(variable_lower_bound[i], fmin(primal_solution[i], variable_upper_bound[i]));
+    }
+}
+
 __global__ void compute_lp_next_pdhg_primal_solution_kernel(const double *current_primal,
                                                             double *reflected_primal,
                                                             const double *dual_product,

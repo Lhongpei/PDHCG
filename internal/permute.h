@@ -43,6 +43,8 @@ extern "C"
     qp_problem_t *permute_problem_return_new(const qp_problem_t *qp, int *row_perm, int *col_perm);
 
     void generate_block_permutation(int n, int block_size, int *perm);
+    void generate_cone_aware_permutation(const qp_problem_t *qp, permute_method_t method, int block_size, int *perm);
+    bool validate_cone_permutation(const qp_problem_t *qp, const int *col_perm);
     void generate_random_permutation(int n, int *perm);
     void compute_inv_perm(int n, const int *perm, int *inv_perm);
     void permute_double_array(double *arr, int n, const int *perm);
