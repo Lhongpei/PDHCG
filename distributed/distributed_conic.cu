@@ -43,7 +43,7 @@ enum
     RES_D1 = 9
 };
 
-struct distributed_cone_state_s
+struct distributed_cone_split_s
 {
     int num_cones;
     int blocks_per_cone;
@@ -54,6 +54,7 @@ struct distributed_cone_state_s
     cone_type_t *type;
     unsigned char *fixed_mask;
     double *stats;
+    double *complementarity_residual;
 };
 
 static __global__ void collect_projection_stats_kernel(const double *__restrict__ primal,
@@ -317,6 +318,7 @@ static __global__ void collect_residual_stats_kernel(const double *__restrict__ 
 }
 
 static __global__ void apply_residual_kernel(double *__restrict__ dual_residual,
+                                             double *__restrict__ complementarity_residual,
                                              const double *__restrict__ effective_objective,
                                              const double *__restrict__ dual_product,
                                              const double *__restrict__ primal,
@@ -353,6 +355,7 @@ static __global__ void apply_residual_kernel(double *__restrict__ dual_residual,
     double endpoint_residual0 = 0.0;
     double endpoint_residual1 = 0.0;
     double lambda = 0.0;
+    double complementarity = 0.0;
     int mode = 0;
     int first_offset = (int)blockIdx.y * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.y;
@@ -363,10 +366,21 @@ static __global__ void apply_residual_kernel(double *__restrict__ dual_residual,
         bool aux1_fixed = (fixed & PDHCG_DIST_CONE_FIXED_AUX1) != 0;
         if (aux0_fixed && aux1_fixed)
         {
-            double dot = cone_stats[RES_DOT];
-            double n2 = cone_stats[RES_N2];
-            lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
-            mode = 1;
+            double w = x0 / d0;
+            double z = x1 / d1;
+            double radius2 = z * z - w * w;
+            if (radius2 > 0.0)
+            {
+                double dot = cone_stats[RES_DOT];
+                double n2 = cone_stats[RES_N2];
+                lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
+                complementarity = lambda * fmax(radius2 - cone_stats[RES_XN2], 0.0) / (2.0 * sqrt(radius2));
+                mode = 1;
+            }
+            else
+            {
+                mode = 4;
+            }
         }
         else if (!aux0_fixed && aux1_fixed)
         {
@@ -378,8 +392,8 @@ static __global__ void apply_residual_kernel(double *__restrict__ dual_residual,
             double radius2 = radius * radius;
             if (radius2 > 0.0)
             {
-                bool on_boundary = xnorm2 >= radius2 - 1e-10 * (1.0 + radius2);
-                lambda = (on_boundary && dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
+                lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
+                complementarity = lambda * fmax(radius2 - xnorm2, 0.0) / (2.0 * sqrt(radius2));
                 mode = 2;
             }
         }
@@ -417,10 +431,21 @@ static __global__ void apply_residual_kernel(double *__restrict__ dual_residual,
         bool both_fixed = fixed == (PDHCG_DIST_CONE_FIXED_AUX0 | PDHCG_DIST_CONE_FIXED_AUX1);
         if (both_fixed)
         {
-            double dot = cone_stats[RES_DOT];
-            double n2 = cone_stats[RES_N2];
-            lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
-            mode = 1;
+            double s = x0 / d0;
+            double t = x1 / d1;
+            double radius2 = 2.0 * s * t;
+            if (radius2 > 0.0)
+            {
+                double dot = cone_stats[RES_DOT];
+                double n2 = cone_stats[RES_N2];
+                lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
+                complementarity = lambda * fmax(radius2 - cone_stats[RES_XN2], 0.0) / (2.0 * sqrt(radius2));
+                mode = 1;
+            }
+            else
+            {
+                mode = 4;
+            }
         }
         else
         {
@@ -456,6 +481,9 @@ static __global__ void apply_residual_kernel(double *__restrict__ dual_residual,
         }
     }
 
+    if (first_offset == 0)
+        complementarity_residual[cone] = complementarity;
+
     for (int offset = first_offset; offset < count; offset += stride)
     {
         int relative = first + offset;
@@ -467,8 +495,11 @@ static __global__ void apply_residual_kernel(double *__restrict__ dual_residual,
             if (mode == 1 || mode == 2)
             {
                 double normal = primal[index] / (d * d);
-                dual_residual[index] = (r + lambda * normal) * d;
+                double residual = (r + lambda * normal) * d;
+                dual_residual[index] = residual;
             }
+            else if (mode == 4)
+                dual_residual[index] = 0.0;
             else
                 dual_residual[index] = r * vector_factor * d;
         }
@@ -533,19 +564,18 @@ static void copy_int_array(int **device, const int *host, int count)
     CUDA_CHECK(cudaMemcpy(*device, host, (size_t)count * sizeof(int), cudaMemcpyHostToDevice));
 }
 
-void initialize_distributed_cones(pdhg_solver_state_t *state,
-                                  const qp_problem_t *working_problem,
-                                  const rescale_info_t *rescale_info)
+void initialize_split_cones(pdhg_solver_state_t *state,
+                            const qp_problem_t *working_problem,
+                            const rescale_info_t *rescale_info)
 {
-    state->num_distributed_cone_blocks = 0;
-    state->distributed_cones = NULL;
+    state->cones.split = NULL;
     if (!state->grid_context || state->grid_context->split_cones.num_cones <= 0)
         return;
 
     const distributed_cone_partition_t *partition = &state->grid_context->split_cones;
     int K = partition->num_cones;
-    distributed_cone_state_s *cones = (distributed_cone_state_s *)safe_calloc(1, sizeof(distributed_cone_state_s));
-    cones->num_cones = K;
+    distributed_cone_split_t *split = (distributed_cone_split_t *)safe_calloc(1, sizeof(distributed_cone_split_t));
+    split->num_cones = K;
     int max_local_count = 0;
     for (int cone = 0; cone < K; ++cone)
         if (partition->local_count[cone] > max_local_count)
@@ -562,17 +592,19 @@ void initialize_distributed_cones(pdhg_solver_state_t *state,
         block_budget = 1;
     if (block_budget > 64)
         block_budget = 64;
-    cones->blocks_per_cone = desired_blocks < block_budget ? desired_blocks : block_budget;
-    copy_int_array(&cones->local_start, partition->local_start, K);
-    copy_int_array(&cones->local_first, partition->local_first, K);
-    copy_int_array(&cones->local_count, partition->local_count, K);
-    copy_int_array(&cones->v_dim, partition->v_dim, K);
-    CUDA_CHECK(cudaMalloc(&cones->type, (size_t)K * sizeof(cone_type_t)));
-    CUDA_CHECK(cudaMemcpy(cones->type, partition->type, (size_t)K * sizeof(cone_type_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMalloc(&cones->fixed_mask, (size_t)K * sizeof(unsigned char)));
+    split->blocks_per_cone = desired_blocks < block_budget ? desired_blocks : block_budget;
+    copy_int_array(&split->local_start, partition->local_start, K);
+    copy_int_array(&split->local_first, partition->local_first, K);
+    copy_int_array(&split->local_count, partition->local_count, K);
+    copy_int_array(&split->v_dim, partition->v_dim, K);
+    CUDA_CHECK(cudaMalloc(&split->type, (size_t)K * sizeof(cone_type_t)));
+    CUDA_CHECK(cudaMemcpy(split->type, partition->type, (size_t)K * sizeof(cone_type_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&split->fixed_mask, (size_t)K * sizeof(unsigned char)));
     CUDA_CHECK(cudaMemcpy(
-        cones->fixed_mask, partition->fixed_mask, (size_t)K * sizeof(unsigned char), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMalloc(&cones->stats, (size_t)K * RESIDUAL_STATS * sizeof(double)));
+        split->fixed_mask, partition->fixed_mask, (size_t)K * sizeof(unsigned char), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&split->stats, (size_t)K * RESIDUAL_STATS * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&split->complementarity_residual, (size_t)K * sizeof(double)));
+    CUDA_CHECK(cudaMemset(split->complementarity_residual, 0, (size_t)K * sizeof(double)));
 
     double *local_min = (double *)malloc((size_t)K * sizeof(double));
     double *local_max = (double *)malloc((size_t)K * sizeof(double));
@@ -665,111 +697,127 @@ void initialize_distributed_cones(pdhg_solver_state_t *state,
     }
 
     (void)working_problem;
-    state->distributed_cones = cones;
-    state->num_distributed_cone_blocks = K;
+    state->cones.split = split;
 }
 
-void free_distributed_cones(pdhg_solver_state_t *state)
+void free_split_cones(pdhg_solver_state_t *state)
 {
-    distributed_cone_state_s *cones = state ? state->distributed_cones : NULL;
-    if (!cones)
+    distributed_cone_split_t *split = state ? state->cones.split : NULL;
+    if (!split)
         return;
-    CUDA_CHECK(cudaFree(cones->local_start));
-    CUDA_CHECK(cudaFree(cones->local_first));
-    CUDA_CHECK(cudaFree(cones->local_count));
-    CUDA_CHECK(cudaFree(cones->v_dim));
-    CUDA_CHECK(cudaFree(cones->type));
-    CUDA_CHECK(cudaFree(cones->fixed_mask));
-    CUDA_CHECK(cudaFree(cones->stats));
-    free(cones);
-    state->distributed_cones = NULL;
-    state->num_distributed_cone_blocks = 0;
+    CUDA_CHECK(cudaFree(split->local_start));
+    CUDA_CHECK(cudaFree(split->local_first));
+    CUDA_CHECK(cudaFree(split->local_count));
+    CUDA_CHECK(cudaFree(split->v_dim));
+    CUDA_CHECK(cudaFree(split->type));
+    CUDA_CHECK(cudaFree(split->fixed_mask));
+    CUDA_CHECK(cudaFree(split->stats));
+    CUDA_CHECK(cudaFree(split->complementarity_residual));
+    free(split);
+    state->cones.split = NULL;
 }
 
-void project_distributed_cones(pdhg_solver_state_t *state, double *primal_solution)
+void project_split_cones(pdhg_solver_state_t *state, double *primal_solution)
 {
-    distributed_cone_state_s *cones = state->distributed_cones;
-    if (!cones || cones->num_cones <= 0)
+    distributed_cone_split_t *split = state->cones.split;
+    if (!split || split->num_cones <= 0)
         return;
-    int K = cones->num_cones;
-    dim3 grid((unsigned int)K, (unsigned int)cones->blocks_per_cone);
-    CUDA_CHECK(cudaMemset(cones->stats, 0, (size_t)K * PROJECTION_STATS * sizeof(double)));
+    int K = split->num_cones;
+    dim3 grid((unsigned int)K, (unsigned int)split->blocks_per_cone);
+    CUDA_CHECK(cudaMemset(split->stats, 0, (size_t)K * PROJECTION_STATS * sizeof(double)));
     collect_projection_stats_kernel<<<grid, DIST_CONE_THREADS>>>(
-        primal_solution, cones->local_start, cones->local_first, cones->local_count, cones->v_dim, cones->stats, K);
+        primal_solution, split->local_start, split->local_first, split->local_count, split->v_dim, split->stats, K);
     CUDA_CHECK(cudaGetLastError());
-    pdhcg_all_reduce_array(state->grid_context, cones->stats, K * PROJECTION_STATS, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
+    pdhcg_all_reduce_array(state->grid_context, split->stats, K * PROJECTION_STATS, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
     apply_projection_kernel<<<grid, DIST_CONE_THREADS>>>(primal_solution,
-                                                         cones->local_start,
-                                                         cones->local_first,
-                                                         cones->local_count,
-                                                         cones->v_dim,
-                                                         cones->type,
-                                                         cones->fixed_mask,
-                                                         cones->stats,
+                                                         split->local_start,
+                                                         split->local_first,
+                                                         split->local_count,
+                                                         split->v_dim,
+                                                         split->type,
+                                                         split->fixed_mask,
+                                                         split->stats,
                                                          K);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void recompute_distributed_cone_reflected(pdhg_solver_state_t *state,
-                                          double *reflected_primal,
-                                          const double *pdhg_primal,
-                                          const double *current_primal)
+void recompute_split_cone_reflected(pdhg_solver_state_t *state,
+                                    double *reflected_primal,
+                                    const double *pdhg_primal,
+                                    const double *current_primal)
 {
-    distributed_cone_state_s *cones = state->distributed_cones;
-    if (!cones || cones->num_cones <= 0)
+    distributed_cone_split_t *split = state->cones.split;
+    if (!split || split->num_cones <= 0)
         return;
-    dim3 grid((unsigned int)cones->num_cones, (unsigned int)cones->blocks_per_cone);
+    dim3 grid((unsigned int)split->num_cones, (unsigned int)split->blocks_per_cone);
     recompute_reflected_kernel<<<grid, DIST_CONE_THREADS>>>(
-        reflected_primal, pdhg_primal, current_primal, cones->local_start, cones->local_count, cones->num_cones);
+        reflected_primal, pdhg_primal, current_primal, split->local_start, split->local_count, split->num_cones);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void compute_distributed_cone_dual_residual(pdhg_solver_state_t *state, const double *effective_objective)
+void compute_split_cone_dual_residual(pdhg_solver_state_t *state, const double *effective_objective)
 {
-    distributed_cone_state_s *cones = state->distributed_cones;
-    if (!cones || cones->num_cones <= 0)
+    distributed_cone_split_t *split = state->cones.split;
+    if (!split || split->num_cones <= 0)
         return;
-    int K = cones->num_cones;
-    dim3 grid((unsigned int)K, (unsigned int)cones->blocks_per_cone);
-    CUDA_CHECK(cudaMemset(cones->stats, 0, (size_t)K * RESIDUAL_STATS * sizeof(double)));
+    int K = split->num_cones;
+    dim3 grid((unsigned int)K, (unsigned int)split->blocks_per_cone);
+    CUDA_CHECK(cudaMemset(split->stats, 0, (size_t)K * RESIDUAL_STATS * sizeof(double)));
+    CUDA_CHECK(cudaMemset(split->complementarity_residual, 0, (size_t)K * sizeof(double)));
     collect_residual_stats_kernel<<<grid, DIST_CONE_THREADS>>>(effective_objective,
                                                                state->dual_product,
                                                                state->pdhg_primal_solution,
                                                                state->variable_rescaling,
-                                                               cones->local_start,
-                                                               cones->local_first,
-                                                               cones->local_count,
-                                                               cones->v_dim,
-                                                               cones->stats,
+                                                               split->local_start,
+                                                               split->local_first,
+                                                               split->local_count,
+                                                               split->v_dim,
+                                                               split->stats,
                                                                K);
     CUDA_CHECK(cudaGetLastError());
-    pdhcg_all_reduce_array(state->grid_context, cones->stats, K * RESIDUAL_STATS, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
+    pdhcg_all_reduce_array(state->grid_context, split->stats, K * RESIDUAL_STATS, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
     apply_residual_kernel<<<grid, DIST_CONE_THREADS>>>(state->dual_residual,
+                                                       split->complementarity_residual,
                                                        effective_objective,
                                                        state->dual_product,
                                                        state->pdhg_primal_solution,
                                                        state->variable_rescaling,
-                                                       cones->local_start,
-                                                       cones->local_first,
-                                                       cones->local_count,
-                                                       cones->v_dim,
-                                                       cones->type,
-                                                       cones->fixed_mask,
-                                                       cones->stats,
+                                                       split->local_start,
+                                                       split->local_first,
+                                                       split->local_count,
+                                                       split->v_dim,
+                                                       split->type,
+                                                       split->fixed_mask,
+                                                       split->stats,
                                                        K);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void set_distributed_cone_dual_slack(pdhg_solver_state_t *state,
-                                     double *dual_slack,
-                                     const double *effective_objective,
-                                     const double *dual_product)
+double get_split_cone_complementarity_norm(pdhg_solver_state_t *state, norm_type_t norm)
 {
-    distributed_cone_state_s *cones = state->distributed_cones;
-    if (!cones || cones->num_cones <= 0)
+    distributed_cone_split_t *split = state->cones.split;
+    if (!split || split->num_cones <= 0 || !state->grid_context || state->grid_context->coords[1] != 0)
+        return 0.0;
+
+    if (norm == NORM_TYPE_L_INF)
+        return get_vector_inf_norm(state->blas_handle, split->num_cones, split->complementarity_residual);
+
+    double residual_norm = 0.0;
+    CUBLAS_CHECK(
+        cublasDnrm2_v2_64(state->blas_handle, split->num_cones, split->complementarity_residual, 1, &residual_norm));
+    return residual_norm;
+}
+
+void set_split_cone_dual_slack(pdhg_solver_state_t *state,
+                               double *dual_slack,
+                               const double *effective_objective,
+                               const double *dual_product)
+{
+    distributed_cone_split_t *split = state->cones.split;
+    if (!split || split->num_cones <= 0)
         return;
-    dim3 grid((unsigned int)cones->num_cones, (unsigned int)cones->blocks_per_cone);
+    dim3 grid((unsigned int)split->num_cones, (unsigned int)split->blocks_per_cone);
     set_dual_slack_kernel<<<grid, DIST_CONE_THREADS>>>(
-        dual_slack, effective_objective, dual_product, cones->local_start, cones->local_count, cones->num_cones);
+        dual_slack, effective_objective, dual_product, split->local_start, split->local_count, split->num_cones);
     CUDA_CHECK(cudaGetLastError());
 }

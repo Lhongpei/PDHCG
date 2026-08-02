@@ -254,7 +254,7 @@ void check_termination_criteria(pdhg_solver_state_t *solver_state, const termina
     /* The current ray projection handles box recession directions only. Direct
        cones require cone/dual-cone membership checks before either certificate
        is valid. */
-    if (solver_state->num_cone_blocks == 0)
+    if (solver_state->var_set_type == VAR_SET_BOX_ONLY)
     {
         if (primal_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
         {

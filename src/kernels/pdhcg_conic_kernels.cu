@@ -16,7 +16,15 @@ limitations under the License.
 
 #include "pdhcg_kernels.cuh"
 #include <cuda_runtime.h>
+#include <float.h>
 #include <math.h>
+
+__device__ static inline double fixed_ball_complementarity_residual(double lambda, double radius2, double norm2)
+{
+    if (!(lambda > 0.0) || !(radius2 > 0.0))
+        return 0.0;
+    return lambda * fmax(radius2 - norm2, 0.0) / (2.0 * sqrt(radius2));
+}
 
 __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
                                            const double *__restrict__ variable_rescaling,
@@ -256,6 +264,7 @@ __global__ void project_rotated_soc_kernel(double *__restrict__ primal_solution,
 }
 
 __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_residual,
+                                                  double *__restrict__ complementarity_residual,
                                                   const double *__restrict__ objective_vector,
                                                   const double *__restrict__ dual_product,
                                                   const double *__restrict__ variable_rescaling,
@@ -279,32 +288,35 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
        r - proj_{N_K(v*)}(r); report it scaled by variable_rescaling like the LP-style kernel. */
     if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
     {
-        /* k==1 closed form: lambda absorbs r iff r and v have opposite signs (inward gradient). */
-        if (k == 1)
+        double d_s = variable_rescaling[start + k];
+        double d_t = variable_rescaling[start + k + 1];
+        double s = primal_solution[start + k];
+        double t = primal_solution[start + k + 1];
+        double radius2 = 2.0 * (s / d_s) * (t / d_t);
+        if (!(radius2 > 0.0))
         {
-            int idx = start;
-            double r = objective_vector[idx] - dual_product[idx];
-            double v = primal_solution[idx];
-            double d_0 = variable_rescaling[idx];
-            dual_residual[idx] = (r * v >= 0.0) ? r * d_0 : 0.0;
-            dual_residual[start + 1] = 0.0;
-            dual_residual[start + 2] = 0.0;
+            for (int m = 0; m < k; ++m)
+                dual_residual[start + m] = 0.0;
+            dual_residual[start + k] = 0.0;
+            dual_residual[start + k + 1] = 0.0;
             return;
         }
-        /* KKT on v: r_v + lambda * n = 0 with lambda >= 0, n = outward normal (v / d^2).
-           Choose lambda = max(0, -r . n / n . n); residual = r + lambda * n; scale by d.
-           Fused single pass over k slots (was two; redundant reads removed). */
-        double dot = 0.0, n2 = 0.0;
+
+        /* KKT for h(v) = 0.5 (||v/d||^2 - R^2) <= 0. */
+        double norm2 = 0.0, dot = 0.0, n2 = 0.0;
         for (int m = 0; m < k; ++m)
         {
             int idx = start + m;
             double d_m = variable_rescaling[idx];
+            double scaled_v = primal_solution[idx] / d_m;
             double n_m = primal_solution[idx] / (d_m * d_m);
             double r = objective_vector[idx] - dual_product[idx];
+            norm2 += scaled_v * scaled_v;
             dot += r * n_m;
             n2 += n_m * n_m;
         }
         double lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
+        double complementarity = fixed_ball_complementarity_residual(lambda, radius2, norm2);
         for (int m = 0; m < k; ++m)
         {
             int idx = start + m;
@@ -313,6 +325,7 @@ __global__ void compute_cone_dual_residual_kernel(double *__restrict__ dual_resi
             double r = objective_vector[idx] - dual_product[idx];
             dual_residual[idx] = (r + lambda * n_m) * d_m;
         }
+        complementarity_residual[blk] = complementarity;
         dual_residual[start + k] = 0.0;
         dual_residual[start + k + 1] = 0.0;
         return;
@@ -858,6 +871,7 @@ __global__ void project_standard_soc_kernel(double *__restrict__ primal_solution
 }
 
 __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ dual_residual,
+                                                           double *__restrict__ complementarity_residual,
                                                            const double *__restrict__ objective_vector,
                                                            const double *__restrict__ dual_product,
                                                            const double *__restrict__ variable_rescaling,
@@ -877,32 +891,47 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
     int w_off = start + k;
     int z_off = start + k + 1;
 
+    /* Validation only permits this section when the fixed w value is zero.
+       The reduced SOC stationarity is supplied by the projected-gradient mapping. */
+    if (is_fixed && is_fixed[w_off] && !is_fixed[z_off])
+    {
+        for (int m = 0; m < k + 2; ++m)
+            dual_residual[start + m] = 0.0;
+        return;
+    }
+
     /* Fast path: w, z pinned via is_fixed. SOC reduces to ball on v; dual residual for
        v projects onto ball's normal cone at v*; w, z slots have no dual condition. */
     if (is_fixed && is_fixed[w_off] && is_fixed[z_off])
     {
-        if (k == 1)
+        double d_w = variable_rescaling[w_off];
+        double d_z = variable_rescaling[z_off];
+        double w = primal_solution[w_off] / d_w;
+        double z = primal_solution[z_off] / d_z;
+        double radius2 = z * z - w * w;
+        if (!(radius2 > 0.0))
         {
-            int idx = start;
-            double r = objective_vector[idx] - dual_product[idx];
-            double v = primal_solution[idx];
-            double d_0 = variable_rescaling[idx];
-            dual_residual[idx] = (r * v >= 0.0) ? r * d_0 : 0.0;
+            for (int m = 0; m < k; ++m)
+                dual_residual[start + m] = 0.0;
             dual_residual[w_off] = 0.0;
             dual_residual[z_off] = 0.0;
             return;
         }
-        double dot = 0.0, n2 = 0.0;
+
+        double norm2 = 0.0, dot = 0.0, n2 = 0.0;
         for (int m = 0; m < k; ++m)
         {
             int idx = start + m;
             double d_m = variable_rescaling[idx];
+            double scaled_v = primal_solution[idx] / d_m;
             double n_m = primal_solution[idx] / (d_m * d_m);
             double r = objective_vector[idx] - dual_product[idx];
+            norm2 += scaled_v * scaled_v;
             dot += r * n_m;
             n2 += n_m * n_m;
         }
         double lambda = (dot < 0.0 && n2 > 0.0) ? -dot / n2 : 0.0;
+        double complementarity = fixed_ball_complementarity_residual(lambda, radius2, norm2);
         for (int m = 0; m < k; ++m)
         {
             int idx = start + m;
@@ -911,6 +940,7 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
             double r = objective_vector[idx] - dual_product[idx];
             dual_residual[idx] = (r + lambda * n_m) * d_m;
         }
+        complementarity_residual[blk] = complementarity;
         dual_residual[w_off] = 0.0;
         dual_residual[z_off] = 0.0;
         return;
@@ -942,8 +972,8 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
             return;
         }
 
-        bool on_boundary = norm2 >= radius2 - 1e-10 * (1.0 + radius2);
-        double lambda = (on_boundary && dot < 0.0 && normal2 > 0.0) ? -dot / normal2 : 0.0;
+        double lambda = (dot < 0.0 && normal2 > 0.0) ? -dot / normal2 : 0.0;
+        double complementarity = fixed_ball_complementarity_residual(lambda, radius2, norm2);
         for (int m = 0; m < k + 1; ++m)
         {
             int idx = start + m;
@@ -952,6 +982,7 @@ __global__ void compute_cone_dual_residual_standard_kernel(double *__restrict__ 
             double residual = objective_vector[idx] - dual_product[idx];
             dual_residual[idx] = (residual + lambda * normal) * d_m;
         }
+        complementarity_residual[blk] = complementarity;
         dual_residual[z_off] = 0.0;
         return;
     }
@@ -1838,6 +1869,7 @@ __global__ void project_rotated_soc_warp_kernel(double *__restrict__ primal_solu
 }
 
 __global__ void compute_cone_dual_residual_warp_kernel(double *__restrict__ dual_residual,
+                                                       double *__restrict__ complementarity_residual,
                                                        const double *__restrict__ objective_vector,
                                                        const double *__restrict__ dual_product,
                                                        const double *__restrict__ variable_rescaling,
@@ -1862,37 +1894,43 @@ __global__ void compute_cone_dual_residual_warp_kernel(double *__restrict__ dual
 
     if (is_fixed && is_fixed[start + k] && is_fixed[start + k + 1])
     {
-        if (k == 1)
+        double d_s = variable_rescaling[start + k];
+        double d_t = variable_rescaling[start + k + 1];
+        double s = primal_solution[start + k];
+        double t = primal_solution[start + k + 1];
+        double radius2 = 2.0 * (s / d_s) * (t / d_t);
+        if (!(radius2 > 0.0))
         {
+            for (int m = lane; m < k; m += 32)
+                dual_residual[start + m] = 0.0;
             if (lane == 0)
             {
-                int idx = start;
-                double r = objective_vector[idx] - dual_product[idx];
-                double v = primal_solution[idx];
-                double d_0 = variable_rescaling[idx];
-                dual_residual[idx] = (r * v >= 0.0) ? r * d_0 : 0.0;
-                dual_residual[start + 1] = 0.0;
-                dual_residual[start + 2] = 0.0;
+                dual_residual[start + k] = 0.0;
+                dual_residual[start + k + 1] = 0.0;
             }
             return;
         }
 
-        double dot_p = 0.0, n2_p = 0.0;
+        double norm2_p = 0.0, dot_p = 0.0, n2_p = 0.0;
         for (int m = lane; m < k; m += 32)
         {
             int idx = start + m;
             double d_m = variable_rescaling[idx];
+            double scaled_v = primal_solution[idx] / d_m;
             double n_m = primal_solution[idx] / (d_m * d_m);
             double r = objective_vector[idx] - dual_product[idx];
+            norm2_p += scaled_v * scaled_v;
             dot_p += r * n_m;
             n2_p += n_m * n_m;
         }
         for (int off = 16; off > 0; off >>= 1)
         {
+            norm2_p += __shfl_xor_sync(MASK, norm2_p, off);
             dot_p += __shfl_xor_sync(MASK, dot_p, off);
             n2_p += __shfl_xor_sync(MASK, n2_p, off);
         }
         double lambda = (dot_p < 0.0 && n2_p > 0.0) ? -dot_p / n2_p : 0.0;
+        double complementarity = fixed_ball_complementarity_residual(lambda, radius2, norm2_p);
         for (int m = lane; m < k; m += 32)
         {
             int idx = start + m;
@@ -1903,6 +1941,7 @@ __global__ void compute_cone_dual_residual_warp_kernel(double *__restrict__ dual
         }
         if (lane == 0)
         {
+            complementarity_residual[blk] = complementarity;
             dual_residual[start + k] = 0.0;
             dual_residual[start + k + 1] = 0.0;
         }
@@ -2528,6 +2567,7 @@ __global__ void project_standard_soc_warp_kernel(double *__restrict__ primal_sol
 }
 
 __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restrict__ dual_residual,
+                                                                double *__restrict__ complementarity_residual,
                                                                 const double *__restrict__ objective_vector,
                                                                 const double *__restrict__ dual_product,
                                                                 const double *__restrict__ variable_rescaling,
@@ -2551,24 +2591,52 @@ __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restri
     int w_off = start + k;
     int z_off = start + k + 1;
 
+    /* Validation only permits this section when the fixed w value is zero.
+       The reduced SOC stationarity is supplied by the projected-gradient mapping. */
+    if (is_fixed && is_fixed[w_off] && !is_fixed[z_off])
+    {
+        for (int m = lane; m < k + 2; m += 32)
+            dual_residual[start + m] = 0.0;
+        return;
+    }
+
     if (is_fixed && is_fixed[w_off] && is_fixed[z_off])
     {
-        double dot_p = 0.0, n2_p = 0.0;
+        double w = primal_solution[w_off] / variable_rescaling[w_off];
+        double z = primal_solution[z_off] / variable_rescaling[z_off];
+        double radius2 = z * z - w * w;
+        if (!(radius2 > 0.0))
+        {
+            for (int m = lane; m < k; m += 32)
+                dual_residual[start + m] = 0.0;
+            if (lane == 0)
+            {
+                dual_residual[w_off] = 0.0;
+                dual_residual[z_off] = 0.0;
+            }
+            return;
+        }
+
+        double norm2_p = 0.0, dot_p = 0.0, n2_p = 0.0;
         for (int m = lane; m < k; m += 32)
         {
             int idx = start + m;
             double d_m = variable_rescaling[idx];
+            double scaled_v = primal_solution[idx] / d_m;
             double n_m = primal_solution[idx] / (d_m * d_m);
             double r = objective_vector[idx] - dual_product[idx];
+            norm2_p += scaled_v * scaled_v;
             dot_p += r * n_m;
             n2_p += n_m * n_m;
         }
         for (int off = 16; off > 0; off >>= 1)
         {
+            norm2_p += __shfl_xor_sync(MASK, norm2_p, off);
             dot_p += __shfl_xor_sync(MASK, dot_p, off);
             n2_p += __shfl_xor_sync(MASK, n2_p, off);
         }
         double lambda = (dot_p < 0.0 && n2_p > 0.0) ? -dot_p / n2_p : 0.0;
+        double complementarity = fixed_ball_complementarity_residual(lambda, radius2, norm2_p);
         for (int m = lane; m < k; m += 32)
         {
             int idx = start + m;
@@ -2579,6 +2647,7 @@ __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restri
         }
         if (lane == 0)
         {
+            complementarity_residual[blk] = complementarity;
             dual_residual[w_off] = 0.0;
             dual_residual[z_off] = 0.0;
         }
@@ -2617,8 +2686,8 @@ __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restri
             return;
         }
 
-        bool on_boundary = norm2_p >= radius2 - 1e-10 * (1.0 + radius2);
-        double lambda = (on_boundary && dot_p < 0.0 && normal2_p > 0.0) ? -dot_p / normal2_p : 0.0;
+        double lambda = (dot_p < 0.0 && normal2_p > 0.0) ? -dot_p / normal2_p : 0.0;
+        double complementarity = fixed_ball_complementarity_residual(lambda, radius2, norm2_p);
         for (int m = lane; m < k + 1; m += 32)
         {
             int idx = start + m;
@@ -2628,7 +2697,10 @@ __global__ void compute_cone_dual_residual_standard_warp_kernel(double *__restri
             dual_residual[idx] = (residual + lambda * normal) * d_m;
         }
         if (lane == 0)
+        {
+            complementarity_residual[blk] = complementarity;
             dual_residual[z_off] = 0.0;
+        }
         return;
     }
 
@@ -3121,9 +3193,11 @@ __global__ void project_exp_cone_kernel(double *__restrict__ primal_solution,
 }
 
 __global__ void compute_cone_dual_residual_exp_kernel(double *__restrict__ dual_residual,
+                                                      double *__restrict__ complementarity_residual,
                                                       const double *__restrict__ objective_vector,
                                                       const double *__restrict__ dual_product,
                                                       const double *__restrict__ variable_rescaling,
+                                                      const double *__restrict__ primal_solution,
                                                       double *__restrict__ warm_start,
                                                       const int *__restrict__ start_idx,
                                                       const int *__restrict__ v_dim,
@@ -3143,9 +3217,52 @@ __global__ void compute_cone_dual_residual_exp_kernel(double *__restrict__ dual_
 
     if (is_fixed && is_fixed[s_idx + 1])
     {
-        dual_residual[s_idx + 0] = ((r1 > 0.0) ? r1 : 0.0) * variable_rescaling[s_idx + 0];
+        double d1 = variable_rescaling[s_idx + 0];
+        double d2 = variable_rescaling[s_idx + 1];
+        double d3 = variable_rescaling[s_idx + 2];
+        double x = primal_solution[s_idx + 0] / d1;
+        double y = primal_solution[s_idx + 1] / d2;
+        double z = primal_solution[s_idx + 2] / d3;
+        double q1 = r1 * d1;
+        double q3 = r3 * d3;
+
+        if (y > 0.0 && isfinite(x) && isfinite(y) && isfinite(z))
+        {
+            double slope = exp(x / y);
+            double bound = y * slope;
+            if (isfinite(slope) && isfinite(bound))
+            {
+                double normal_scale = fmax(slope, 1.0);
+                double normal_x = slope / normal_scale;
+                double normal_z = -1.0 / normal_scale;
+                double dot = q1 * normal_x + q3 * normal_z;
+                double normal2 = normal_x * normal_x + normal_z * normal_z;
+                double scaled_lambda = (dot < 0.0) ? -dot / normal2 : 0.0;
+                double lambda = scaled_lambda / normal_scale;
+                dual_residual[s_idx + 0] = q1 + scaled_lambda * normal_x;
+                dual_residual[s_idx + 1] = 0.0;
+                dual_residual[s_idx + 2] = q3 + scaled_lambda * normal_z;
+                double slack_scale = fmax(1.0, fmax(fabs(z), fabs(bound)));
+                double complementarity = lambda * (fmax(z - bound, 0.0) / slack_scale);
+                complementarity_residual[blk] = complementarity;
+                return;
+            }
+        }
+
+        /* y=0 is the nonsmooth closure {x <= 0, z >= 0}.  Use a unit
+           fixed-section projection as a scale-independent KKT guard. */
+        double projected_x, projected_z;
+        project_2d_exp_persp(primal_solution[s_idx + 0] - r1,
+                             primal_solution[s_idx + 1],
+                             primal_solution[s_idx + 2] - r3,
+                             d1,
+                             d2,
+                             d3,
+                             &projected_x,
+                             &projected_z);
+        dual_residual[s_idx + 0] = (primal_solution[s_idx + 0] - projected_x) * d1;
         dual_residual[s_idx + 1] = 0.0;
-        dual_residual[s_idx + 2] = ((r3 < 0.0) ? r3 : 0.0) * variable_rescaling[s_idx + 2];
+        dual_residual[s_idx + 2] = (primal_solution[s_idx + 2] - projected_z) * d3;
         return;
     }
 
@@ -3170,17 +3287,34 @@ __global__ void compute_cone_dual_residual_exp_kernel(double *__restrict__ dual_
      x(rho) = 0.5 (rx + sqrt(rx^2 + 4 a (wz/wx) rho (|rz|-rho)))
      y(rho) = 0.5 (ry + sqrt(ry^2 + 4 (1-a) (wz/wy) rho (|rz|-rho)))
      G(rho) = x^a y^(1-a) - rho. */
-__device__ static inline void project_power_cone_point(
+__device__ static inline double positive_quadratic_root(double r, double q)
+{
+    if (!(q > 0.0))
+        return fmax(r, 0.0);
+    double disc = hypot(r, 2.0 * sqrt(q));
+    if (r >= 0.0)
+        return 0.5 * (r + disc);
+    return (2.0 * q) / (disc - r);
+}
+
+__device__ static inline void project_power_cone_point_normalized(
     double rx, double ry, double rz, double wx, double wy, double wz, double alpha, double *xo, double *yo, double *zo)
 {
     double abs_rz = fabs(rz);
     double sgn_rz = (rz >= 0.0) ? 1.0 : -1.0;
     double om = 1.0 - alpha;
 
-    if (rx >= 0.0 && ry >= 0.0)
+    if (abs_rz == 0.0)
     {
-        double t = (rx > 0.0 ? pow(rx, alpha) : 0.0) * (ry > 0.0 ? pow(ry, om) : 0.0);
-        if (t >= abs_rz)
+        *xo = fmax(rx, 0.0);
+        *yo = fmax(ry, 0.0);
+        *zo = 0.0;
+        return;
+    }
+
+    if (rx > 0.0 && ry > 0.0)
+    {
+        if (alpha * log(rx) + om * log(ry) >= log(abs_rz))
         {
             *xo = rx;
             *yo = ry;
@@ -3196,8 +3330,7 @@ __device__ static inline void project_power_cone_point(
     {
         double u = (rx < 0.0) ? (-wx * rx) / alpha : 0.0;
         double v = (ry < 0.0) ? (-wy * ry) / om : 0.0;
-        double t = (u > 0.0 ? pow(u, alpha) : 0.0) * (v > 0.0 ? pow(v, om) : 0.0);
-        if (t >= wz * abs_rz)
+        if (u > 0.0 && v > 0.0 && alpha * log(u) + om * log(v) >= log(wz) + log(abs_rz))
         {
             *xo = 0.0;
             *yo = 0.0;
@@ -3208,43 +3341,360 @@ __device__ static inline void project_power_cone_point(
 
     double c_x = 4.0 * alpha * (wz / wx);
     double c_y = 4.0 * om * (wz / wy);
-    double lo = 0.0;
-    double hi = abs_rz;
-    /* If r_x <= 0 or r_y <= 0, G(0) = 0 (spurious root at origin); skip it. */
-    if (rx <= 0.0 || ry <= 0.0)
+
+    /*
+     * Bisect in log(rho).  When one input axis is negative and alpha is close
+     * to an endpoint, the positive root can be many orders of magnitude below
+     * |r_z|.  A linear relative floor would then converge to an infeasible
+     * point instead of the nonzero root.
+     */
+    double lo = log(DBL_MIN);
+    double hi = log(abs_rz);
+    if (!(hi > lo))
     {
-        lo = 1e-15 * abs_rz;
-        if (lo < 1e-300)
-            lo = 1e-300;
+        *xo = fmax(rx, 0.0);
+        *yo = fmax(ry, 0.0);
+        *zo = 0.0;
+        return;
     }
-    for (int it = 0; it < 60; ++it)
+
+    for (int it = 0; it < 80; ++it)
     {
-        double rho = 0.5 * (lo + hi);
-        double disc_x = rx * rx + c_x * rho * (abs_rz - rho);
-        double disc_y = ry * ry + c_y * rho * (abs_rz - rho);
-        double x = 0.5 * (rx + sqrt(disc_x));
-        double y = 0.5 * (ry + sqrt(disc_y));
-        double tp = (x > 0.0 ? pow(x, alpha) : 0.0) * (y > 0.0 ? pow(y, om) : 0.0);
-        double g = tp - rho;
-        if (g > 0.0)
-            lo = rho;
+        double log_rho = lo + 0.5 * (hi - lo);
+        double rho = exp(log_rho);
+        double x = positive_quadratic_root(rx, 0.25 * c_x * rho * (abs_rz - rho));
+        double y = positive_quadratic_root(ry, 0.25 * c_y * rho * (abs_rz - rho));
+        bool above_boundary = x > 0.0 && y > 0.0 && alpha * log(x) + om * log(y) > log_rho;
+        if (above_boundary)
+            lo = log_rho;
         else
-            hi = rho;
-        if (hi - lo < 1e-14 * (1.0 + abs_rz))
-            break;
+            hi = log_rho;
     }
-    double rho = 0.5 * (lo + hi);
-    double disc_x = rx * rx + c_x * rho * (abs_rz - rho);
-    double disc_y = ry * ry + c_y * rho * (abs_rz - rho);
-    double x = 0.5 * (rx + sqrt(disc_x));
-    double y = 0.5 * (ry + sqrt(disc_y));
-    if (x < 0.0)
-        x = 0.0;
-    if (y < 0.0)
-        y = 0.0;
-    *xo = x;
-    *yo = y;
-    *zo = sgn_rz * rho;
+    double rho = exp(lo + 0.5 * (hi - lo));
+    *xo = positive_quadratic_root(rx, 0.25 * c_x * rho * (abs_rz - rho));
+    *yo = positive_quadratic_root(ry, 0.25 * c_y * rho * (abs_rz - rho));
+    double log_bound = alpha * log(*xo) + om * log(*yo);
+    *zo = sgn_rz * fmin(rho, exp(log_bound));
+}
+
+__device__ static inline void project_power_cone_point(
+    double rx, double ry, double rz, double wx, double wy, double wz, double alpha, double *xo, double *yo, double *zo)
+{
+    /* The cone and weighted projection are positively homogeneous.  Normalize
+       the point so products such as rho * (|r_z| - rho) cannot overflow. */
+    double scale = fmax(fabs(rx), fmax(fabs(ry), fabs(rz)));
+    if (!(scale > 0.0) || !isfinite(scale))
+    {
+        project_power_cone_point_normalized(rx, ry, rz, wx, wy, wz, alpha, xo, yo, zo);
+        return;
+    }
+
+    double xn, yn, zn;
+    project_power_cone_point_normalized(rx / scale, ry / scale, rz / scale, wx, wy, wz, alpha, &xn, &yn, &zn);
+    *xo = xn * scale;
+    *yo = yn * scale;
+    *zo = zn * scale;
+}
+
+/* Project x,y while z is fixed. The active boundary is x^a y^(1-a) = |z|. */
+__device__ static inline double
+power_xy_log_boundary(double lambda, double rx, double ry, double wx, double wy, double alpha)
+{
+    double om = 1.0 - alpha;
+    double x = positive_quadratic_root(rx, (lambda / wx) * alpha);
+    double y = positive_quadratic_root(ry, (lambda / wy) * om);
+    if (!(x > 0.0) || !(y > 0.0))
+        return -INFINITY;
+    return alpha * log(x) + om * log(y);
+}
+
+__device__ static inline void project_power_xy_fixed_z_normalized(
+    double rx, double ry, double fixed_z, double wx, double wy, double alpha, double *xo, double *yo)
+{
+    double c = fabs(fixed_z);
+    double om = 1.0 - alpha;
+    if (c == 0.0)
+    {
+        *xo = fmax(rx, 0.0);
+        *yo = fmax(ry, 0.0);
+        return;
+    }
+
+    if (rx > 0.0 && ry > 0.0 && alpha * log(rx) + om * log(ry) >= log(c))
+    {
+        *xo = rx;
+        *yo = ry;
+        return;
+    }
+
+    double target = log(c);
+    double hi = fmin(wx, wy);
+    if (!(hi > 0.0) || !isfinite(hi))
+        hi = 1.0;
+    for (int it = 0; it < 2048; ++it)
+    {
+        double log_boundary = power_xy_log_boundary(hi, rx, ry, wx, wy, alpha);
+        if (log_boundary >= target || isnan(log_boundary))
+            break;
+        if (hi >= 0.5 * DBL_MAX)
+        {
+            hi = DBL_MAX;
+            break;
+        }
+        hi *= 2.0;
+    }
+
+    double lambda;
+    double floor_log_boundary = power_xy_log_boundary(DBL_MIN, rx, ry, wx, wy, alpha);
+    if (floor_log_boundary >= target)
+    {
+        double lo = 0.0;
+        double floor_hi = DBL_MIN;
+        for (int it = 0; it < 80; ++it)
+        {
+            double candidate = lo + 0.5 * (floor_hi - lo);
+            if (power_xy_log_boundary(candidate, rx, ry, wx, wy, alpha) < target)
+                lo = candidate;
+            else
+                floor_hi = candidate;
+        }
+        lambda = lo + 0.5 * (floor_hi - lo);
+    }
+    else
+    {
+        double log_lo = log(DBL_MIN);
+        double log_hi = log(hi);
+        for (int it = 0; it < 96; ++it)
+        {
+            double log_lambda = log_lo + 0.5 * (log_hi - log_lo);
+            double candidate = exp(log_lambda);
+            if (power_xy_log_boundary(candidate, rx, ry, wx, wy, alpha) < target)
+                log_lo = log_lambda;
+            else
+                log_hi = log_lambda;
+        }
+        lambda = exp(log_lo + 0.5 * (log_hi - log_lo));
+    }
+    *xo = positive_quadratic_root(rx, (lambda / wx) * alpha);
+    *yo = positive_quadratic_root(ry, (lambda / wy) * om);
+}
+
+__device__ static inline void project_power_xy_fixed_z(
+    double rx, double ry, double fixed_z, double wx, double wy, double alpha, double *xo, double *yo)
+{
+    double scale = fmax(fabs(rx), fmax(fabs(ry), fabs(fixed_z)));
+    if (!(scale > 0.0) || !isfinite(scale))
+    {
+        project_power_xy_fixed_z_normalized(rx, ry, fixed_z, wx, wy, alpha, xo, yo);
+        return;
+    }
+
+    double xn, yn;
+    project_power_xy_fixed_z_normalized(rx / scale, ry / scale, fixed_z / scale, wx, wy, alpha, &xn, &yn);
+    *xo = xn * scale;
+    *yo = yn * scale;
+}
+
+/* With one nonnegative axis fixed, project the other axis and z onto
+   |z| <= fixed_axis^fixed_exp * other^other_exp. On the active boundary,
+   direct bisection in other is stable even when the KKT multiplier is tiny. */
+__device__ static inline double power_exp_from_log(double log_value)
+{
+    if (log_value >= log(DBL_MAX))
+        return INFINITY;
+    if (log_value <= log(DBL_MIN))
+        return 0.0;
+    return exp(log_value);
+}
+
+__device__ static inline double power_section_derivative(
+    double other, double r_other, double abs_rz, double w_other, double wz, double log_coefficient, double other_exp)
+{
+    if (!(other > 0.0))
+        return -INFINITY;
+
+    double log_other = log(other);
+    double bound = power_exp_from_log(log_coefficient + other_exp * log_other);
+    double slope = power_exp_from_log(log_coefficient + log(other_exp) + (other_exp - 1.0) * log_other);
+    double linear_term = w_other * (other - r_other);
+    double gap = bound - abs_rz;
+    if (gap == 0.0 || slope == 0.0)
+        return linear_term;
+    if (!isfinite(slope))
+        return copysign(INFINITY, gap);
+    return linear_term + wz * gap * slope;
+}
+
+__device__ static inline void project_power_section_fixed_axis_normalized(double fixed_axis,
+                                                                          double r_other,
+                                                                          double rz,
+                                                                          double w_other,
+                                                                          double wz,
+                                                                          double fixed_exp,
+                                                                          double other_exp,
+                                                                          double *other_out,
+                                                                          double *z_out)
+{
+    double abs_rz = fabs(rz);
+    if (!(fixed_axis > 0.0) || abs_rz == 0.0)
+    {
+        *other_out = fmax(r_other, 0.0);
+        *z_out = 0.0;
+        return;
+    }
+    double log_coefficient = fixed_exp * log(fixed_axis);
+
+    if (r_other > 0.0 && log_coefficient + other_exp * log(r_other) >= log(abs_rz))
+    {
+        *other_out = r_other;
+        *z_out = rz;
+        return;
+    }
+
+    double log_feasible_other = (log(abs_rz) - log_coefficient) / other_exp;
+    double feasible_other = power_exp_from_log(log_feasible_other);
+    if (feasible_other == 0.0)
+    {
+        *other_out = 0.0;
+        *z_out = 0.0;
+        return;
+    }
+
+    double lo = 0.0;
+    double hi = fmax(1.0, fmax(r_other, 0.0));
+    if (isfinite(feasible_other))
+        hi = fmin(hi, feasible_other);
+    for (int it = 0; it < 1024; ++it)
+    {
+        double derivative = power_section_derivative(hi, r_other, abs_rz, w_other, wz, log_coefficient, other_exp);
+        if (!(derivative < 0.0))
+            break;
+        if (isfinite(feasible_other) && hi >= feasible_other)
+            break;
+        double next_hi = hi * 2.0;
+        if (!isfinite(next_hi))
+        {
+            hi = isfinite(feasible_other) ? feasible_other : DBL_MAX;
+            break;
+        }
+        hi = isfinite(feasible_other) ? fmin(next_hi, feasible_other) : next_hi;
+    }
+
+    for (int it = 0; it < 80; ++it)
+    {
+        double other = lo + 0.5 * (hi - lo);
+        if (other == 0.0)
+            break;
+        double derivative = power_section_derivative(other, r_other, abs_rz, w_other, wz, log_coefficient, other_exp);
+        if (derivative < 0.0)
+            lo = other;
+        else
+            hi = other;
+    }
+    double other = lo + 0.5 * (hi - lo);
+    double projected_abs_z = other > 0.0 ? power_exp_from_log(log_coefficient + other_exp * log(other)) : 0.0;
+    *other_out = other;
+    *z_out = copysign(fmin(projected_abs_z, abs_rz), rz);
+}
+
+__device__ static inline void project_power_section_fixed_axis(double fixed_axis,
+                                                               double r_other,
+                                                               double rz,
+                                                               double w_other,
+                                                               double wz,
+                                                               double fixed_exp,
+                                                               double other_exp,
+                                                               double *other_out,
+                                                               double *z_out)
+{
+    double scale = fmax(fixed_axis, fmax(fabs(r_other), fabs(rz)));
+    if (!(scale > 0.0) || !isfinite(scale))
+    {
+        project_power_section_fixed_axis_normalized(
+            fixed_axis, r_other, rz, w_other, wz, fixed_exp, other_exp, other_out, z_out);
+        return;
+    }
+
+    double normalized_other, normalized_z;
+    project_power_section_fixed_axis_normalized(fixed_axis / scale,
+                                                r_other / scale,
+                                                rz / scale,
+                                                w_other,
+                                                wz,
+                                                fixed_exp,
+                                                other_exp,
+                                                &normalized_other,
+                                                &normalized_z);
+    *other_out = normalized_other * scale;
+    *z_out = normalized_z * scale;
+}
+
+__device__ static inline void project_power_cone_point_with_fixed(double rx,
+                                                                  double ry,
+                                                                  double rz,
+                                                                  double wx,
+                                                                  double wy,
+                                                                  double wz,
+                                                                  double alpha,
+                                                                  bool fixed_x,
+                                                                  bool fixed_y,
+                                                                  bool fixed_z,
+                                                                  double *xo,
+                                                                  double *yo,
+                                                                  double *zo)
+{
+    double om = 1.0 - alpha;
+    *xo = rx;
+    *yo = ry;
+    *zo = rz;
+
+    if (!fixed_x && !fixed_y && !fixed_z)
+    {
+        project_power_cone_point(rx, ry, rz, wx, wy, wz, alpha, xo, yo, zo);
+        return;
+    }
+
+    if (fixed_z)
+    {
+        if (fixed_x && fixed_y)
+            return;
+        if (fixed_x)
+        {
+            double lower = fabs(rz) == 0.0 ? 0.0 : exp((log(fabs(rz)) - alpha * log(rx)) / om);
+            *yo = fmax(ry, lower);
+            return;
+        }
+        if (fixed_y)
+        {
+            double lower = fabs(rz) == 0.0 ? 0.0 : exp((log(fabs(rz)) - om * log(ry)) / alpha);
+            *xo = fmax(rx, lower);
+            return;
+        }
+        project_power_xy_fixed_z(rx, ry, rz, wx, wy, alpha, xo, yo);
+        return;
+    }
+
+    if (fixed_x && fixed_y)
+    {
+        double bound = 0.0;
+        if (rx > 0.0 && ry > 0.0)
+        {
+            double log_bound = alpha * log(rx) + om * log(ry);
+            bound = log_bound < log(DBL_MAX) ? exp(log_bound) : INFINITY;
+        }
+        *zo = fmax(-bound, fmin(rz, bound));
+        return;
+    }
+    if (fixed_x)
+    {
+        project_power_section_fixed_axis(rx, ry, rz, wy, wz, alpha, om, yo, zo);
+        return;
+    }
+    if (fixed_y)
+    {
+        project_power_section_fixed_axis(ry, rx, rz, wx, wz, om, alpha, xo, zo);
+        return;
+    }
 }
 
 __global__ void project_power_cone_kernel(double *__restrict__ primal_solution,
@@ -3272,32 +3722,6 @@ __global__ void project_power_cone_kernel(double *__restrict__ primal_solution,
     double d3 = variable_rescaling[s_idx + 2];
     double alpha = power_alpha[blk];
 
-    /* z pinned to 0 -> cone reduces to {x,y >= 0}; clip. */
-    if (is_fixed && is_fixed[s_idx + 2])
-    {
-        double x_new = (r1 > 0.0) ? r1 : 0.0;
-        double y_new = (r2 > 0.0) ? r2 : 0.0;
-        primal_solution[s_idx + 0] = x_new;
-        primal_solution[s_idx + 1] = y_new;
-        return;
-    }
-    /* x,y pinned -> cone reduces to |z| <= R*d3 with R = (r1/d1)^a * (r2/d2)^(1-a). */
-    if (is_fixed && is_fixed[s_idx + 0] && is_fixed[s_idx + 1])
-    {
-        double x_a = r1 / d1;
-        double y_a = r2 / d2;
-        double R = (x_a > 0.0 && y_a > 0.0) ? pow(x_a, alpha) * pow(y_a, 1.0 - alpha) : 0.0;
-        double rz = r3 / d3;
-        double bound = R * d3;
-        double z_new = r3;
-        if (rz > R)
-            z_new = bound;
-        else if (rz < -R)
-            z_new = -bound;
-        primal_solution[s_idx + 2] = z_new;
-        return;
-    }
-
     /* Prox in scaled space with metric I equals prox in actual space with metric diag(d^2). */
     double rx = r1 / d1;
     double ry = r2 / d2;
@@ -3306,16 +3730,30 @@ __global__ void project_power_cone_kernel(double *__restrict__ primal_solution,
     double wy = d2 * d2;
     double wz = d3 * d3;
     double xo, yo, zo;
-    project_power_cone_point(rx, ry, rz, wx, wy, wz, alpha, &xo, &yo, &zo);
+    project_power_cone_point_with_fixed(rx,
+                                        ry,
+                                        rz,
+                                        wx,
+                                        wy,
+                                        wz,
+                                        alpha,
+                                        is_fixed && is_fixed[s_idx + 0],
+                                        is_fixed && is_fixed[s_idx + 1],
+                                        is_fixed && is_fixed[s_idx + 2],
+                                        &xo,
+                                        &yo,
+                                        &zo);
     primal_solution[s_idx + 0] = xo * d1;
     primal_solution[s_idx + 1] = yo * d2;
     primal_solution[s_idx + 2] = zo * d3;
 }
 
 __global__ void compute_cone_dual_residual_power_kernel(double *__restrict__ dual_residual,
+                                                        double *__restrict__ complementarity_residual,
                                                         const double *__restrict__ objective_vector,
                                                         const double *__restrict__ dual_product,
                                                         const double *__restrict__ variable_rescaling,
+                                                        const double *__restrict__ primal_solution,
                                                         double *__restrict__ warm_start,
                                                         const int *__restrict__ start_idx,
                                                         const int *__restrict__ v_dim,
@@ -3335,20 +3773,101 @@ __global__ void compute_cone_dual_residual_power_kernel(double *__restrict__ dua
     double r3 = objective_vector[s_idx + 2] - dual_product[s_idx + 2];
     double alpha = power_alpha[blk];
 
-    /* z pinned -> reduced cone is {x,y >= 0}, dual is {u,v >= 0} on x,y; free on z. */
-    if (is_fixed && is_fixed[s_idx + 2])
+    bool fixed_x = is_fixed && is_fixed[s_idx + 0];
+    bool fixed_y = is_fixed && is_fixed[s_idx + 1];
+    bool fixed_z = is_fixed && is_fixed[s_idx + 2];
+    if (fixed_x || fixed_y || fixed_z)
     {
-        dual_residual[s_idx + 0] = ((r1 > 0.0) ? r1 : 0.0) * variable_rescaling[s_idx + 0];
-        dual_residual[s_idx + 1] = ((r2 > 0.0) ? r2 : 0.0) * variable_rescaling[s_idx + 1];
-        dual_residual[s_idx + 2] = 0.0;
-        return;
-    }
-    /* x,y pinned -> no cone constraint remains; residual is zero. */
-    if (is_fixed && is_fixed[s_idx + 0] && is_fixed[s_idx + 1])
-    {
-        dual_residual[s_idx + 0] = 0.0;
-        dual_residual[s_idx + 1] = 0.0;
-        dual_residual[s_idx + 2] = 0.0;
+        double d1 = variable_rescaling[s_idx + 0];
+        double d2 = variable_rescaling[s_idx + 1];
+        double d3 = variable_rescaling[s_idx + 2];
+        double x = primal_solution[s_idx + 0] / d1;
+        double y = primal_solution[s_idx + 1] / d2;
+        double z = primal_solution[s_idx + 2] / d3;
+        double q1 = r1 * d1;
+        double q2 = r2 * d2;
+        double q3 = r3 * d3;
+
+        dual_residual[s_idx + 0] = fixed_x ? 0.0 : q1;
+        dual_residual[s_idx + 1] = fixed_y ? 0.0 : q2;
+        dual_residual[s_idx + 2] = fixed_z ? 0.0 : q3;
+        if (fixed_x && fixed_y && fixed_z)
+            return;
+
+        double abs_z = fabs(z);
+        double bound = 0.0;
+        bool regular = x > 0.0 && y > 0.0 && isfinite(x) && isfinite(y) && isfinite(z);
+        if (regular)
+        {
+            double log_bound = alpha * log(x) + (1.0 - alpha) * log(y);
+            bound = exp(log_bound);
+            regular = isfinite(bound) && bound > 0.0;
+        }
+
+        if (regular && abs_z > 0.0)
+        {
+            double normal[3] = {
+                -alpha * bound / x,
+                -(1.0 - alpha) * bound / y,
+                copysign(1.0, z),
+            };
+            double q[3] = {q1, q2, q3};
+            bool fixed[3] = {fixed_x, fixed_y, fixed_z};
+            double normal_scale = 0.0;
+            for (int i = 0; i < 3; ++i)
+            {
+                if (!fixed[i])
+                    normal_scale = fmax(normal_scale, fabs(normal[i]));
+            }
+            if (!(normal_scale > 0.0) || !isfinite(normal_scale))
+            {
+                regular = false;
+            }
+
+            double dot = 0.0;
+            double normal2 = 0.0;
+            for (int i = 0; i < 3 && regular; ++i)
+            {
+                if (!fixed[i])
+                {
+                    double scaled_normal = normal[i] / normal_scale;
+                    dot += q[i] * scaled_normal;
+                    normal2 += scaled_normal * scaled_normal;
+                }
+            }
+            if (regular)
+            {
+                double scaled_lambda = (dot < 0.0 && normal2 > 0.0) ? -dot / normal2 : 0.0;
+                double lambda = scaled_lambda / normal_scale;
+                for (int i = 0; i < 3; ++i)
+                {
+                    if (!fixed[i])
+                        dual_residual[s_idx + i] = q[i] + scaled_lambda * (normal[i] / normal_scale);
+                }
+                double slack_scale = fmax(1.0, fmax(bound, abs_z));
+                double complementarity = lambda * (fmax(bound - abs_z, 0.0) / slack_scale);
+                complementarity_residual[blk] = complementarity;
+                return;
+            }
+        }
+
+        if (regular)
+            return;
+
+        /* Degenerate axes are nonsmooth.  A unit metric projection supplies a
+           scale-independent KKT guard without changing the adaptive mapping. */
+        double rx = x - (fixed_x ? 0.0 : r1 / d1);
+        double ry = y - (fixed_y ? 0.0 : r2 / d2);
+        double rz = z - (fixed_z ? 0.0 : r3 / d3);
+        double xo, yo, zo;
+        project_power_cone_point_with_fixed(
+            rx, ry, rz, d1 * d1, d2 * d2, d3 * d3, alpha, fixed_x, fixed_y, fixed_z, &xo, &yo, &zo);
+        if (!fixed_x)
+            dual_residual[s_idx + 0] = (x - xo) * d1 * d1;
+        if (!fixed_y)
+            dual_residual[s_idx + 1] = (y - yo) * d2 * d2;
+        if (!fixed_z)
+            dual_residual[s_idx + 2] = (z - zo) * d3 * d3;
         return;
     }
 
@@ -3363,6 +3882,56 @@ __global__ void compute_cone_dual_residual_power_kernel(double *__restrict__ dua
     dual_residual[s_idx + 0] = -xo;
     dual_residual[s_idx + 1] = -yo;
     dual_residual[s_idx + 2] = -zo;
+}
+
+__global__ void compute_power_cone_primal_violation_kernel(double *__restrict__ absolute_violation,
+                                                           double *__restrict__ relative_violation,
+                                                           const double *__restrict__ primal_solution,
+                                                           const double *__restrict__ variable_rescaling,
+                                                           const int *__restrict__ start_idx,
+                                                           const double *__restrict__ power_alpha,
+                                                           double homogeneous_scale,
+                                                           int num_blocks)
+{
+    int blk = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blk >= num_blocks)
+        return;
+
+    int start = start_idx[blk];
+    double x = primal_solution[start + 0] / variable_rescaling[start + 0];
+    double y = primal_solution[start + 1] / variable_rescaling[start + 1];
+    double z = primal_solution[start + 2] / variable_rescaling[start + 2];
+    if (!isfinite(x) || !isfinite(y) || !isfinite(z))
+    {
+        absolute_violation[blk] = INFINITY;
+        relative_violation[blk] = INFINITY;
+        return;
+    }
+    double violation = fmax(-x, -y);
+    double abs_z = fabs(z);
+    if (abs_z > 0.0)
+    {
+        double bound = 0.0;
+        if (x > 0.0 && y > 0.0)
+        {
+            double alpha = power_alpha[blk];
+            double log_bound = alpha * log(x) + (1.0 - alpha) * log(y);
+            double log_abs_z = log(abs_z);
+            double roundoff_tolerance = 64.0 * DBL_EPSILON * (1.0 + fabs(log_bound) + fabs(log_abs_z));
+            if (log_bound + roundoff_tolerance >= log_abs_z)
+            {
+                violation = fmax(violation, 0.0);
+                absolute_violation[blk] = violation;
+                relative_violation[blk] = violation / (homogeneous_scale + fmax(fabs(x), fmax(fabs(y), abs_z)));
+                return;
+            }
+            bound = exp(log_bound);
+        }
+        violation = fmax(violation, abs_z - bound);
+    }
+    violation = fmax(violation, 0.0);
+    absolute_violation[blk] = violation;
+    relative_violation[blk] = violation / (homogeneous_scale + fmax(fabs(x), fmax(fabs(y), abs_z)));
 }
 
 __global__ void project_power_cone_diag_q_kernel(double *__restrict__ pdhg_primal,
@@ -3394,40 +3963,6 @@ __global__ void project_power_cone_diag_q_kernel(double *__restrict__ pdhg_prima
     double d3 = variable_rescaling[s_idx + 2];
     double alpha = power_alpha[blk];
 
-    if (is_fixed && is_fixed[s_idx + 2])
-    {
-        double x_new = (r1 > 0.0) ? r1 : 0.0;
-        double y_new = (r2 > 0.0) ? r2 : 0.0;
-        pdhg_primal[s_idx + 0] = x_new;
-        pdhg_primal[s_idx + 1] = y_new;
-        for (int m = 0; m < 3; ++m)
-        {
-            int idx = s_idx + m;
-            reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
-        }
-        return;
-    }
-    if (is_fixed && is_fixed[s_idx + 0] && is_fixed[s_idx + 1])
-    {
-        double x_a = r1 / d1;
-        double y_a = r2 / d2;
-        double R = (x_a > 0.0 && y_a > 0.0) ? pow(x_a, alpha) * pow(y_a, 1.0 - alpha) : 0.0;
-        double rz = r3 / d3;
-        double bound = R * d3;
-        double z_new = r3;
-        if (rz > R)
-            z_new = bound;
-        else if (rz < -R)
-            z_new = -bound;
-        pdhg_primal[s_idx + 2] = z_new;
-        for (int m = 0; m < 3; ++m)
-        {
-            int idx = s_idx + m;
-            reflected_primal[idx] = 2.0 * pdhg_primal[idx] - current_primal[idx];
-        }
-        return;
-    }
-
     /* Effective weight in actual space: omega_i = (1 + tau*Q_ii) * d_i^2. */
     double w1 = 1.0 + tau * Q_diag[s_idx + 0];
     double w2 = 1.0 + tau * Q_diag[s_idx + 1];
@@ -3439,7 +3974,19 @@ __global__ void project_power_cone_diag_q_kernel(double *__restrict__ pdhg_prima
     double ry = r2 / d2;
     double rz = r3 / d3;
     double xo, yo, zo;
-    project_power_cone_point(rx, ry, rz, om_x, om_y, om_z, alpha, &xo, &yo, &zo);
+    project_power_cone_point_with_fixed(rx,
+                                        ry,
+                                        rz,
+                                        om_x,
+                                        om_y,
+                                        om_z,
+                                        alpha,
+                                        is_fixed && is_fixed[s_idx + 0],
+                                        is_fixed && is_fixed[s_idx + 1],
+                                        is_fixed && is_fixed[s_idx + 2],
+                                        &xo,
+                                        &yo,
+                                        &zo);
     pdhg_primal[s_idx + 0] = xo * d1;
     pdhg_primal[s_idx + 1] = yo * d2;
     pdhg_primal[s_idx + 2] = zo * d3;

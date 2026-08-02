@@ -389,6 +389,13 @@ pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_p
     int rank_global = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank_global);
 
+    int fixed_section_invalid = 0;
+    if (rank_global == 0 && pdhcg_validate_fixed_cone_sections(original_problem) != 0)
+        fixed_section_invalid = 1;
+    MPI_Bcast(&fixed_section_invalid, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (fixed_section_invalid)
+        return NULL;
+
     const qp_problem_t *input_problem = original_problem;
     qp_problem_t *transformed = NULL;
     int transform_failed = 0;

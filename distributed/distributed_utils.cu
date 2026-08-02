@@ -363,6 +363,29 @@ void configure_partition_metadata(const qp_problem_t *problem, grid_context_t *g
         if (grid->variable_cuts[cut] < grid->variable_cuts[cut - 1])
             grid->variable_cuts[cut] = grid->variable_cuts[cut - 1];
 
+    int empty_variable_partition = 0;
+    int empty_constraint_partition = 0;
+    for (int part = 0; part < P_cols; ++part)
+        empty_variable_partition |= grid->variable_cuts[part] == grid->variable_cuts[part + 1];
+    for (int part = 0; part < P_rows; ++part)
+        empty_constraint_partition |= grid->constraint_cuts[part] == grid->constraint_cuts[part + 1];
+    if (empty_variable_partition || empty_constraint_partition)
+    {
+        if (grid->rank_global == 0)
+        {
+            fprintf(stderr,
+                    "Error: the requested %d x %d process grid creates an empty %s partition "
+                    "(problem dimensions %d x %d). Use fewer row/column tiles; zero-width local "
+                    "partitions are not supported.\n",
+                    P_rows,
+                    P_cols,
+                    empty_variable_partition ? "variable" : "constraint",
+                    m,
+                    n);
+        }
+        MPI_Abort(grid->comm_global, EXIT_FAILURE);
+    }
+
     int my_col = grid->coords[1];
     grid->n_start = grid->variable_cuts[my_col];
     grid->n_end = grid->variable_cuts[my_col + 1];

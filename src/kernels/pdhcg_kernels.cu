@@ -82,6 +82,39 @@ __global__ void project_primal_onto_bounds_kernel(double *__restrict__ primal_so
     }
 }
 
+__global__ void prepare_projected_gradient_point_kernel(double *__restrict__ projected_point,
+                                                        const double *__restrict__ primal_solution,
+                                                        const double *__restrict__ effective_objective,
+                                                        const double *__restrict__ dual_product,
+                                                        double step_size,
+                                                        int num_variables)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_variables)
+    {
+        double gradient = effective_objective[i] - dual_product[i];
+        projected_point[i] = primal_solution[i] - step_size * gradient;
+    }
+}
+
+__global__ void augment_projected_gradient_residual_kernel(double *__restrict__ dual_residual,
+                                                           const double *__restrict__ primal_solution,
+                                                           const double *__restrict__ projected_point,
+                                                           const double *__restrict__ variable_rescaling,
+                                                           double step_size,
+                                                           int num_variables)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_variables)
+    {
+        double residual = (primal_solution[i] - projected_point[i]) / step_size * variable_rescaling[i];
+        if (!isfinite(residual))
+            residual = copysign(INFINITY, residual);
+        if (fabs(residual) > fabs(dual_residual[i]))
+            dual_residual[i] = residual;
+    }
+}
+
 __global__ void compute_lp_next_pdhg_primal_solution_kernel(const double *current_primal,
                                                             double *reflected_primal,
                                                             const double *dual_product,

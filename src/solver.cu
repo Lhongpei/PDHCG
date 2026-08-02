@@ -24,13 +24,13 @@ limitations under the License.
 #include "solver.h"
 #include "solver_state.h"
 #include "utils.h"
+#include <chrono>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusparse.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <time.h>
 
 pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem_t *original_problem)
 {
@@ -115,7 +115,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
 
     rescale_info_free(rescale_info);
     initialize_step_size_and_primal_weight(state, params);
-    clock_t start_time = clock();
+    const auto start_time = std::chrono::steady_clock::now();
     bool do_restart = false;
 
     while (state->total_count < params->termination_criteria.iteration_limit)
@@ -130,7 +130,8 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
                 compute_infeasibility_information(state);
             }
 
-            state->cumulative_time_sec = (double)(clock() - start_time) / CLOCKS_PER_SEC;
+            state->cumulative_time_sec =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
 
             check_termination_criteria(state, &params->termination_criteria);
             display_iteration_stats(state, params->verbose);

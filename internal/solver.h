@@ -20,11 +20,13 @@ limitations under the License.
 #include "pdhcg_types.h"
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-pdhcg_result_t *optimize(const pdhg_parameters_t *params,
-                         const qp_problem_t *original_problem);
+    pdhcg_result_t *optimize(const pdhg_parameters_t *params, const qp_problem_t *original_problem);
+
+    int pdhcg_validate_fixed_cone_sections(const qp_problem_t *problem);
 
 #ifdef __cplusplus
 }

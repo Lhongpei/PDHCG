@@ -193,6 +193,50 @@ static int test_soc_layout_and_postsolve(void)
     return 0;
 }
 
+static int test_power_layout_and_alpha(void)
+{
+    qp_problem_t problem;
+    pdhg_parameters_t parameters = quiet_parameters();
+    pdhcg_presolve_info_t *info;
+    double lower[] = {2.0, -INFINITY, -INFINITY, -INFINITY};
+    double upper[] = {2.0, INFINITY, INFINITY, INFINITY};
+    double objective[] = {0.0, 0.0, 0.0, 0.0};
+    int cone_start[] = {1};
+    int cone_v_dim[] = {1};
+    cone_type_t cone_type[] = {CONE_POWER};
+    double power_alpha[] = {0.37};
+
+    memset(&problem, 0, sizeof(problem));
+    problem.num_variables = 4;
+    problem.constraint_matrix = create_csr(0, 0);
+    CHECK(problem.constraint_matrix != NULL);
+    problem.variable_lower_bound = lower;
+    problem.variable_upper_bound = upper;
+    problem.objective_vector = objective;
+    problem.cones.num_cones = 1;
+    problem.cones.start_idx = cone_start;
+    problem.cones.v_dim = cone_v_dim;
+    problem.cones.type = cone_type;
+    problem.cones.power_alpha = power_alpha;
+
+    info = pdhcg_presolve(&problem, &parameters);
+    CHECK(info != NULL);
+    CHECK(info->presolve_status == PDHCG_PRESOLVE_STATUS_REDUCED);
+    CHECK(!info->problem_solved_during_presolve);
+    CHECK(info->reduced_problem != NULL);
+    CHECK(info->reduced_problem->num_variables == 3);
+    CHECK(info->reduced_problem->cones.num_cones == 1);
+    CHECK(info->reduced_problem->cones.start_idx[0] == 0);
+    CHECK(info->reduced_problem->cones.v_dim[0] == 1);
+    CHECK(info->reduced_problem->cones.type[0] == CONE_POWER);
+    CHECK(info->reduced_problem->cones.power_alpha != NULL);
+    CHECK(fabs(info->reduced_problem->cones.power_alpha[0] - power_alpha[0]) <= 1e-15);
+
+    pdhcg_presolve_info_free(info);
+    free_csr(problem.constraint_matrix);
+    return 0;
+}
+
 static int test_diagonal_middle_matrix(void)
 {
     qp_problem_t problem;
@@ -261,6 +305,10 @@ int main(void)
     printf("SOC layout and postsolve...\n");
     fflush(stdout);
     if (test_soc_layout_and_postsolve())
+        return 1;
+    printf("Power-cone layout and alpha...\n");
+    fflush(stdout);
+    if (test_power_layout_and_alpha())
         return 1;
     printf("diagonal middle matrix...\n");
     fflush(stdout);

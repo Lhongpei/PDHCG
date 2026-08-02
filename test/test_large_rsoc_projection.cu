@@ -132,6 +132,7 @@ static int compare_dual_residual(int k)
     double *d_scaling = NULL;
     double *d_primal = NULL;
     double *d_warp_result = NULL;
+    double *d_complementarity = NULL;
     double *d_grid_result = NULL;
     double *d_warp_workspace = NULL;
     double *d_grid_workspace = NULL;
@@ -144,6 +145,7 @@ static int compare_dual_residual(int k)
     CUDA_CHECK(cudaMalloc(&d_scaling, (size_t)n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_primal, (size_t)n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_warp_result, (size_t)n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_complementarity, sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_grid_result, (size_t)n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_warp_workspace, sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_grid_workspace, sizeof(double)));
@@ -154,14 +156,24 @@ static int compare_dual_residual(int k)
     CUDA_CHECK(cudaMemcpy(d_scaling, scaling, (size_t)n * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(d_primal, 0, (size_t)n * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_warp_result, 0, (size_t)n * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_complementarity, 0, sizeof(double)));
     CUDA_CHECK(cudaMemset(d_grid_result, 0, (size_t)n * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_warp_workspace, 0, sizeof(double)));
     CUDA_CHECK(cudaMemset(d_grid_workspace, 0, sizeof(double)));
     CUDA_CHECK(cudaMemcpy(d_start, &start, sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_vdim, &k, sizeof(int), cudaMemcpyHostToDevice));
 
-    compute_cone_dual_residual_warp_kernel<<<1, THREADS_PER_BLOCK>>>(
-        d_warp_result, d_objective, d_dual_product, d_scaling, d_primal, d_warp_workspace, d_start, d_vdim, NULL, 1);
+    compute_cone_dual_residual_warp_kernel<<<1, THREADS_PER_BLOCK>>>(d_warp_result,
+                                                                     d_complementarity,
+                                                                     d_objective,
+                                                                     d_dual_product,
+                                                                     d_scaling,
+                                                                     d_primal,
+                                                                     d_warp_workspace,
+                                                                     d_start,
+                                                                     d_vdim,
+                                                                     NULL,
+                                                                     1);
     compute_cone_dual_residual_grid_reduce_kernel<<<blocks_per_cone, THREADS_PER_BLOCK>>>(
         d_objective, d_dual_product, d_grid_workspace, d_start, d_vdim, 1, blocks_per_cone);
     compute_cone_dual_residual_grid_finalize_kernel<<<1, THREADS_PER_BLOCK>>>(
@@ -182,6 +194,7 @@ static int compare_dual_residual(int k)
     CUDA_CHECK(cudaFree(d_scaling));
     CUDA_CHECK(cudaFree(d_primal));
     CUDA_CHECK(cudaFree(d_warp_result));
+    CUDA_CHECK(cudaFree(d_complementarity));
     CUDA_CHECK(cudaFree(d_grid_result));
     CUDA_CHECK(cudaFree(d_warp_workspace));
     CUDA_CHECK(cudaFree(d_grid_workspace));

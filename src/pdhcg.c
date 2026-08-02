@@ -18,6 +18,8 @@ limitations under the License.
 #include "pdhcg.h"
 #include "solver.h"
 #include "utils.h"
+#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -393,11 +395,18 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     prob->cones.is_fixed = NULL;
     prob->num_original_variables = 0;
 
-    if (num_cones <= 0 || cones == NULL)
+    if (num_cones <= 0)
         return prob;
+    if (!cones)
+    {
+        fprintf(stderr, "[create_qp_problem] num_cones=%d but cones is NULL\n", num_cones);
+        qp_problem_free(prob);
+        return NULL;
+    }
 
     int n_vars = prob->num_variables;
     int n_orig = n_vars;
+    char *cone_owner = (char *)safe_calloc((size_t)n_vars, sizeof(char));
     /* A finite var bound on a cone slot makes proj_K ∘ proj_Box != proj_{K ∩ Box}; the
        caller must lift such variables with an auxiliary (x_cone = x_box) so cone slots
        stay free. Treat |bound| >= 1e30 as "free" (matches the +/- INFINITY sentinel and
@@ -406,11 +415,30 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     {
         int s = cones[i].start_idx;
         int len;
-        if (cones[i].type == CONE_EXPONENTIAL || cones[i].type == CONE_POWER)
-            len = 3;
-        else
-            len = cones[i].v_dim + 2;
-        if (s < 0 || s + len > n_vars)
+        switch (cones[i].type)
+        {
+            case CONE_EXPONENTIAL:
+            case CONE_POWER:
+                len = 3;
+                break;
+            case CONE_STANDARD_SOC:
+            case CONE_ROTATED_SOC:
+                if (cones[i].v_dim < 0 || cones[i].v_dim > INT_MAX - 2)
+                {
+                    fprintf(stderr, "[create_qp_problem] cone %d has invalid v_dim=%d\n", i, cones[i].v_dim);
+                    free(cone_owner);
+                    qp_problem_free(prob);
+                    return NULL;
+                }
+                len = cones[i].v_dim + 2;
+                break;
+            default:
+                fprintf(stderr, "[create_qp_problem] cone %d has unsupported type=%d\n", i, (int)cones[i].type);
+                free(cone_owner);
+                qp_problem_free(prob);
+                return NULL;
+        }
+        if (s < 0 || (long long)s + (long long)len > n_vars)
         {
             fprintf(stderr,
                     "[create_qp_problem] cone %d out of range: start=%d len=%d num_variables=%d\n",
@@ -418,11 +446,20 @@ qp_problem_t *create_qp_problem(const double *objective_c,
                     s,
                     len,
                     n_vars);
+            free(cone_owner);
             qp_problem_free(prob);
             return NULL;
         }
         for (int j = s; j < s + len; ++j)
         {
+            if (cone_owner[j])
+            {
+                fprintf(stderr, "[create_qp_problem] cone %d overlaps another cone at variable %d\n", i, j);
+                free(cone_owner);
+                qp_problem_free(prob);
+                return NULL;
+            }
+            cone_owner[j] = 1;
             double lo = prob->variable_lower_bound[j];
             double hi = prob->variable_upper_bound[j];
             int lo_finite = isfinite(lo) && lo > -1e30;
@@ -438,6 +475,7 @@ qp_problem_t *create_qp_problem(const double *objective_c,
                         j,
                         lo,
                         hi);
+                free(cone_owner);
                 qp_problem_free(prob);
                 return NULL;
             }
@@ -445,6 +483,7 @@ qp_problem_t *create_qp_problem(const double *objective_c,
         if (s < n_orig)
             n_orig = s;
     }
+    free(cone_owner);
 
     prob->cones.num_cones = num_cones;
     prob->cones.start_idx = (int *)safe_malloc(num_cones * sizeof(int));
@@ -636,6 +675,11 @@ int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
         fprintf(stderr, "[set_cone_fixed] computed index %d out of range [0, %d)\n", idx, prob->num_variables);
         return -1;
     }
+    if (!isfinite(value))
+    {
+        fprintf(stderr, "[set_cone_fixed] fixed value must be finite; got %.17g\n", value);
+        return -1;
+    }
 
     if (!prob->cones.is_fixed)
         prob->cones.is_fixed = (char *)safe_calloc(prob->num_variables, sizeof(char));
@@ -647,6 +691,170 @@ int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
     return 0;
 }
 
+int pdhcg_validate_fixed_cone_sections(const qp_problem_t *problem)
+{
+    if (!problem || !problem->cones.is_fixed)
+        return 0;
+
+    for (int cone = 0; cone < problem->cones.num_cones; ++cone)
+    {
+        int start = problem->cones.start_idx[cone];
+        int vector_dimension = problem->cones.v_dim[cone];
+        int length = (problem->cones.type[cone] == CONE_EXPONENTIAL || problem->cones.type[cone] == CONE_POWER)
+            ? 3
+            : vector_dimension + 2;
+        int any_fixed = 0;
+        for (int slot = 0; slot < length; ++slot)
+            any_fixed |= problem->cones.is_fixed[start + slot] != 0;
+        if (!any_fixed)
+            continue;
+
+        if (problem->cones.type[cone] == CONE_EXPONENTIAL)
+        {
+            int fixed_x = problem->cones.is_fixed[start + 0] != 0;
+            int fixed_y = problem->cones.is_fixed[start + 1] != 0;
+            int fixed_z = problem->cones.is_fixed[start + 2] != 0;
+            double y = problem->primal_start ? problem->primal_start[start + 1] : 0.0;
+            if (!fixed_y || fixed_x || fixed_z)
+            {
+                fprintf(stderr,
+                        "[solve_qp_problem] exponential cone %d uses an unsupported fixed-slot pattern; "
+                        "only fixing y is supported.\n",
+                        cone);
+                return -1;
+            }
+            if (!isfinite(y) || y < 0.0)
+            {
+                fprintf(stderr,
+                        "[solve_qp_problem] exponential cone %d has invalid fixed y=%.17g; expected y >= 0.\n",
+                        cone,
+                        y);
+                return -1;
+            }
+            continue;
+        }
+
+        if (problem->cones.type[cone] == CONE_STANDARD_SOC)
+        {
+            int fixed_vector = 0;
+            for (int slot = 0; slot < vector_dimension; ++slot)
+                fixed_vector |= problem->cones.is_fixed[start + slot] != 0;
+            int w_index = start + vector_dimension;
+            int z_index = w_index + 1;
+            int fixed_w = problem->cones.is_fixed[w_index] != 0;
+            int fixed_z = problem->cones.is_fixed[z_index] != 0;
+            double w = problem->primal_start ? problem->primal_start[w_index] : 0.0;
+            double z = problem->primal_start ? problem->primal_start[z_index] : 0.0;
+            if (fixed_vector || (fixed_w && !fixed_z && w != 0.0))
+            {
+                fprintf(stderr,
+                        "[solve_qp_problem] standard SOC %d uses an unsupported fixed-slot pattern; "
+                        "fixed vector slots and a nonzero fixed w without fixed z are not supported.\n",
+                        cone);
+                return -1;
+            }
+            if (fixed_z && (!isfinite(z) || z < 0.0 || (fixed_w && (!isfinite(w) || fabs(w) > z))))
+            {
+                fprintf(stderr,
+                        "[solve_qp_problem] standard SOC %d has an empty fixed section (w=%.17g%s, z=%.17g).\n",
+                        cone,
+                        w,
+                        fixed_w ? " fixed" : "",
+                        z);
+                return -1;
+            }
+            continue;
+        }
+
+        if (problem->cones.type[cone] == CONE_ROTATED_SOC)
+        {
+            int fixed_vector = 0;
+            for (int slot = 0; slot < vector_dimension; ++slot)
+                fixed_vector |= problem->cones.is_fixed[start + slot] != 0;
+            int s_index = start + vector_dimension;
+            int t_index = s_index + 1;
+            int fixed_s = problem->cones.is_fixed[s_index] != 0;
+            int fixed_t = problem->cones.is_fixed[t_index] != 0;
+            double s = problem->primal_start ? problem->primal_start[s_index] : 0.0;
+            double t = problem->primal_start ? problem->primal_start[t_index] : 0.0;
+            if (fixed_vector || !fixed_s || !fixed_t)
+            {
+                fprintf(stderr,
+                        "[solve_qp_problem] rotated SOC %d uses an unsupported fixed-slot pattern; "
+                        "only fixing both s and t is supported.\n",
+                        cone);
+                return -1;
+            }
+            if (!isfinite(s) || !isfinite(t) || s < 0.0 || t < 0.0)
+            {
+                fprintf(stderr,
+                        "[solve_qp_problem] rotated SOC %d has an empty fixed section (s=%.17g, t=%.17g).\n",
+                        cone,
+                        s,
+                        t);
+                return -1;
+            }
+            continue;
+        }
+
+        if (problem->cones.type[cone] != CONE_POWER)
+            continue;
+
+        int fixed_x = problem->cones.is_fixed[start + 0] != 0;
+        int fixed_y = problem->cones.is_fixed[start + 1] != 0;
+        int fixed_z = problem->cones.is_fixed[start + 2] != 0;
+        double x = problem->primal_start ? problem->primal_start[start + 0] : 0.0;
+        double y = problem->primal_start ? problem->primal_start[start + 1] : 0.0;
+        double z = problem->primal_start ? problem->primal_start[start + 2] : 0.0;
+
+        if ((fixed_x && (!isfinite(x) || x < 0.0)) || (fixed_y && (!isfinite(y) || y < 0.0)) ||
+            (fixed_z && !isfinite(z)))
+        {
+            fprintf(stderr,
+                    "[solve_qp_problem] power cone %d has an invalid fixed value "
+                    "(x=%.17g%s, y=%.17g%s, z=%.17g%s).\n",
+                    cone,
+                    x,
+                    fixed_x ? " fixed" : "",
+                    y,
+                    fixed_y ? " fixed" : "",
+                    z,
+                    fixed_z ? " fixed" : "");
+            return -1;
+        }
+
+        if (fixed_z && z != 0.0 && ((fixed_x && x == 0.0) || (fixed_y && y == 0.0)))
+        {
+            fprintf(stderr,
+                    "[solve_qp_problem] power cone %d has an empty fixed section: "
+                    "|z| is positive while a fixed nonnegative axis is zero.\n",
+                    cone);
+            return -1;
+        }
+
+        if (fixed_x && fixed_y && fixed_z && z != 0.0)
+        {
+            double alpha = problem->cones.power_alpha[cone];
+            double log_bound = (x > 0.0 && y > 0.0) ? alpha * log(x) + (1.0 - alpha) * log(y) : -INFINITY;
+            double log_abs_z = log(fabs(z));
+            double roundoff_tolerance = 64.0 * DBL_EPSILON * (1.0 + fabs(log_bound) + fabs(log_abs_z));
+            if (log_bound + roundoff_tolerance < log_abs_z)
+            {
+                fprintf(stderr,
+                        "[solve_qp_problem] power cone %d has an infeasible fully fixed point "
+                        "(x=%.17g, y=%.17g, z=%.17g, alpha=%.17g).\n",
+                        cone,
+                        x,
+                        y,
+                        z,
+                        alpha);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters_t *params)
 {
     if (!prob)
@@ -654,6 +862,8 @@ pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters
         fprintf(stderr, "[interface] solve_qp_problem: invalid arguments.\n");
         return NULL;
     }
+    if (pdhcg_validate_fixed_cone_sections(prob) != 0)
+        return NULL;
 
     pdhg_parameters_t local_params;
     if (params)

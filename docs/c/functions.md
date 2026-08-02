@@ -78,6 +78,8 @@ int set_cone_fixed(
 
 Pins one slot of cone `cone_idx` to `value`. Allocates the `is_fixed` flag array on first use and also writes `primal_start[start_idx + slot] = value` so the projection sees the constant. Typical use: fix the `y` slot of an exponential cone (e.g. Fisher-market entropy term with `y = 1`).
 
+The solver currently supports these fixed cross-sections: `y` only for an exponential cone; `z` (optionally also `w`) or `w = 0` for a standard SOC; both `s` and `t` for a rotated SOC; and any feasible fixed-slot pattern for a power cone. Unsupported or empty fixed sections are rejected when solving instead of being projected approximately.
+
 **Parameters:**
 
 | Parameter | Description |

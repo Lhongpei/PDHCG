@@ -35,11 +35,13 @@ static qp_problem_t *make_problem(void)
 
 static qp_problem_t *make_fixed_rsoc_problem(void)
 {
-    static const int row_ptr[] = {0, 0};
+    static const int row_ptr[] = {0, 0, 0};
     static const int col_ind[] = {0};
     static const double values[] = {0.0};
-    static const double objective[] = {-1.0, 0.0, 0.0};
-    static const double zero[] = {0.0};
+    static const double objective[] = {-1.0, 0.0, 0.0, 0.0};
+    static const double var_lb[] = {-INFINITY, -INFINITY, -INFINITY, 0.0};
+    static const double var_ub[] = {INFINITY, INFINITY, INFINITY, 0.0};
+    static const double zero[] = {0.0, 0.0};
     const cone_spec_t cone = {
         .type = CONE_ROTATED_SOC,
         .start_idx = 0,
@@ -48,19 +50,57 @@ static qp_problem_t *make_fixed_rsoc_problem(void)
         .is_fixed = NULL,
     };
     matrix_desc_t A = {0};
-    A.m = 1;
-    A.n = 3;
+    A.m = 2;
+    A.n = 4;
     A.fmt = matrix_csr;
     A.data.csr.nnz = 0;
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, zero, zero, NULL, NULL, NULL, 1, &cone);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, zero, zero, var_lb, var_ub, NULL, 1, &cone);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
     {
         qp_problem_free(problem);
         return NULL;
     }
+    return problem;
+}
+
+static qp_problem_t *make_large_step_fixed_rsoc_problem(void)
+{
+    static const int row_ptr[] = {0, 1, 2};
+    static const int col_ind[] = {1, 2};
+    static const double values[] = {1e-9, 1e-9};
+    static const double objective[] = {-1.0, 0.0, 0.0, 0.0};
+    static const double rhs[] = {1e-9, 1e-9};
+    static const double primal_start[] = {0.5, 1.0, 1.0, 0.0};
+    static const double dual_start[] = {0.0, 0.0};
+    static const double var_lb[] = {-INFINITY, -INFINITY, -INFINITY, 0.0};
+    static const double var_ub[] = {INFINITY, INFINITY, INFINITY, 0.0};
+    const cone_spec_t cone = {
+        .type = CONE_ROTATED_SOC,
+        .start_idx = 0,
+        .v_dim = 1,
+        .alpha = 0.0,
+        .is_fixed = NULL,
+    };
+    matrix_desc_t A = {0};
+    A.m = 2;
+    A.n = 4;
+    A.fmt = matrix_csr;
+    A.data.csr.nnz = 2;
+    A.data.csr.row_ptr = row_ptr;
+    A.data.csr.col_ind = col_ind;
+    A.data.csr.vals = values;
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone);
+    if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
+    {
+        qp_problem_free(problem);
+        return NULL;
+    }
+    set_start_values(problem, primal_start, dual_start);
     return problem;
 }
 
@@ -141,6 +181,48 @@ static qp_problem_t *make_exponential_problem(void)
         }
     }
     return problem;
+}
+
+static qp_problem_t *make_power_problem(void)
+{
+    static const int row_ptr[] = {0, 2, 4, 6, 8};
+    static const int col_ind[] = {0, 1, 3, 4, 6, 7, 9, 10};
+    static const double values[] = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+    static const double objective[] = {
+        0.0,
+        0.0,
+        -1.0,
+        0.0,
+        0.0,
+        -1.0,
+        0.0,
+        0.0,
+        -1.0,
+        0.0,
+        0.0,
+        -1.0,
+    };
+    static const double rhs[] = {2.0, 2.0, 2.0, 2.0};
+    static const double alpha[] = {0.2, 0.35, 0.65, 0.8};
+    cone_spec_t cones[4];
+    for (int cone = 0; cone < 4; ++cone)
+    {
+        cones[cone].type = CONE_POWER;
+        cones[cone].start_idx = 3 * cone;
+        cones[cone].v_dim = 1;
+        cones[cone].alpha = alpha[cone];
+        cones[cone].is_fixed = NULL;
+    }
+
+    matrix_desc_t A = {0};
+    A.m = 4;
+    A.n = 12;
+    A.fmt = matrix_csr;
+    A.data.csr.nnz = 8;
+    A.data.csr.row_ptr = row_ptr;
+    A.data.csr.col_ind = col_ind;
+    A.data.csr.vals = values;
+    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones);
 }
 
 static qp_problem_t *make_large_soc_problem(int v_dim)
@@ -273,14 +355,24 @@ int main(int argc, char **argv)
     set_default_parameters(&parameters);
     parameters.verbose = getenv("PDHCG_TEST_VERBOSE") ? 1 : 0;
     parameters.grid_size.decided = true;
-    parameters.grid_size.row_dims = size / 2;
-    parameters.grid_size.col_dims = 2;
+    int all_column_grid = getenv("PDHCG_TEST_ALL_COLUMN_GRID") != NULL;
+    if (all_column_grid)
+    {
+        parameters.grid_size.row_dims = 1;
+        parameters.grid_size.col_dims = size;
+    }
+    else
+    {
+        parameters.grid_size.row_dims = size / 2;
+        parameters.grid_size.col_dims = 2;
+    }
     parameters.partition_method = UNIFORM_PARTITION;
     parameters.permute_method = FULL_RANDOM_PERMUTATION;
     parameters.curtis_reid_iterations = 0;
     parameters.l_inf_ruiz_iterations = 0;
     parameters.has_pock_chambolle_alpha = false;
     parameters.bound_objective_rescaling = false;
+    parameters.presolve = false;
     parameters.sv_max_iter = 50;
     parameters.sv_tol = 1e-3;
     parameters.termination_evaluation_frequency = 20;
@@ -322,21 +414,50 @@ int main(int argc, char **argv)
         qp_problem_free(problem);
     }
 
-    problem = rank == 0 ? make_fixed_rsoc_problem() : NULL;
-    parameters.permute_method = NO_PERMUTATION;
-    result = solve_qp_problem_distributed(&parameters, problem);
-    if (rank == 0)
+    if (!all_column_grid)
     {
-        const double expected = sqrt(2.0);
-        if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL ||
-            fabs(result->primal_solution[0] - expected) > 2e-4 || fabs(result->primal_solution[1] - 1.0) > 1e-12 ||
-            fabs(result->primal_solution[2] - 1.0) > 1e-12)
+        problem = rank == 0 ? make_fixed_rsoc_problem() : NULL;
+        parameters.permute_method = NO_PERMUTATION;
+        result = solve_qp_problem_distributed(&parameters, problem);
+        if (rank == 0)
         {
-            fprintf(stderr, "distributed fixed-endpoint RSOC solve returned an incorrect solution\n");
-            failed = 1;
+            const double expected = sqrt(2.0);
+            if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL ||
+                fabs(result->primal_solution[0] - expected) > 2e-4 || fabs(result->primal_solution[1] - 1.0) > 1e-12 ||
+                fabs(result->primal_solution[2] - 1.0) > 1e-12)
+            {
+                fprintf(stderr, "distributed fixed-endpoint RSOC solve returned an incorrect solution\n");
+                failed = 1;
+            }
+            pdhcg_result_free(result);
+            qp_problem_free(problem);
         }
-        pdhcg_result_free(result);
-        qp_problem_free(problem);
+
+        parameters.termination_evaluation_frequency = 1;
+        parameters.termination_criteria.iteration_limit = 1;
+        const norm_type_t fixed_section_norms[] = {NORM_TYPE_L_INF, NORM_TYPE_L2};
+        for (int norm = 0; norm < 2; ++norm)
+        {
+            problem = rank == 0 ? make_large_step_fixed_rsoc_problem() : NULL;
+            parameters.optimality_norm = fixed_section_norms[norm];
+            result = solve_qp_problem_distributed(&parameters, problem);
+            if (rank == 0)
+            {
+                if (!result || result->termination_reason != TERMINATION_REASON_ITERATION_LIMIT ||
+                    result->total_count != 1)
+                {
+                    fprintf(stderr,
+                            "distributed large-step fixed-endpoint warm start was accepted with norm %d\n",
+                            (int)fixed_section_norms[norm]);
+                    failed = 1;
+                }
+                pdhcg_result_free(result);
+                qp_problem_free(problem);
+            }
+        }
+        parameters.optimality_norm = NORM_TYPE_L_INF;
+        parameters.termination_evaluation_frequency = 20;
+        parameters.termination_criteria.iteration_limit = 1000000;
     }
 
     problem = rank == 0 ? make_exponential_problem() : NULL;
@@ -384,24 +505,70 @@ int main(int argc, char **argv)
         qp_problem_free(problem);
     }
 
-    problem = rank == 0 ? make_qcqp_problem() : NULL;
-    parameters.permute_method = NO_PERMUTATION;
+    problem = rank == 0 ? make_power_problem() : NULL;
+    parameters.permute_method = FULL_RANDOM_PERMUTATION;
+    parameters.optimality_norm = NORM_TYPE_L2;
     result = solve_qp_problem_distributed(&parameters, problem);
     if (rank == 0)
     {
-        if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL || result->num_variables != 1 ||
-            fabs(result->primal_solution[0] - 1.0) > 2e-4)
+        static const double alpha[] = {0.2, 0.35, 0.65, 0.8};
+        double max_error = 0.0;
+        double max_cone_violation = 0.0;
+        if (result)
         {
-            fprintf(stderr, "distributed QCQP reformulation returned an incorrect solution\n");
+            for (int cone = 0; cone < 4; ++cone)
+            {
+                double a = alpha[cone];
+                double x_expected = 2.0 * a;
+                double y_expected = 2.0 * (1.0 - a);
+                double z_expected = pow(x_expected, a) * pow(y_expected, 1.0 - a);
+                double x = result->primal_solution[3 * cone + 0];
+                double y = result->primal_solution[3 * cone + 1];
+                double z = result->primal_solution[3 * cone + 2];
+                max_error = fmax(max_error, fabs(x - x_expected));
+                max_error = fmax(max_error, fabs(y - y_expected));
+                max_error = fmax(max_error, fabs(z - z_expected));
+                double cone_bound = (x > 0.0 && y > 0.0) ? pow(x, a) * pow(y, 1.0 - a) : 0.0;
+                max_cone_violation = fmax(max_cone_violation, fabs(z) - cone_bound);
+            }
+        }
+        if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL || max_error > 2e-4 ||
+            max_cone_violation > 2e-6)
+        {
+            fprintf(stderr,
+                    "distributed power-cone solve returned an incorrect solution "
+                    "(status=%d, max_error=%.3e, max_violation=%.3e)\n",
+                    result ? (int)result->termination_reason : -1,
+                    max_error,
+                    max_cone_violation);
             failed = 1;
         }
         pdhcg_result_free(result);
         qp_problem_free(problem);
     }
+    parameters.optimality_norm = NORM_TYPE_L_INF;
+
+    if (!all_column_grid)
+    {
+        problem = rank == 0 ? make_qcqp_problem() : NULL;
+        parameters.permute_method = NO_PERMUTATION;
+        result = solve_qp_problem_distributed(&parameters, problem);
+        if (rank == 0)
+        {
+            if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL || result->num_variables != 1 ||
+                fabs(result->primal_solution[0] - 1.0) > 2e-4)
+            {
+                fprintf(stderr, "distributed QCQP reformulation returned an incorrect solution\n");
+                failed = 1;
+            }
+            pdhcg_result_free(result);
+            qp_problem_free(problem);
+        }
+    }
 
     const int large_v_dim = 1025;
     problem = rank == 0 ? make_large_soc_problem(large_v_dim) : NULL;
-    parameters.permute_method = NO_PERMUTATION;
+    parameters.permute_method = FULL_RANDOM_PERMUTATION;
     result = solve_qp_problem_distributed(&parameters, problem);
     if (rank == 0)
     {

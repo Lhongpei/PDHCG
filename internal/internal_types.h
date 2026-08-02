@@ -94,7 +94,25 @@ typedef struct
     int has_inner_loop;
 } inner_solver_t;
 
-struct distributed_cone_state_s;
+typedef struct distributed_cone_split_s distributed_cone_split_t;
+struct cone_bucket_s;
+
+typedef struct
+{
+    int num_blocks;
+    int *start_idx;                       /* permuted by bucket */
+    int *v_dim;                           /* permuted by bucket */
+    double *power_alpha;                  /* permuted by bucket; NULL if no power cones */
+    char *is_fixed;                       /* NULL if no fixes */
+    double *primal_warm_start;            /* device [num_blocks] */
+    double *dual_warm_start;              /* device [num_blocks] */
+    double *complementarity_residual;     /* device [num_blocks] */
+    double *effective_objective_gradient; /* device [num_variables] */
+    double *bb_primal_snapshot;           /* device [num_variables] */
+    struct cone_bucket_s *buckets;
+    int num_buckets;
+    distributed_cone_split_t *split;
+} cone_runtime_t;
 
 typedef enum
 {
@@ -199,19 +217,7 @@ typedef struct
     grid_context_t *grid_context;
 
     variable_set_type_t var_set_type;
-    int num_cone_blocks;
-    int *cone_start_idx;      /* permuted by bucket */
-    int *cone_v_dim;          /* permuted by bucket */
-    double *cone_power_alpha; /* permuted by bucket; NULL if no power cones */
-    char *cone_is_fixed;      /* NULL if no fixes */
-    double *cone_warm_start_primal;
-    double *cone_warm_start_dual;
-    double *effective_obj_grad;
-    double *bb_pdhg_snapshot;
-    struct cone_bucket_s *cone_buckets;
-    int num_cone_buckets;
-    int num_distributed_cone_blocks;
-    struct distributed_cone_state_s *distributed_cones;
+    cone_runtime_t cones;
     int num_original_variables;
 } pdhg_solver_state_t;
 

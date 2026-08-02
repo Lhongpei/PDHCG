@@ -66,6 +66,9 @@ test/*
 !test/test_initial_box_projection.c
 !test/test_large_rsoc_projection.cu
 !test/test_large_soc_projection.cu
+!test/test_conic_kkt_termination.c
+!test/test_power_cone.c
+!test/test_power_cone_projection.cu
 /.vscode
 /.venv
 /_b
