@@ -102,7 +102,8 @@ typedef struct {
 typedef enum {
   CONE_ROTATED_SOC = 0,
   CONE_STANDARD_SOC = 1,
-  CONE_EXPONENTIAL = 2
+  CONE_EXPONENTIAL = 2,
+  CONE_POWER = 3
 } cone_type_t;
 ```
 
@@ -111,6 +112,7 @@ typedef enum {
 | `CONE_STANDARD_SOC` | `\|\|v\|\|^2 + w^2 <= z^2`, `z >= 0` | `v` (`v_dim`), `w`, `z` |
 | `CONE_ROTATED_SOC` | `\|\|v\|\|^2 <= 2 s t`, `s, t >= 0` | `v` (`v_dim`), `s`, `t` |
 | `CONE_EXPONENTIAL` | `y * exp(x / y) <= z`, `y > 0` | `x`, `y`, `z` (`v_dim` must be 1) |
+| `CONE_POWER` | `x^alpha * y^(1-alpha) >= \|z\|`, `x,y >= 0` | `x`, `y`, `z` (`v_dim` must be 1) |
 
 ## Cone Spec
 
@@ -119,11 +121,17 @@ typedef struct {
   cone_type_t type;
   int start_idx;
   int v_dim;
+  double power_alpha;
   const char *is_fixed;
 } cone_spec_t;
 ```
 
-Input descriptor for a single cone block. Slots occupy `[start_idx, start_idx + slot_count)` of the variable vector, where `slot_count` is `v_dim + 2` for SOC/RSOC and `3` for the exponential cone. If non-NULL, `is_fixed` has length `slot_count`; a nonzero entry pins that slot to its initial value.
+Input descriptor for a single cone block. In `var_cones`, `start_idx` indexes
+the variable vector; in `affine_cones`, it indexes the global rows of `A`. The
+slot count is `v_dim + 2` for SOC/RSOC and `3` for
+exponential/power cones. Power cones require `power_alpha` in `(0,1)`.
+Variable cones may provide an `is_fixed` array of `slot_count` bytes; affine
+cones must set it to NULL.
 
 ## Cone Blocks
 
@@ -133,22 +141,13 @@ typedef struct {
   int *start_idx;     /* [num_cones] */
   int *v_dim;         /* [num_cones] */
   cone_type_t *type;  /* [num_cones] */
-  char *is_fixed;     /* concatenated per-slot flags, or NULL */
+  double *power_alpha; /* [num_cones], or NULL */
+  int fixed_mask_size; /* number of entries in is_fixed */
+  char *is_fixed;      /* ambient-coordinate flags, or NULL */
 } cone_blocks_t;
 ```
 
 Storage form held inside `qp_problem_t`. Built from the user-supplied `cone_spec_t` array by `create_qp_problem`; users normally do not touch this struct directly.
-
-## Variable Set Type
-
-```c
-typedef enum {
-  VAR_SET_BOX_ONLY = 0,
-  VAR_SET_CONTAIN_CONIC = 1
-} variable_set_type_t;
-```
-
-Derived inside the solver from the presence of cone blocks. Not user-facing.
 
 ## Quadratic Objective Type
 
@@ -188,11 +187,17 @@ typedef struct {
 
   double *constraint_lower_bound;
   double *constraint_upper_bound;
+  double *affine_cone_offset;
+  cone_blocks_t affine_cones;
 
   double *primal_start;
   double *dual_start;
 } qp_problem_t;
 ```
+
+Constraints are represented as `A x + affine_cone_offset` in a product set.
+Rows outside `affine_cones` use their scalar lower and upper bounds; cone block
+`start_idx` values are global constraint-row indices.
 
 ## Restart Parameters
 
@@ -282,6 +287,7 @@ typedef struct {
   bool has_pock_chambolle_alpha;
   double pock_chambolle_alpha;
   bool bound_objective_rescaling;
+  bool use_cone_preserving_scaling;
   int verbose;
   int termination_evaluation_frequency;
   int sv_max_iter;

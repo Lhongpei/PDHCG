@@ -16,6 +16,8 @@ limitations under the License.
 */
 
 #include "pdhcg.h"
+#include "cone_utils.h"
+#include "distributed_interface.h"
 #include "solver.h"
 #include "utils.h"
 #include <float.h>
@@ -26,11 +28,270 @@ limitations under the License.
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef PDHCG_COMPILE_DISTRIBUTED
-#include "distributed_solver.h"
-#endif
-
 volatile sig_atomic_t g_pdhcg_cancel_request = 0;
+
+static void csr_component_free(CsrComponent *csr);
+
+static int validate_matrix_descriptor(const matrix_desc_t *desc, const char *name)
+{
+    if (!desc)
+        return 0;
+    if (desc->m < 0 || desc->n < 0)
+    {
+        fprintf(stderr, "[create_qp_problem] %s matrix has negative shape (%d, %d).\n", name, desc->m, desc->n);
+        return -1;
+    }
+
+    switch (desc->fmt)
+    {
+        case matrix_dense:
+            if (desc->m > 0 && desc->n > INT_MAX / desc->m)
+            {
+                fprintf(stderr, "[create_qp_problem] %s dense matrix is too large to index with int.\n", name);
+                return -1;
+            }
+            if (desc->m > 0 && desc->n > 0 && !desc->data.dense.A)
+            {
+                fprintf(stderr, "[create_qp_problem] %s dense matrix data is NULL.\n", name);
+                return -1;
+            }
+            return 0;
+
+        case matrix_csr:
+        {
+            int nnz = desc->data.csr.nnz;
+            const int *row_ptr = desc->data.csr.row_ptr;
+            if (nnz < 0 || !row_ptr || (nnz > 0 && (!desc->data.csr.col_ind || !desc->data.csr.vals)))
+            {
+                fprintf(stderr, "[create_qp_problem] %s CSR storage is incomplete.\n", name);
+                return -1;
+            }
+            if (row_ptr[0] != 0 || row_ptr[desc->m] != nnz)
+            {
+                fprintf(stderr, "[create_qp_problem] %s CSR row pointers do not span [0, nnz].\n", name);
+                return -1;
+            }
+            for (int row = 0; row < desc->m; ++row)
+            {
+                if (row_ptr[row] > row_ptr[row + 1] || row_ptr[row] < 0 || row_ptr[row + 1] > nnz)
+                {
+                    fprintf(stderr, "[create_qp_problem] %s CSR row pointers are invalid at row %d.\n", name, row);
+                    return -1;
+                }
+            }
+            for (int entry = 0; entry < nnz; ++entry)
+            {
+                int column = desc->data.csr.col_ind[entry];
+                if (column < 0 || column >= desc->n)
+                {
+                    fprintf(stderr,
+                            "[create_qp_problem] %s CSR column index %d is out of range [0, %d).\n",
+                            name,
+                            column,
+                            desc->n);
+                    return -1;
+                }
+            }
+            return 0;
+        }
+
+        case matrix_csc:
+        {
+            int nnz = desc->data.csc.nnz;
+            const int *col_ptr = desc->data.csc.col_ptr;
+            if (nnz < 0 || !col_ptr || (nnz > 0 && (!desc->data.csc.row_ind || !desc->data.csc.vals)))
+            {
+                fprintf(stderr, "[create_qp_problem] %s CSC storage is incomplete.\n", name);
+                return -1;
+            }
+            if (col_ptr[0] != 0 || col_ptr[desc->n] != nnz)
+            {
+                fprintf(stderr, "[create_qp_problem] %s CSC column pointers do not span [0, nnz].\n", name);
+                return -1;
+            }
+            for (int column = 0; column < desc->n; ++column)
+            {
+                if (col_ptr[column] > col_ptr[column + 1] || col_ptr[column] < 0 || col_ptr[column + 1] > nnz)
+                {
+                    fprintf(
+                        stderr, "[create_qp_problem] %s CSC column pointers are invalid at column %d.\n", name, column);
+                    return -1;
+                }
+            }
+            for (int entry = 0; entry < nnz; ++entry)
+            {
+                int row = desc->data.csc.row_ind[entry];
+                if (row < 0 || row >= desc->m)
+                {
+                    fprintf(stderr,
+                            "[create_qp_problem] %s CSC row index %d is out of range [0, %d).\n",
+                            name,
+                            row,
+                            desc->m);
+                    return -1;
+                }
+            }
+            return 0;
+        }
+
+        case matrix_coo:
+        {
+            int nnz = desc->data.coo.nnz;
+            if (nnz < 0 || (nnz > 0 && (!desc->data.coo.row_ind || !desc->data.coo.col_ind || !desc->data.coo.vals)))
+            {
+                fprintf(stderr, "[create_qp_problem] %s COO storage is incomplete.\n", name);
+                return -1;
+            }
+            for (int entry = 0; entry < nnz; ++entry)
+            {
+                int row = desc->data.coo.row_ind[entry];
+                int column = desc->data.coo.col_ind[entry];
+                if (row < 0 || row >= desc->m || column < 0 || column >= desc->n)
+                {
+                    fprintf(stderr,
+                            "[create_qp_problem] %s COO index (%d, %d) is out of range for shape (%d, %d).\n",
+                            name,
+                            row,
+                            column,
+                            desc->m,
+                            desc->n);
+                    return -1;
+                }
+            }
+            return 0;
+        }
+
+        default:
+            fprintf(stderr, "[create_qp_problem] %s matrix has unsupported format %d.\n", name, (int)desc->fmt);
+            return -1;
+    }
+}
+
+static int validate_problem_matrix_shapes(const matrix_desc_t *A_desc,
+                                          const matrix_desc_t *Q_desc,
+                                          const matrix_desc_t *R_desc,
+                                          const matrix_desc_t *D_desc,
+                                          int *num_variables,
+                                          int *num_constraints)
+{
+    if (!A_desc && !Q_desc && !R_desc)
+    {
+        fprintf(stderr, "[create_qp_problem] at least one of A, Q, or R must be provided.\n");
+        return -1;
+    }
+    if (validate_matrix_descriptor(A_desc, "A") != 0 || validate_matrix_descriptor(Q_desc, "Q") != 0 ||
+        validate_matrix_descriptor(R_desc, "R") != 0)
+        return -1;
+
+    int n = A_desc ? A_desc->n : (Q_desc ? Q_desc->n : R_desc->n);
+    int m = A_desc ? A_desc->m : 0;
+    if (Q_desc && (Q_desc->m != n || Q_desc->n != n))
+    {
+        fprintf(stderr, "[create_qp_problem] Q matrix shape (%d, %d) must be (%d, %d).\n", Q_desc->m, Q_desc->n, n, n);
+        return -1;
+    }
+    if (R_desc && R_desc->n != n)
+    {
+        fprintf(stderr, "[create_qp_problem] R matrix shape (%d, %d) must have %d columns.\n", R_desc->m, R_desc->n, n);
+        return -1;
+    }
+    if (D_desc && R_desc && R_desc->m > 0)
+    {
+        int rank = R_desc->m;
+        if (validate_matrix_descriptor(D_desc, "D") != 0 || D_desc->m != rank || D_desc->n != rank)
+        {
+            fprintf(stderr,
+                    "[create_qp_problem] D matrix shape (%d, %d) must be (%d, %d).\n",
+                    D_desc->m,
+                    D_desc->n,
+                    rank,
+                    rank);
+            return -1;
+        }
+    }
+
+    *num_variables = n;
+    *num_constraints = m;
+    return 0;
+}
+
+static int
+copy_matrix_desc_to_csr(const matrix_desc_t *desc, const char *name, CsrComponent *destination, int *num_nonzeros)
+{
+    int rc = 0;
+    switch (desc->fmt)
+    {
+        case matrix_dense:
+            rc = dense_to_csr(desc, &destination->row_ptr, &destination->col_ind, &destination->val, num_nonzeros);
+            break;
+        case matrix_csc:
+            rc = csc_to_csr(desc, &destination->row_ptr, &destination->col_ind, &destination->val, num_nonzeros);
+            break;
+        case matrix_coo:
+            rc = coo_to_csr(desc, &destination->row_ptr, &destination->col_ind, &destination->val, num_nonzeros);
+            break;
+        case matrix_csr:
+        {
+            int nnz = desc->data.csr.nnz;
+            destination->row_ptr = (int *)safe_malloc((size_t)(desc->m + 1) * sizeof(int));
+            memcpy(destination->row_ptr, desc->data.csr.row_ptr, (size_t)(desc->m + 1) * sizeof(int));
+            if (nnz > 0)
+            {
+                destination->col_ind = (int *)safe_malloc((size_t)nnz * sizeof(int));
+                destination->val = (double *)safe_malloc((size_t)nnz * sizeof(double));
+                memcpy(destination->col_ind, desc->data.csr.col_ind, (size_t)nnz * sizeof(int));
+                memcpy(destination->val, desc->data.csr.vals, (size_t)nnz * sizeof(double));
+            }
+            *num_nonzeros = nnz;
+            break;
+        }
+        default:
+            rc = -1;
+            break;
+    }
+    if (rc != 0)
+    {
+        fprintf(stderr, "[create_qp_problem] failed to convert %s matrix to CSR.\n", name);
+        csr_component_free(destination);
+    }
+    return rc;
+}
+
+static void initialize_empty_csr(CsrComponent *component, int num_rows, int *num_nonzeros)
+{
+    component->row_ptr = (int *)safe_calloc((size_t)num_rows + 1, sizeof(int));
+    *num_nonzeros = 0;
+}
+
+static int initialize_affine_cones(qp_problem_t *prob,
+                                   int num_affine_cones,
+                                   const cone_spec_t *affine_cones,
+                                   const double *affine_cone_offset)
+{
+    if (cone_blocks_init_from_specs(
+            &prob->affine_cones, num_affine_cones, affine_cones, prob->num_constraints, false, "affine") != 0)
+        return -1;
+
+    for (int cone = 0; cone < num_affine_cones; ++cone)
+    {
+        int start = prob->affine_cones.start_idx[cone];
+        int length = cone_block_length(&prob->affine_cones, cone);
+        for (int row = start; row < start + length; ++row)
+        {
+            if ((isfinite(prob->constraint_lower_bound[row]) && prob->constraint_lower_bound[row] > -1e30) ||
+                (isfinite(prob->constraint_upper_bound[row]) && prob->constraint_upper_bound[row] < 1e30))
+            {
+                fprintf(stderr, "[create_qp_problem] affine cone row %d also has a finite scalar bound.\n", row);
+                return -1;
+            }
+        }
+        if (affine_cone_offset)
+        {
+            memcpy(prob->affine_cone_offset + start, affine_cone_offset + start, (size_t)length * sizeof(double));
+        }
+    }
+    return 0;
+}
 
 qp_problem_t *create_qp_problem(const double *objective_c,
                                 const matrix_desc_t *Q_desc,
@@ -42,196 +303,40 @@ qp_problem_t *create_qp_problem(const double *objective_c,
                                 const double *var_lb,
                                 const double *var_ub,
                                 const double *objective_constant,
-                                int num_cones,
-                                const cone_spec_t *cones)
+                                int num_var_cones,
+                                const cone_spec_t *var_cones,
+                                int num_affine_cones,
+                                const cone_spec_t *affine_cones,
+                                const double *affine_cone_offset)
 {
-    qp_problem_t *prob = (qp_problem_t *)safe_malloc(sizeof(qp_problem_t));
-    prob->primal_start = NULL;
-    prob->dual_start = NULL;
-
+    qp_problem_t *prob = (qp_problem_t *)safe_calloc(1, sizeof(qp_problem_t));
     int n = 0;
     int m = 0;
-
-    if (A_desc)
-    {
-        n = A_desc->n;
-        m = A_desc->m;
-    }
-    else if (Q_desc)
-    {
-        n = Q_desc->n;
-    }
-    else if (R_desc)
-    {
-        n = R_desc->n;
-    }
-    else
-    {
-        fprintf(stderr,
-                "[interface] Error: At least one matrix (A, Q, or R) must "
-                "be provided for non-trivil optimization problem.\n");
-        free(prob);
-        return NULL;
-    }
-
-    if (n == 0 && (Q_desc || R_desc || A_desc))
-    {
-        fprintf(stderr,
-                "[interface] Warning: Matrix dimensions seem to be zero or "
-                "inconsistent.\n");
-    }
+    if (validate_problem_matrix_shapes(A_desc, Q_desc, R_desc, D_desc, &n, &m) != 0)
+        goto failure;
 
     prob->num_variables = n;
     prob->num_constraints = m;
+    prob->affine_cone_offset = m > 0 ? (double *)safe_calloc((size_t)m, sizeof(double)) : NULL;
 
     prob->constraint_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
     if (A_desc)
     {
-        switch (A_desc->fmt)
-        {
-            case matrix_dense:
-                dense_to_csr(A_desc,
-                             &prob->constraint_matrix->row_ptr,
-                             &prob->constraint_matrix->col_ind,
-                             &prob->constraint_matrix->val,
-                             &prob->constraint_matrix_num_nonzeros);
-                break;
-            case matrix_csc:
-            {
-                int *row_ptr = NULL, *col_ind = NULL;
-                double *vals = NULL;
-                int nnz = 0;
-                if (csc_to_csr(A_desc, &row_ptr, &col_ind, &vals, &nnz) != 0)
-                {
-                    fprintf(stderr, "[interface] A matrix CSC->CSR failed.\n");
-                    free(prob);
-                    return NULL;
-                }
-                prob->constraint_matrix_num_nonzeros = nnz;
-                prob->constraint_matrix->row_ptr = row_ptr;
-                prob->constraint_matrix->col_ind = col_ind;
-                prob->constraint_matrix->val = vals;
-                break;
-            }
-            case matrix_coo:
-            {
-                int *row_ptr = NULL, *col_ind = NULL;
-                double *vals = NULL;
-                int nnz = 0;
-                if (coo_to_csr(A_desc, &row_ptr, &col_ind, &vals, &nnz) != 0)
-                {
-                    fprintf(stderr, "[interface] A matrix COO->CSR failed.\n");
-                    free(prob);
-                    return NULL;
-                }
-                prob->constraint_matrix_num_nonzeros = nnz;
-                prob->constraint_matrix->row_ptr = row_ptr;
-                prob->constraint_matrix->col_ind = col_ind;
-                prob->constraint_matrix->val = vals;
-                break;
-            }
-            case matrix_csr:
-                prob->constraint_matrix_num_nonzeros = A_desc->data.csr.nnz;
-                prob->constraint_matrix->row_ptr = (int *)safe_malloc((size_t)(A_desc->m + 1) * sizeof(int));
-                prob->constraint_matrix->col_ind = (int *)safe_malloc((size_t)A_desc->data.csr.nnz * sizeof(int));
-                prob->constraint_matrix->val = (double *)safe_malloc((size_t)A_desc->data.csr.nnz * sizeof(double));
-                memcpy(
-                    prob->constraint_matrix->row_ptr, A_desc->data.csr.row_ptr, (size_t)(A_desc->m + 1) * sizeof(int));
-                memcpy(prob->constraint_matrix->col_ind,
-                       A_desc->data.csr.col_ind,
-                       (size_t)A_desc->data.csr.nnz * sizeof(int));
-                memcpy(
-                    prob->constraint_matrix->val, A_desc->data.csr.vals, (size_t)A_desc->data.csr.nnz * sizeof(double));
-                break;
-            default:
-                fprintf(stderr, "[interface] A matrix: unsupported format %d.\n", A_desc->fmt);
-                free(prob);
-                return NULL;
-        }
+        if (copy_matrix_desc_to_csr(A_desc, "A", prob->constraint_matrix, &prob->constraint_matrix_num_nonzeros) != 0)
+            goto failure;
     }
     else
-    {
-        prob->constraint_matrix_num_nonzeros = 0;
-        prob->constraint_matrix->row_ptr = (int *)safe_calloc(m + 1, sizeof(int));
-        prob->constraint_matrix->col_ind = NULL;
-        prob->constraint_matrix->val = NULL;
-    }
+        initialize_empty_csr(prob->constraint_matrix, m, &prob->constraint_matrix_num_nonzeros);
 
     prob->objective_sparse_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
     if (Q_desc)
     {
-        switch (Q_desc->fmt)
-        {
-            case matrix_dense:
-                dense_to_csr(Q_desc,
-                             &prob->objective_sparse_matrix->row_ptr,
-                             &prob->objective_sparse_matrix->col_ind,
-                             &prob->objective_sparse_matrix->val,
-                             &prob->objective_sparse_matrix_num_nonzeros);
-                break;
-            case matrix_csc:
-            {
-                int *row_ptr = NULL, *col_ind = NULL;
-                double *vals = NULL;
-                int nnz = 0;
-                if (csc_to_csr(Q_desc, &row_ptr, &col_ind, &vals, &nnz) != 0)
-                {
-                    fprintf(stderr, "[interface] Q matrix CSC->CSR failed.\n");
-                    free(prob);
-                    return NULL;
-                }
-                prob->objective_sparse_matrix_num_nonzeros = nnz;
-                prob->objective_sparse_matrix->row_ptr = row_ptr;
-                prob->objective_sparse_matrix->col_ind = col_ind;
-                prob->objective_sparse_matrix->val = vals;
-                break;
-            }
-            case matrix_coo:
-            {
-                int *row_ptr = NULL, *col_ind = NULL;
-                double *vals = NULL;
-                int nnz = 0;
-                if (coo_to_csr(Q_desc, &row_ptr, &col_ind, &vals, &nnz) != 0)
-                {
-                    fprintf(stderr, "[interface] Q matrix COO->CSR failed.\n");
-                    free(prob);
-                    return NULL;
-                }
-                prob->objective_sparse_matrix_num_nonzeros = nnz;
-                prob->objective_sparse_matrix->row_ptr = row_ptr;
-                prob->objective_sparse_matrix->col_ind = col_ind;
-                prob->objective_sparse_matrix->val = vals;
-                break;
-            }
-            case matrix_csr:
-                prob->objective_sparse_matrix_num_nonzeros = Q_desc->data.csr.nnz;
-                prob->objective_sparse_matrix->row_ptr = (int *)safe_malloc((size_t)(Q_desc->m + 1) * sizeof(int));
-                prob->objective_sparse_matrix->col_ind = (int *)safe_malloc((size_t)Q_desc->data.csr.nnz * sizeof(int));
-                prob->objective_sparse_matrix->val =
-                    (double *)safe_malloc((size_t)Q_desc->data.csr.nnz * sizeof(double));
-                memcpy(prob->objective_sparse_matrix->row_ptr,
-                       Q_desc->data.csr.row_ptr,
-                       (size_t)(Q_desc->m + 1) * sizeof(int));
-                memcpy(prob->objective_sparse_matrix->col_ind,
-                       Q_desc->data.csr.col_ind,
-                       (size_t)Q_desc->data.csr.nnz * sizeof(int));
-                memcpy(prob->objective_sparse_matrix->val,
-                       Q_desc->data.csr.vals,
-                       (size_t)Q_desc->data.csr.nnz * sizeof(double));
-                break;
-            default:
-                fprintf(stderr, "[interface] Q matrix: unsupported format %d.\n", Q_desc->fmt);
-                free(prob);
-                return NULL;
-        }
+        if (copy_matrix_desc_to_csr(
+                Q_desc, "Q", prob->objective_sparse_matrix, &prob->objective_sparse_matrix_num_nonzeros) != 0)
+            goto failure;
     }
     else
-    {
-        prob->objective_sparse_matrix->row_ptr = (int *)safe_calloc(n + 1, sizeof(int));
-        prob->objective_sparse_matrix->col_ind = NULL;
-        prob->objective_sparse_matrix->val = NULL;
-        prob->objective_sparse_matrix_num_nonzeros = 0;
-    }
+        initialize_empty_csr(prob->objective_sparse_matrix, n, &prob->objective_sparse_matrix_num_nonzeros);
 
     prob->objective_lowrank_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
     prob->num_rank_lowrank_obj = 0;
@@ -239,79 +344,12 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     if (R_desc)
     {
         prob->num_rank_lowrank_obj = R_desc->m;
-        switch (R_desc->fmt)
-        {
-            case matrix_dense:
-                dense_to_csr(R_desc,
-                             &prob->objective_lowrank_matrix->row_ptr,
-                             &prob->objective_lowrank_matrix->col_ind,
-                             &prob->objective_lowrank_matrix->val,
-                             &prob->objective_lowrank_matrix_num_nonzeros);
-                break;
-            case matrix_csc:
-            {
-                int *row_ptr = NULL, *col_ind = NULL;
-                double *vals = NULL;
-                int nnz = 0;
-                if (csc_to_csr(R_desc, &row_ptr, &col_ind, &vals, &nnz) != 0)
-                {
-                    fprintf(stderr, "[interface] R matrix CSC->CSR failed.\n");
-                    free(prob);
-                    return NULL;
-                }
-                prob->objective_lowrank_matrix_num_nonzeros = nnz;
-                prob->objective_lowrank_matrix->row_ptr = row_ptr;
-                prob->objective_lowrank_matrix->col_ind = col_ind;
-                prob->objective_lowrank_matrix->val = vals;
-                break;
-            }
-            case matrix_coo:
-            {
-                int *row_ptr = NULL, *col_ind = NULL;
-                double *vals = NULL;
-                int nnz = 0;
-                if (coo_to_csr(R_desc, &row_ptr, &col_ind, &vals, &nnz) != 0)
-                {
-                    fprintf(stderr, "[interface] R matrix COO->CSR failed.\n");
-                    free(prob);
-                    return NULL;
-                }
-                prob->objective_lowrank_matrix_num_nonzeros = nnz;
-                prob->objective_lowrank_matrix->row_ptr = row_ptr;
-                prob->objective_lowrank_matrix->col_ind = col_ind;
-                prob->objective_lowrank_matrix->val = vals;
-                break;
-            }
-            case matrix_csr:
-                prob->objective_lowrank_matrix_num_nonzeros = R_desc->data.csr.nnz;
-                prob->objective_lowrank_matrix->row_ptr = (int *)safe_malloc((size_t)(R_desc->m + 1) * sizeof(int));
-                prob->objective_lowrank_matrix->col_ind =
-                    (int *)safe_malloc((size_t)R_desc->data.csr.nnz * sizeof(int));
-                prob->objective_lowrank_matrix->val =
-                    (double *)safe_malloc((size_t)R_desc->data.csr.nnz * sizeof(double));
-                memcpy(prob->objective_lowrank_matrix->row_ptr,
-                       R_desc->data.csr.row_ptr,
-                       (size_t)(R_desc->m + 1) * sizeof(int));
-                memcpy(prob->objective_lowrank_matrix->col_ind,
-                       R_desc->data.csr.col_ind,
-                       (size_t)R_desc->data.csr.nnz * sizeof(int));
-                memcpy(prob->objective_lowrank_matrix->val,
-                       R_desc->data.csr.vals,
-                       (size_t)R_desc->data.csr.nnz * sizeof(double));
-                break;
-            default:
-                fprintf(stderr, "[interface] R matrix: unsupported format %d.\n", R_desc->fmt);
-                free(prob);
-                return NULL;
-        }
+        if (copy_matrix_desc_to_csr(
+                R_desc, "R", prob->objective_lowrank_matrix, &prob->objective_lowrank_matrix_num_nonzeros) != 0)
+            goto failure;
     }
     else
-    {
-        prob->objective_lowrank_matrix->row_ptr = (int *)safe_calloc(1, sizeof(int));
-        prob->objective_lowrank_matrix->col_ind = NULL;
-        prob->objective_lowrank_matrix->val = NULL;
-        prob->objective_lowrank_matrix_num_nonzeros = 0;
-    }
+        initialize_empty_csr(prob->objective_lowrank_matrix, 0, &prob->objective_lowrank_matrix_num_nonzeros);
 
     prob->objective_lowrank_middle_matrix = NULL;
     prob->objective_lowrank_middle_matrix_num_nonzeros = 0;
@@ -319,59 +357,15 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     {
         int k = prob->num_rank_lowrank_obj;
         if (k <= 0)
-        {
             fprintf(stderr, "[interface] D matrix ignored: problem has no low-rank component.\n");
-        }
-        else if (D_desc->m != k || D_desc->n != k)
-        {
-            fprintf(stderr, "[interface] D matrix shape (%d, %d) must be (%d, %d).\n", D_desc->m, D_desc->n, k, k);
-            qp_problem_free(prob);
-            return NULL;
-        }
         else
         {
             prob->objective_lowrank_middle_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
-            int *rp = NULL, *ci = NULL;
-            double *vv = NULL;
-            int nnz = 0;
-            int rc = 0;
-            switch (D_desc->fmt)
-            {
-                case matrix_dense:
-                    rc = dense_to_csr(D_desc, &rp, &ci, &vv, &nnz);
-                    break;
-                case matrix_csc:
-                    rc = csc_to_csr(D_desc, &rp, &ci, &vv, &nnz);
-                    break;
-                case matrix_coo:
-                    rc = coo_to_csr(D_desc, &rp, &ci, &vv, &nnz);
-                    break;
-                case matrix_csr:
-                    nnz = D_desc->data.csr.nnz;
-                    rp = (int *)safe_malloc((size_t)(k + 1) * sizeof(int));
-                    ci = (int *)safe_malloc((size_t)nnz * sizeof(int));
-                    vv = (double *)safe_malloc((size_t)nnz * sizeof(double));
-                    memcpy(rp, D_desc->data.csr.row_ptr, (size_t)(k + 1) * sizeof(int));
-                    memcpy(ci, D_desc->data.csr.col_ind, (size_t)nnz * sizeof(int));
-                    memcpy(vv, D_desc->data.csr.vals, (size_t)nnz * sizeof(double));
-                    break;
-                default:
-                    rc = -1;
-                    fprintf(stderr, "[interface] D matrix: unsupported format %d.\n", D_desc->fmt);
-                    break;
-            }
-            if (rc != 0)
-            {
-                free(rp);
-                free(ci);
-                free(vv);
-                qp_problem_free(prob);
-                return NULL;
-            }
-            prob->objective_lowrank_middle_matrix->row_ptr = rp;
-            prob->objective_lowrank_middle_matrix->col_ind = ci;
-            prob->objective_lowrank_middle_matrix->val = vv;
-            prob->objective_lowrank_middle_matrix_num_nonzeros = nnz;
+            if (copy_matrix_desc_to_csr(D_desc,
+                                        "D",
+                                        prob->objective_lowrank_middle_matrix,
+                                        &prob->objective_lowrank_middle_matrix_num_nonzeros) != 0)
+                goto failure;
         }
     }
 
@@ -382,86 +376,24 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     fill_or_copy(&prob->constraint_lower_bound, prob->num_constraints, con_lb, -INFINITY);
     fill_or_copy(&prob->constraint_upper_bound, prob->num_constraints, con_ub, INFINITY);
 
-    prob->num_quadratic_constraints = 0;
-    prob->quadratic_constraint_row_indices = NULL;
-    prob->quadratic_constraint_matrices = NULL;
-    prob->quadratic_constraint_matrix_num_nonzeros = NULL;
+    if (initialize_affine_cones(prob, num_affine_cones, affine_cones, affine_cone_offset) != 0)
+        goto failure;
+    if (cone_blocks_init_from_specs(&prob->cones, num_var_cones, var_cones, n, true, "variable") != 0)
+        goto failure;
 
-    prob->cones.num_cones = 0;
-    prob->cones.start_idx = NULL;
-    prob->cones.v_dim = NULL;
-    prob->cones.type = NULL;
-    prob->cones.power_alpha = NULL;
-    prob->cones.is_fixed = NULL;
-    prob->num_original_variables = 0;
-
-    if (num_cones <= 0)
-        return prob;
-    if (!cones)
-    {
-        fprintf(stderr, "[create_qp_problem] num_cones=%d but cones is NULL\n", num_cones);
-        qp_problem_free(prob);
-        return NULL;
-    }
-
-    int n_vars = prob->num_variables;
-    int n_orig = n_vars;
-    char *cone_owner = (char *)safe_calloc((size_t)n_vars, sizeof(char));
     /* A finite var bound on a cone slot makes proj_K ∘ proj_Box != proj_{K ∩ Box}; the
        caller must lift such variables with an auxiliary (x_cone = x_box) so cone slots
        stay free. Treat |bound| >= 1e30 as "free" (matches the +/- INFINITY sentinel and
        the 1e30 used in tests). */
-    for (int i = 0; i < num_cones; ++i)
+    int n_orig = n;
+    for (int cone = 0; cone < prob->cones.num_cones; ++cone)
     {
-        int s = cones[i].start_idx;
-        int len;
-        switch (cones[i].type)
+        int start = prob->cones.start_idx[cone];
+        int length = cone_block_length(&prob->cones, cone);
+        for (int variable = start; variable < start + length; ++variable)
         {
-            case CONE_EXPONENTIAL:
-            case CONE_POWER:
-                len = 3;
-                break;
-            case CONE_STANDARD_SOC:
-            case CONE_ROTATED_SOC:
-                if (cones[i].v_dim < 0 || cones[i].v_dim > INT_MAX - 2)
-                {
-                    fprintf(stderr, "[create_qp_problem] cone %d has invalid v_dim=%d\n", i, cones[i].v_dim);
-                    free(cone_owner);
-                    qp_problem_free(prob);
-                    return NULL;
-                }
-                len = cones[i].v_dim + 2;
-                break;
-            default:
-                fprintf(stderr, "[create_qp_problem] cone %d has unsupported type=%d\n", i, (int)cones[i].type);
-                free(cone_owner);
-                qp_problem_free(prob);
-                return NULL;
-        }
-        if (s < 0 || (long long)s + (long long)len > n_vars)
-        {
-            fprintf(stderr,
-                    "[create_qp_problem] cone %d out of range: start=%d len=%d num_variables=%d\n",
-                    i,
-                    s,
-                    len,
-                    n_vars);
-            free(cone_owner);
-            qp_problem_free(prob);
-            return NULL;
-        }
-        for (int j = s; j < s + len; ++j)
-        {
-            if (cone_owner[j])
-            {
-                fprintf(stderr, "[create_qp_problem] cone %d overlaps another cone at variable %d\n", i, j);
-                free(cone_owner);
-                qp_problem_free(prob);
-                return NULL;
-            }
-            cone_owner[j] = 1;
-            double lo = prob->variable_lower_bound[j];
-            double hi = prob->variable_upper_bound[j];
+            double lo = prob->variable_lower_bound[variable];
+            double hi = prob->variable_upper_bound[variable];
             int lo_finite = isfinite(lo) && lo > -1e30;
             int hi_finite = isfinite(hi) && hi < 1e30;
             if (lo_finite || hi_finite)
@@ -471,76 +403,24 @@ qp_problem_t *create_qp_problem(const double *objective_c,
                         "(lb=%.6g, ub=%.6g); cone variables must be free. Introduce an "
                         "auxiliary x_cone with x_cone = x_box and put the box on the "
                         "non-cone copy.\n",
-                        i,
-                        j,
+                        cone,
+                        variable,
                         lo,
                         hi);
-                free(cone_owner);
-                qp_problem_free(prob);
-                return NULL;
+                goto failure;
             }
         }
-        if (s < n_orig)
-            n_orig = s;
+        if (start < n_orig)
+            n_orig = start;
     }
-    free(cone_owner);
-
-    prob->cones.num_cones = num_cones;
-    prob->cones.start_idx = (int *)safe_malloc(num_cones * sizeof(int));
-    prob->cones.v_dim = (int *)safe_malloc(num_cones * sizeof(int));
-    prob->cones.type = (cone_type_t *)safe_malloc(num_cones * sizeof(cone_type_t));
-    int any_fix = 0;
-    int any_power = 0;
-    for (int i = 0; i < num_cones; ++i)
-    {
-        prob->cones.start_idx[i] = cones[i].start_idx;
-        if (cones[i].type == CONE_EXPONENTIAL || cones[i].type == CONE_POWER)
-            prob->cones.v_dim[i] = 1;
-        else
-            prob->cones.v_dim[i] = cones[i].v_dim;
-        prob->cones.type[i] = cones[i].type;
-        if (cones[i].is_fixed)
-            any_fix = 1;
-        if (cones[i].type == CONE_POWER)
-            any_power = 1;
-    }
-    if (any_power)
-    {
-        prob->cones.power_alpha = (double *)safe_calloc(num_cones, sizeof(double));
-        for (int i = 0; i < num_cones; ++i)
-        {
-            if (cones[i].type != CONE_POWER)
-                continue;
-            double a = cones[i].alpha;
-            if (!(a > 0.0 && a < 1.0))
-            {
-                fprintf(stderr, "[create_qp_problem] cone %d: CONE_POWER requires alpha in (0,1); got %.6g\n", i, a);
-                qp_problem_free(prob);
-                return NULL;
-            }
-            prob->cones.power_alpha[i] = a;
-        }
-    }
-    if (any_fix)
-    {
-        prob->cones.is_fixed = (char *)safe_calloc(n_vars, sizeof(char));
-        for (int i = 0; i < num_cones; ++i)
-        {
-            if (!cones[i].is_fixed)
-                continue;
-            int s = cones[i].start_idx;
-            int len;
-            if (cones[i].type == CONE_EXPONENTIAL || cones[i].type == CONE_POWER)
-                len = 3;
-            else
-                len = cones[i].v_dim + 2;
-            for (int j = 0; j < len; ++j)
-                prob->cones.is_fixed[s + j] = cones[i].is_fixed[j] ? 1 : 0;
-        }
-    }
-    prob->num_original_variables = n_orig;
+    if (prob->cones.num_cones > 0)
+        prob->num_original_variables = n_orig;
 
     return prob;
+
+failure:
+    qp_problem_free(prob);
+    return NULL;
 }
 
 void pdhcg_result_free(pdhcg_result_t *results)
@@ -552,9 +432,11 @@ void pdhcg_result_free(pdhcg_result_t *results)
 
     free(results->primal_solution);
     free(results->dual_solution);
+    free(results->reduced_cost);
     free(results);
 }
-void csr_component_free(CsrComponent *csr)
+
+static void csr_component_free(CsrComponent *csr)
 {
     if (!csr)
         return;
@@ -568,13 +450,17 @@ void qp_problem_free(qp_problem_t *prob)
     if (!prob)
         return;
     csr_component_free(prob->objective_sparse_matrix);
+    free(prob->objective_sparse_matrix);
     csr_component_free(prob->objective_lowrank_matrix);
+    free(prob->objective_lowrank_matrix);
     csr_component_free(prob->constraint_matrix);
+    free(prob->constraint_matrix);
     free(prob->variable_lower_bound);
     free(prob->variable_upper_bound);
     free(prob->objective_vector);
     free(prob->constraint_lower_bound);
     free(prob->constraint_upper_bound);
+    free(prob->affine_cone_offset);
     free(prob->primal_start);
     free(prob->dual_start);
     csr_component_free(prob->objective_lowrank_middle_matrix);
@@ -590,11 +476,8 @@ void qp_problem_free(qp_problem_t *prob)
     }
     free(prob->quadratic_constraint_row_indices);
     free(prob->quadratic_constraint_matrix_num_nonzeros);
-    free(prob->cones.start_idx);
-    free(prob->cones.v_dim);
-    free(prob->cones.type);
-    free(prob->cones.power_alpha);
-    free(prob->cones.is_fixed);
+    cone_blocks_free(&prob->cones);
+    cone_blocks_free(&prob->affine_cones);
     memset(prob, 0, sizeof(*prob));
     free(prob);
 }
@@ -659,11 +542,7 @@ int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
         fprintf(stderr, "[set_cone_fixed] cone_idx %d out of range [0, %d)\n", cone_idx, prob->cones.num_cones);
         return -1;
     }
-    int len;
-    if (prob->cones.type[cone_idx] == CONE_EXPONENTIAL || prob->cones.type[cone_idx] == CONE_POWER)
-        len = 3;
-    else
-        len = prob->cones.v_dim[cone_idx] + 2;
+    int len = cone_block_length(&prob->cones, cone_idx);
     if (slot < 0 || slot >= len)
     {
         fprintf(stderr, "[set_cone_fixed] slot %d out of range [0, %d) for cone %d\n", slot, len, cone_idx);
@@ -682,7 +561,10 @@ int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
     }
 
     if (!prob->cones.is_fixed)
+    {
         prob->cones.is_fixed = (char *)safe_calloc(prob->num_variables, sizeof(char));
+        prob->cones.fixed_mask_size = prob->num_variables;
+    }
     prob->cones.is_fixed[idx] = 1;
 
     if (!prob->primal_start)
@@ -695,14 +577,20 @@ int pdhcg_validate_fixed_cone_sections(const qp_problem_t *problem)
 {
     if (!problem || !problem->cones.is_fixed)
         return 0;
+    if (problem->cones.fixed_mask_size != problem->num_variables)
+    {
+        fprintf(stderr,
+                "[solve_qp_problem] variable cone fixed mask has size %d; expected %d.\n",
+                problem->cones.fixed_mask_size,
+                problem->num_variables);
+        return -1;
+    }
 
     for (int cone = 0; cone < problem->cones.num_cones; ++cone)
     {
         int start = problem->cones.start_idx[cone];
         int vector_dimension = problem->cones.v_dim[cone];
-        int length = (problem->cones.type[cone] == CONE_EXPONENTIAL || problem->cones.type[cone] == CONE_POWER)
-            ? 3
-            : vector_dimension + 2;
+        int length = cone_block_length(&problem->cones, cone);
         int any_fixed = 0;
         for (int slot = 0; slot < length; ++slot)
             any_fixed |= problem->cones.is_fixed[start + slot] != 0;
@@ -885,9 +773,7 @@ pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters
     return res;
 }
 
-#ifdef PDHCG_COMPILE_DISTRIBUTED
 pdhcg_result_t *solve_qp_problem_distributed(const pdhg_parameters_t *params, const qp_problem_t *original_problem)
 {
-    return distributed_optimize(params, original_problem);
+    return pdhcg_distributed_optimize(params, original_problem);
 }
-#endif

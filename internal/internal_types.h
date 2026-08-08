@@ -97,20 +97,30 @@ typedef struct
 typedef struct distributed_cone_split_s distributed_cone_split_t;
 struct cone_bucket_s;
 
+typedef enum
+{
+    CONE_AXIS_VARIABLE = 0,
+    CONE_AXIS_CONSTRAINT = 1
+} cone_axis_t;
+
 typedef struct
 {
+    cone_axis_t axis;
     int num_blocks;
     int *start_idx;                       /* permuted by bucket */
     int *v_dim;                           /* permuted by bucket */
     double *power_alpha;                  /* permuted by bucket; NULL if no power cones */
     char *is_fixed;                       /* NULL if no fixes */
-    double *primal_warm_start;            /* device [num_blocks] */
-    double *dual_warm_start;              /* device [num_blocks] */
+    double *projection_warm_start;        /* device [num_blocks] */
+    double *residual_warm_start;          /* device [num_blocks] */
     double *complementarity_residual;     /* device [num_blocks] */
+    double *power_violation_workspace;    /* device [2 * num_blocks], variable side only */
+    double *coordinate_rescaling;         /* device [num_constraints], affine side only */
     double *effective_objective_gradient; /* device [num_variables] */
     double *bb_primal_snapshot;           /* device [num_variables] */
     struct cone_bucket_s *buckets;
     int num_buckets;
+    bool has_power_cones;
     distributed_cone_split_t *split;
 } cone_runtime_t;
 
@@ -135,6 +145,7 @@ typedef struct
     cu_sparse_matrix_csr_t *constraint_matrix_t;
     double *constraint_lower_bound;
     double *constraint_upper_bound;
+    double *affine_cone_offset;
     int num_blocks_primal;
     int num_blocks_dual;
     int num_blocks_primal_dual;
@@ -216,8 +227,9 @@ typedef struct
     inner_solver_t *inner_solver;
     grid_context_t *grid_context;
 
-    variable_set_type_t var_set_type;
+    bool has_variable_cones;
     cone_runtime_t cones;
+    cone_runtime_t affine_cones;
     int num_original_variables;
 } pdhg_solver_state_t;
 

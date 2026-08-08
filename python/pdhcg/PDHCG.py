@@ -46,6 +46,7 @@ _PARAM_ALIAS = {
     "UsePCAlpha": "has_pock_chambolle_alpha",
     "PCAlpha": "pock_chambolle_alpha",
     "BoundObjRescaling": "bound_objective_rescaling",
+    "UseConePreservingScaling": "use_cone_preserving_scaling",
     # restarts
     "RestartArtificialThresh": "artificial_restart_threshold",
     "RestartSufficientReduction": "sufficient_reduction_for_restart",

@@ -3056,8 +3056,8 @@ __device__ static inline void project_exp_cone_point(
 }
 
 /* y-fixed cross-section of D K_exp: weighted 1D Newton-bisection on u = exp((rz/d_r)/y_eff). */
-__device__ static inline void
-project_2d_exp_persp(double rz0, double ry, double rt0, double d_r, double d_y, double d_t, double *rzo, double *rto)
+__device__ static inline void project_2d_exp_persp(
+    double rz0, double ry, double rt0, double d_r, double d_y, double d_t, double *warm_start, double *rzo, double *rto)
 {
     if (d_r <= 0.0 || d_y <= 0.0 || d_t <= 0.0)
     {
@@ -3090,6 +3090,7 @@ project_2d_exp_persp(double rz0, double ry, double rt0, double d_r, double d_y, 
     double c = d_r * d_r * y_eff;
     double e = d_r * rz0;
 
+    double u = *warm_start;
     double u_lo = 1e-30;
     double u_hi = 1.0;
     for (int g = 0; g < 200; ++g)
@@ -3119,7 +3120,8 @@ project_2d_exp_persp(double rz0, double ry, double rt0, double d_r, double d_y, 
         return;
     }
 
-    double u = exp(0.5 * (log(u_lo) + log(u_hi)));
+    if (!(u > u_lo && u < u_hi) || !isfinite(u))
+        u = exp(0.5 * (log(u_lo) + log(u_hi)));
 
     for (int it = 0; it < 80; ++it)
     {
@@ -3148,6 +3150,7 @@ project_2d_exp_persp(double rz0, double ry, double rt0, double d_r, double d_y, 
         }
         u = u_new;
     }
+    *warm_start = u;
     *rzo = d_r * y_eff * log(u);
     *rto = d_t * y_eff * u;
 }
@@ -3160,7 +3163,6 @@ __global__ void project_exp_cone_kernel(double *__restrict__ primal_solution,
                                         const char *__restrict__ is_fixed,
                                         int num_blocks)
 {
-    (void)warm_start;
     (void)v_dim;
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
     if (blk >= num_blocks)
@@ -3178,7 +3180,7 @@ __global__ void project_exp_cone_kernel(double *__restrict__ primal_solution,
     if (is_fixed && is_fixed[s_idx + 1])
     {
         double zo, to;
-        project_2d_exp_persp(r1, r2, r3, d1, d2, d3, &zo, &to);
+        project_2d_exp_persp(r1, r2, r3, d1, d2, d3, warm_start + blk, &zo, &to);
         primal_solution[s_idx + 0] = zo;
         primal_solution[s_idx + 2] = to;
         return;
@@ -3204,7 +3206,6 @@ __global__ void compute_cone_dual_residual_exp_kernel(double *__restrict__ dual_
                                                       const char *__restrict__ is_fixed,
                                                       int num_blocks)
 {
-    (void)warm_start;
     (void)v_dim;
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
     if (blk >= num_blocks)
@@ -3258,6 +3259,7 @@ __global__ void compute_cone_dual_residual_exp_kernel(double *__restrict__ dual_
                              d1,
                              d2,
                              d3,
+                             warm_start + blk,
                              &projected_x,
                              &projected_z);
         dual_residual[s_idx + 0] = (primal_solution[s_idx + 0] - projected_x) * d1;
@@ -3706,7 +3708,6 @@ __global__ void project_power_cone_kernel(double *__restrict__ primal_solution,
                                           const char *__restrict__ is_fixed,
                                           int num_blocks)
 {
-    (void)warm_start;
     (void)v_dim;
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
     if (blk >= num_blocks)
@@ -4541,7 +4542,6 @@ __global__ void project_exp_cone_diag_q_kernel(double *__restrict__ pdhg_primal,
                                                const char *__restrict__ is_fixed,
                                                int num_blocks)
 {
-    (void)warm_start;
     (void)v_dim;
     int blk = blockIdx.x * blockDim.x + threadIdx.x;
     if (blk >= num_blocks)
@@ -4584,7 +4584,7 @@ __global__ void project_exp_cone_diag_q_kernel(double *__restrict__ pdhg_primal,
         double u1 = sw1 * r1;
         double u3 = sw3 * r3;
         double y1_out, y3_out;
-        project_2d_exp_persp(u1, r2, u3, e1, d2, e3, &y1_out, &y3_out);
+        project_2d_exp_persp(u1, r2, u3, e1, d2, e3, warm_start + blk, &y1_out, &y3_out);
         x1 = y1_out / sw1;
         x2 = r2;
         x3 = y3_out / sw3;

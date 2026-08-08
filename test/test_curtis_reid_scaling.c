@@ -19,6 +19,7 @@ limitations under the License.
 #include "solver_state.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static int failures = 0;
 
@@ -50,7 +51,8 @@ static qp_problem_t *make_plain_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 0, NULL);
+    return create_qp_problem(
+        objective, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 0, NULL, 0, NULL, NULL);
 }
 
 static qp_problem_t *make_cone_problem(void)
@@ -65,7 +67,7 @@ static qp_problem_t *make_cone_problem(void)
         .type = CONE_STANDARD_SOC,
         .start_idx = 1,
         .v_dim = 1,
-        .alpha = 0.0,
+        .power_alpha = 0.0,
         .is_fixed = NULL,
     };
     matrix_desc_t A = {0};
@@ -76,7 +78,8 @@ static qp_problem_t *make_cone_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, con_lb, con_ub, NULL, NULL, NULL, 1, &cone);
+    return create_qp_problem(
+        objective, NULL, NULL, NULL, &A, con_lb, con_ub, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
 }
 
 static pdhg_parameters_t curtis_reid_only_parameters(void)
@@ -161,46 +164,162 @@ static void test_cone_block_scaling(void)
     }
 
     pdhg_parameters_t params = curtis_reid_only_parameters();
-    rescale_info_t *uniform = rescale_problem(&params, problem);
-    if (!uniform)
+    rescale_info_t *cone_preserving = rescale_problem(&params, problem);
+    if (!cone_preserving)
     {
-        fprintf(stderr, "uniform cone Curtis-Reid scaling returned NULL\n");
+        fprintf(stderr, "cone-preserving Curtis-Reid scaling returned NULL\n");
         ++failures;
         qp_problem_free(problem);
         return;
     }
-    check_close("uniform row scale", uniform->con_rescale[0], exp(4.5), 1e-12);
-    check_close("uniform non-cone scale", uniform->var_rescale[0], exp(7.5), 1e-12);
-    check_close("uniform cone block minimizer", uniform->var_rescale[1], exp(-2.5), 1e-12);
-    check_close("uniform cone scale slot 2", uniform->var_rescale[2], uniform->var_rescale[1], 1e-14);
-    check_close("uniform cone scale slot 3", uniform->var_rescale[3], uniform->var_rescale[1], 1e-14);
+    check_close("cone-preserving row scale", cone_preserving->con_rescale[0], exp(4.5), 1e-12);
+    check_close("cone-preserving non-cone scale", cone_preserving->var_rescale[0], exp(7.5), 1e-12);
+    check_close("cone-preserving block minimizer", cone_preserving->var_rescale[1], exp(-2.5), 1e-12);
+    check_close(
+        "cone-preserving scale slot 2", cone_preserving->var_rescale[2], cone_preserving->var_rescale[1], 1e-14);
+    check_close(
+        "cone-preserving scale slot 3", cone_preserving->var_rescale[3], cone_preserving->var_rescale[1], 1e-14);
 
-    params.heterogeneous_cone_scaling = true;
-    rescale_info_t *heterogeneous = rescale_problem(&params, problem);
-    if (!heterogeneous)
+    params.use_cone_preserving_scaling = false;
+    rescale_info_t *coordinatewise = rescale_problem(&params, problem);
+    if (!coordinatewise)
     {
-        fprintf(stderr, "heterogeneous cone Curtis-Reid scaling returned NULL\n");
+        fprintf(stderr, "coordinate-wise cone Curtis-Reid scaling returned NULL\n");
         ++failures;
     }
     else
     {
         for (int nz = 0; nz < problem->constraint_matrix_num_nonzeros; ++nz)
         {
-            check_close("heterogeneous cone unit magnitude",
-                        fabs(heterogeneous->scaled_problem->constraint_matrix->val[nz]),
+            check_close("coordinate-wise cone unit magnitude",
+                        fabs(coordinatewise->scaled_problem->constraint_matrix->val[nz]),
                         1.0,
                         1e-12);
         }
-        if (heterogeneous->var_rescale[1] == heterogeneous->var_rescale[3])
+        if (coordinatewise->var_rescale[1] == coordinatewise->var_rescale[3])
         {
-            fprintf(stderr, "heterogeneous cone scaling unexpectedly tied all slots\n");
+            fprintf(stderr, "coordinate-wise cone scaling unexpectedly tied all slots\n");
             ++failures;
         }
-        rescale_info_free(heterogeneous);
+        rescale_info_free(coordinatewise);
     }
 
-    rescale_info_free(uniform);
+    rescale_info_free(cone_preserving);
     qp_problem_free(problem);
+}
+
+static qp_problem_t *make_phase_taper_problem(int length, int affine)
+{
+    int *row_ptr = (int *)malloc((size_t)(length + 1) * sizeof(int));
+    int *col_ind = (int *)malloc((size_t)length * sizeof(int));
+    double *values = (double *)malloc((size_t)length * sizeof(double));
+    double *objective = (double *)calloc((size_t)length, sizeof(double));
+    if (!row_ptr || !col_ind || !values || !objective)
+    {
+        free(row_ptr);
+        free(col_ind);
+        free(values);
+        free(objective);
+        return NULL;
+    }
+    for (int index = 0; index < length; ++index)
+    {
+        row_ptr[index] = index;
+        col_ind[index] = index;
+        values[index] = (double)(index + 1) * (double)(index + 1);
+    }
+    row_ptr[length] = length;
+
+    matrix_desc_t diagonal = {0};
+    diagonal.m = length;
+    diagonal.n = length;
+    diagonal.fmt = matrix_csr;
+    diagonal.data.csr.nnz = length;
+    diagonal.data.csr.row_ptr = row_ptr;
+    diagonal.data.csr.col_ind = col_ind;
+    diagonal.data.csr.vals = values;
+    cone_spec_t cone = {
+        .type = CONE_STANDARD_SOC,
+        .start_idx = 0,
+        .v_dim = length - 2,
+    };
+
+    qp_problem_t *problem = NULL;
+    if (!affine)
+    {
+        problem = create_qp_problem(
+            objective, NULL, NULL, NULL, &diagonal, NULL, NULL, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
+    }
+    else
+    {
+        problem = create_qp_problem(
+            objective, NULL, NULL, NULL, &diagonal, NULL, NULL, NULL, NULL, NULL, 0, NULL, 1, &cone, NULL);
+    }
+
+    free(row_ptr);
+    free(col_ind);
+    free(values);
+    free(objective);
+    return problem;
+}
+
+static pdhg_parameters_t phase_taper_parameters(int ruiz)
+{
+    pdhg_parameters_t params;
+    set_default_parameters(&params);
+    params.curtis_reid_iterations = 0;
+    params.l_inf_ruiz_iterations = ruiz ? 1 : 0;
+    params.has_pock_chambolle_alpha = !ruiz;
+    params.pock_chambolle_alpha = 1.0;
+    params.bound_objective_rescaling = false;
+    params.use_cone_preserving_scaling = true;
+    return params;
+}
+
+static void test_phase_taper_case(int length, int affine, int ruiz)
+{
+    qp_problem_t *problem = make_phase_taper_problem(length, affine);
+    if (!problem)
+    {
+        fprintf(
+            stderr, "failed to create %s phase-taper problem of length %d\n", affine ? "affine" : "variable", length);
+        ++failures;
+        return;
+    }
+
+    pdhg_parameters_t params = phase_taper_parameters(ruiz);
+    rescale_info_t *info = rescale_problem(&params, problem);
+    if (!info)
+    {
+        fprintf(stderr, "%s phase-taper scaling returned NULL\n", ruiz ? "Ruiz" : "Pock-Chambolle");
+        ++failures;
+        qp_problem_free(problem);
+        return;
+    }
+
+    double sum_sq = (double)length * (double)(length + 1) * (double)(2 * length + 1) / 6.0;
+    double rms = sqrt(sum_sq / (double)length);
+    double block_max = (double)length;
+    double expected = ruiz ? (length <= 8 ? block_max : rms) : (length <= 8 ? rms : sqrt(block_max * rms));
+    int start = affine ? problem->affine_cones.start_idx[0] : problem->cones.start_idx[0];
+    const double *scaling = affine ? info->con_rescale : info->var_rescale;
+    for (int index = start; index < start + length; ++index)
+        check_close("phase-taper cone scale", scaling[index], expected, 1e-12);
+
+    rescale_info_free(info);
+    qp_problem_free(problem);
+}
+
+static void test_phase_taper_scaling(void)
+{
+    for (int length = 8; length <= 9; ++length)
+    {
+        for (int affine = 0; affine <= 1; ++affine)
+        {
+            test_phase_taper_case(length, affine, 1);
+            test_phase_taper_case(length, affine, 0);
+        }
+    }
 }
 
 int main(void)
@@ -212,8 +331,14 @@ int main(void)
         fprintf(stderr, "default Curtis-Reid iterations: got %d, expected 0\n", defaults.curtis_reid_iterations);
         ++failures;
     }
+    if (!defaults.use_cone_preserving_scaling)
+    {
+        fprintf(stderr, "cone-preserving scaling must be enabled by default\n");
+        ++failures;
+    }
 
     test_plain_scaling();
     test_cone_block_scaling();
+    test_phase_taper_scaling();
     return failures == 0 ? 0 : 1;
 }

@@ -102,6 +102,13 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
         fprintf(stderr, "[qcqp_to_socp_qp] no quadratic constraints; nothing to do.\n");
         return NULL;
     }
+    if (orig->affine_cones.num_cones > 0)
+    {
+        fprintf(stderr,
+                "[qcqp_to_socp_qp] native affine cones combined with quadratic constraints "
+                "are not supported by this transform.\n");
+        return NULL;
+    }
 
     int n_orig = orig->num_variables;
     int m_orig = orig->num_constraints;
@@ -240,6 +247,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     qp_problem_t *out = (qp_problem_t *)safe_calloc(1, sizeof(qp_problem_t));
     out->num_variables = (int)n_ext;
     out->num_constraints = (int)m_ext;
+    out->affine_cone_offset = (double *)safe_calloc((size_t)m_ext, sizeof(double));
     out->constraint_matrix_num_nonzeros = (int)nnz_ext;
     out->objective_constant = orig->objective_constant;
 
@@ -254,7 +262,6 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     out->cones.start_idx = (int *)safe_malloc(K * sizeof(int));
     out->cones.v_dim = (int *)safe_malloc(K * sizeof(int));
     out->cones.type = (cone_type_t *)safe_malloc(K * sizeof(cone_type_t));
-    out->cones.power_alpha = NULL;
     out->num_original_variables = n_orig;
     {
         long idx = n_orig;
@@ -283,6 +290,7 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     out->constraint_upper_bound = (double *)safe_malloc(m_ext * sizeof(double));
     memcpy(out->constraint_lower_bound, orig->constraint_lower_bound, m_orig * sizeof(double));
     memcpy(out->constraint_upper_bound, orig->constraint_upper_bound, m_orig * sizeof(double));
+    memcpy(out->affine_cone_offset, orig->affine_cone_offset, m_orig * sizeof(double));
     for (int i = 0; i < K; ++i)
     {
         int row = orig->quadratic_constraint_row_indices[i];
@@ -486,15 +494,10 @@ qp_problem_t *qcqp_to_socp_qp(const qp_problem_t *orig, cone_type_t default_type
     }
 
     out->num_quadratic_constraints = 0;
-    out->quadratic_constraint_row_indices = NULL;
-    out->quadratic_constraint_matrices = NULL;
-    out->quadratic_constraint_matrix_num_nonzeros = NULL;
-
-    out->primal_start = NULL;
-    out->dual_start = NULL;
 
     if (num_pin > 0)
     {
+        out->cones.fixed_mask_size = (int)n_ext;
         out->cones.is_fixed = (char *)safe_calloc(n_ext, sizeof(char));
         out->primal_start = (double *)safe_calloc(n_ext, sizeof(double));
         for (int i = 0; i < K; ++i)

@@ -1,10 +1,11 @@
-site_name: PDHCG-II Documentation
-site_description: GPU-Accelerated Solver for Quadratic Programming
+site_name: PDHCG Documentation
+site_description: GPU-Accelerated Solver for Quadratic Conic Programming
 site_author: Hongpei Li
-site_url: https://lhongpei.github.io/PDHCG-II
+site_url: https://lhongpei.github.io/PDHCG
+exclude_docs: README.md
 
-repo_name: Lhongpei/PDHCG-II
-repo_url: https://github.com/Lhongpei/PDHCG-II
+repo_name: Lhongpei/PDHCG
+repo_url: https://github.com/Lhongpei/PDHCG
 
 nav:
   - Home: index.md
@@ -17,6 +18,7 @@ nav:
     - Overview: c/overview.md
     - Types: c/types.md
     - Functions: c/functions.md
+    - Combined Reference: C_API.md
   - Examples: examples.md
   - Citation: citation.md
 
@@ -101,4 +103,4 @@ extra_javascript:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/Lhongpei/PDHCG-II
+      link: https://github.com/Lhongpei/PDHCG

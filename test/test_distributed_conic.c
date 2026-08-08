@@ -19,7 +19,7 @@ static qp_problem_t *make_problem(void)
         .type = CONE_STANDARD_SOC,
         .start_idx = 1,
         .v_dim = 2,
-        .alpha = 0.0,
+        .power_alpha = 0.0,
         .is_fixed = NULL,
     };
     matrix_desc_t A = {0};
@@ -30,7 +30,7 @@ static qp_problem_t *make_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone);
+    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
 }
 
 static qp_problem_t *make_fixed_rsoc_problem(void)
@@ -46,7 +46,7 @@ static qp_problem_t *make_fixed_rsoc_problem(void)
         .type = CONE_ROTATED_SOC,
         .start_idx = 0,
         .v_dim = 1,
-        .alpha = 0.0,
+        .power_alpha = 0.0,
         .is_fixed = NULL,
     };
     matrix_desc_t A = {0};
@@ -58,7 +58,7 @@ static qp_problem_t *make_fixed_rsoc_problem(void)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
     qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, zero, zero, var_lb, var_ub, NULL, 1, &cone);
+        create_qp_problem(objective, NULL, NULL, NULL, &A, zero, zero, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
     {
         qp_problem_free(problem);
@@ -82,7 +82,7 @@ static qp_problem_t *make_large_step_fixed_rsoc_problem(void)
         .type = CONE_ROTATED_SOC,
         .start_idx = 0,
         .v_dim = 1,
-        .alpha = 0.0,
+        .power_alpha = 0.0,
         .is_fixed = NULL,
     };
     matrix_desc_t A = {0};
@@ -94,7 +94,7 @@ static qp_problem_t *make_large_step_fixed_rsoc_problem(void)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
     qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone);
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
     {
         qp_problem_free(problem);
@@ -117,7 +117,7 @@ static qp_problem_t *make_atomic_soc_problem(void)
         .type = CONE_STANDARD_SOC,
         .start_idx = 3,
         .v_dim = 2,
-        .alpha = 0.0,
+        .power_alpha = 0.0,
         .is_fixed = NULL,
     };
     matrix_desc_t A = {0};
@@ -128,7 +128,7 @@ static qp_problem_t *make_atomic_soc_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone);
+    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
 }
 
 static qp_problem_t *make_exponential_problem(void)
@@ -157,7 +157,7 @@ static qp_problem_t *make_exponential_problem(void)
         cones[cone].type = CONE_EXPONENTIAL;
         cones[cone].start_idx = 3 * cone;
         cones[cone].v_dim = 1;
-        cones[cone].alpha = 0.0;
+        cones[cone].power_alpha = 0.0;
         cones[cone].is_fixed = NULL;
     }
 
@@ -169,7 +169,8 @@ static qp_problem_t *make_exponential_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones, 0, NULL, NULL);
     if (!problem)
         return NULL;
     for (int cone = 0; cone < 4; ++cone)
@@ -210,7 +211,7 @@ static qp_problem_t *make_power_problem(void)
         cones[cone].type = CONE_POWER;
         cones[cone].start_idx = 3 * cone;
         cones[cone].v_dim = 1;
-        cones[cone].alpha = alpha[cone];
+        cones[cone].power_alpha = alpha[cone];
         cones[cone].is_fixed = NULL;
     }
 
@@ -222,10 +223,10 @@ static qp_problem_t *make_power_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones);
+    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones, 0, NULL, NULL);
 }
 
-static qp_problem_t *make_large_soc_problem(int v_dim)
+static qp_problem_t *make_large_soc_problem(int v_dim, int fix_zero_w)
 {
     int n = v_dim + 2;
     int *row_ptr = (int *)malloc((size_t)(v_dim + 1) * sizeof(int));
@@ -252,13 +253,15 @@ static qp_problem_t *make_large_soc_problem(int v_dim)
         rhs[i] = value;
     }
     row_ptr[v_dim] = v_dim;
+    if (fix_zero_w)
+        objective[n - 2] = 100.0;
     objective[n - 1] = 1.0;
 
     cone_spec_t cone = {
         .type = CONE_STANDARD_SOC,
         .start_idx = 0,
         .v_dim = v_dim,
-        .alpha = 0.0,
+        .power_alpha = 0.0,
         .is_fixed = NULL,
     };
     matrix_desc_t A = {0};
@@ -269,7 +272,13 @@ static qp_problem_t *make_large_soc_problem(int v_dim)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
+    if (problem && fix_zero_w && set_cone_fixed(problem, 0, v_dim, 0.0) != 0)
+    {
+        qp_problem_free(problem);
+        problem = NULL;
+    }
 
     free(row_ptr);
     free(col_ind);
@@ -277,6 +286,44 @@ static qp_problem_t *make_large_soc_problem(int v_dim)
     free(objective);
     free(rhs);
     return problem;
+}
+
+static qp_problem_t *make_affine_soc_problem(void)
+{
+    static const int row_ptr[] = {0, 0, 0, 1};
+    static const int col_ind[] = {0};
+    static const double values[] = {1.0};
+    static const double objective[] = {1.0};
+    static const double offset[] = {1.0, 0.0, 0.0};
+    matrix_desc_t A = {0};
+    A.m = 3;
+    A.n = 1;
+    A.fmt = matrix_csr;
+    A.data.csr.nnz = 1;
+    A.data.csr.row_ptr = row_ptr;
+    A.data.csr.col_ind = col_ind;
+    A.data.csr.vals = values;
+    cone_spec_t cone = {.type = CONE_STANDARD_SOC, .start_idx = 0, .v_dim = 1};
+    return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 0, NULL, 1, &cone, offset);
+}
+
+static qp_problem_t *make_local_affine_soc_problem(void)
+{
+    static const int row_ptr[] = {0, 0, 0, 0, 0, 0, 1};
+    static const int col_ind[] = {0};
+    static const double values[] = {1.0};
+    static const double objective[] = {1.0};
+    static const double offset[] = {0.0, 0.0, 0.0, 1.0, 0.0, 0.0};
+    matrix_desc_t A = {0};
+    A.m = 6;
+    A.n = 1;
+    A.fmt = matrix_csr;
+    A.data.csr.nnz = 1;
+    A.data.csr.row_ptr = row_ptr;
+    A.data.csr.col_ind = col_ind;
+    A.data.csr.vals = values;
+    cone_spec_t cone = {.type = CONE_STANDARD_SOC, .start_idx = 3, .v_dim = 1};
+    return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 0, NULL, 1, &cone, offset);
 }
 
 static qp_problem_t *make_qcqp_problem(void)
@@ -296,7 +343,7 @@ static qp_problem_t *make_qcqp_problem(void)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
     qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, con_lb, con_ub, NULL, NULL, NULL, 0, NULL);
+        create_qp_problem(objective, NULL, NULL, NULL, &A, con_lb, con_ub, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL);
     if (!problem)
         return NULL;
 
@@ -398,6 +445,64 @@ int main(int argc, char **argv)
         qp_problem_free(problem);
     }
 
+    if (size == 2)
+    {
+        problem = rank == 0 ? make_affine_soc_problem() : NULL;
+        parameters.grid_size.row_dims = 2;
+        parameters.grid_size.col_dims = 1;
+        parameters.permute_method = NO_PERMUTATION;
+        result = solve_qp_problem_distributed(&parameters, problem);
+        if (rank == 0)
+        {
+            if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL ||
+                fabs(result->primal_solution[0] - 1.0) > 2e-4 || result->relative_primal_residual > 2e-6 ||
+                result->relative_dual_residual > 2e-6)
+            {
+                fprintf(stderr,
+                        "distributed split affine SOC solve returned an incorrect solution "
+                        "(status=%d, x=%.9g, rp=%.3e, rd=%.3e)\n",
+                        result ? (int)result->termination_reason : -1,
+                        result ? result->primal_solution[0] : NAN,
+                        result ? result->relative_primal_residual : NAN,
+                        result ? result->relative_dual_residual : NAN);
+                failed = 1;
+            }
+            pdhcg_result_free(result);
+            qp_problem_free(problem);
+        }
+        parameters.grid_size.row_dims = all_column_grid ? 1 : size / 2;
+        parameters.grid_size.col_dims = all_column_grid ? size : 2;
+    }
+
+    if (size == 2)
+    {
+        problem = rank == 0 ? make_local_affine_soc_problem() : NULL;
+        parameters.grid_size.row_dims = 2;
+        parameters.grid_size.col_dims = 1;
+        parameters.permute_method = NO_PERMUTATION;
+        result = solve_qp_problem_distributed(&parameters, problem);
+        if (rank == 0)
+        {
+            if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL ||
+                fabs(result->primal_solution[0] - 1.0) > 2e-4 || result->relative_primal_residual > 2e-6 ||
+                result->relative_dual_residual > 2e-6)
+            {
+                fprintf(stderr,
+                        "distributed local affine SOC solve returned an incorrect solution "
+                        "(status=%d, x=%.9g, rp=%.3e, rd=%.3e)\n",
+                        result ? (int)result->termination_reason : -1,
+                        result ? result->primal_solution[0] : NAN,
+                        result ? result->relative_primal_residual : NAN,
+                        result ? result->relative_dual_residual : NAN);
+                failed = 1;
+            }
+            pdhcg_result_free(result);
+            qp_problem_free(problem);
+        }
+        parameters.grid_size.row_dims = all_column_grid ? 1 : size / 2;
+        parameters.grid_size.col_dims = all_column_grid ? size : 2;
+    }
+
     problem = rank == 0 ? make_atomic_soc_problem() : NULL;
     parameters.permute_method = NO_PERMUTATION;
     result = solve_qp_problem_distributed(&parameters, problem);
@@ -416,6 +521,30 @@ int main(int argc, char **argv)
 
     if (!all_column_grid)
     {
+        const int fixed_w_v_dim = 1025;
+        problem = rank == 0 ? make_large_soc_problem(fixed_w_v_dim, 1) : NULL;
+        parameters.permute_method = FULL_RANDOM_PERMUTATION;
+        result = solve_qp_problem_distributed(&parameters, problem);
+        if (rank == 0)
+        {
+            double expected_v = 1.0 / sqrt((double)fixed_w_v_dim);
+            double max_v_error = 0.0;
+            if (result)
+            {
+                for (int i = 0; i < fixed_w_v_dim; ++i)
+                    max_v_error = fmax(max_v_error, fabs(result->primal_solution[i] - expected_v));
+            }
+            if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL || max_v_error > 2e-4 ||
+                fabs(result->primal_solution[fixed_w_v_dim]) > 1e-12 ||
+                fabs(result->primal_solution[fixed_w_v_dim + 1] - 1.0) > 2e-4)
+            {
+                fprintf(stderr, "distributed fixed-zero-w SOC solve returned an incorrect solution\n");
+                failed = 1;
+            }
+            pdhcg_result_free(result);
+            qp_problem_free(problem);
+        }
+
         problem = rank == 0 ? make_fixed_rsoc_problem() : NULL;
         parameters.permute_method = NO_PERMUTATION;
         result = solve_qp_problem_distributed(&parameters, problem);
@@ -567,7 +696,7 @@ int main(int argc, char **argv)
     }
 
     const int large_v_dim = 1025;
-    problem = rank == 0 ? make_large_soc_problem(large_v_dim) : NULL;
+    problem = rank == 0 ? make_large_soc_problem(large_v_dim, 0) : NULL;
     parameters.permute_method = FULL_RANDOM_PERMUTATION;
     result = solve_qp_problem_distributed(&parameters, problem);
     if (rank == 0)

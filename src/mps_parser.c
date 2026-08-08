@@ -564,6 +564,8 @@ qp_problem_t *read_mps_file(const char *filename)
 
     prob->num_variables = state.col_map.size;
     prob->num_constraints = state.row_map.size;
+    prob->affine_cone_offset =
+        prob->num_constraints > 0 ? (double *)safe_calloc((size_t)prob->num_constraints, sizeof(double)) : NULL;
     prob->constraint_matrix_num_nonzeros = state.coo_matrix.nnz;
     prob->objective_sparse_matrix_num_nonzeros = state.coo_matrix_q.nnz;
     prob->num_rank_lowrank_obj = 0;

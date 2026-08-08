@@ -17,6 +17,8 @@
         - setConstraintMatrix
         - setConstraintLowerBound
         - setConstraintUpperBound
+        - setVariableCones
+        - setAffineConeConstraints
         - setVariableLowerBound
         - setVariableUpperBound
         - setWarmStart
@@ -28,31 +30,64 @@
 
 ## Cone constraints
 
-The `Model` class is QP-only. Problems with second-order, rotated second-order,
-or exponential cone constraints use `solve_once` directly (imported from
-`pdhcg._core`) with a `cones=` kwarg. Each cone is a dict:
+Use the columnar `ConeSpec` API for both variable and affine cones. Its metadata
+is stored in contiguous NumPy arrays, so even millions of cone blocks do not
+require one Python dict per cone.
 
-| Key | Type | Notes |
+| Field | Type | Notes |
 |---|---|---|
-| `type` | str | `"soc"`, `"rsoc"`, or `"exp"`. |
-| `start_idx` | int | Index of the first slot in `x`. |
-| `v_dim` | int | Length of the `v` block. Omit for `"exp"` (always 3 slots: `x`, `y`, `z`). |
-| `is_fixed` | list[bool], optional | Per-slot pin mask, length `v_dim + 2` (SOC/RSOC) or `3` (exp). |
+| `types` | scalar or `int32[K]` | `ConeType.SOC`, `RSOC`, `EXP`, or `POWER`. |
+| `starts` | `int32[K]` | First variable index or affine row of each block. |
+| `v_dims` | scalar or `int32[K]` | Length of `v`; defaults to 1. |
+| `power_alphas` | scalar or `float64[K]` | Required in `(0, 1)` for power cones. |
+| `fixed_mask` | optional `uint8[N]` | Ambient-coordinate mask for fixed variable slots. Values come from the primal warm start. |
 
 Slot layout per cone:
 
 - `soc`: `v[0..v_dim-1], w, z` with `||v||^2 + w^2 <= z^2`, `z >= 0`.
 - `rsoc`: `v[0..v_dim-1], s, t` with `||v||^2 <= 2 s t`, `s, t >= 0`.
 - `exp`: `x, y, z` with `y * exp(x / y) <= z`, `y > 0`.
+- `power`: `x, y, z` with `x^alpha * y^(1-alpha) >= |z|`, `x, y >= 0`.
 
 ```python
-from pdhcg._core import solve_once
+import numpy as np
+from pdhcg import ConeSpec, ConeType, Model
 
-cones = [
-    {"type": "soc",  "start_idx": 0, "v_dim": 2},
-    {"type": "exp",  "start_idx": 4, "is_fixed": [False, True, False]},
-]
-res = solve_once(Q, R, A, c, c0, lb, ub, cl, cu, cones=cones)
+cones = ConeSpec(
+    types=[ConeType.SOC, ConeType.EXP],
+    starts=np.array([0, 4], dtype=np.int32),
+    v_dims=[2, 1],
+)
+model = Model(objective_vector=c, constraint_matrix=A, variable_cones=cones)
 ```
 
+Scalar metadata broadcasts. For example, one million adjacent exponential
+cones can be described without a Python loop:
+
+```python
+num_cones = 1_000_000
+cones = ConeSpec(
+    ConeType.EXP,
+    3 * np.arange(num_cones, dtype=np.int32),
+)
+```
+
+`solve_once(..., cones=cones)` accepts the same object. Cone arguments accept
+`ConeSpec` only; the former per-cone `list[dict]` input is not supported.
+
 See [quickstart](quickstart.md#quick-start-with-cone-constraints) for a runnable example.
+
+Native affine cone constraints `F x + g in K` are available directly on
+`Model` through the `affine_cone_matrix`, `affine_cone_offset`, and
+`affine_cones` constructor arguments, or `setAffineConeConstraints`. Here,
+`ConeSpec.starts` indexes rows of `F`, and the blocks must cover every row of
+`F` exactly once.
+
+```python
+model = Model(
+    objective_vector=c,
+    affine_cone_matrix=F,
+    affine_cone_offset=g,
+    affine_cones=ConeSpec(ConeType.SOC, np.array([0], dtype=np.int32)),
+)
+```

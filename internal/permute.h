@@ -28,26 +28,17 @@ extern "C"
 {
 #endif
 
-    typedef struct
-    {
-        int new_col;
-        double val;
-    } permute_tuple_t;
-
-    void generate_random_permutation(int n, int *perm);
-
-    void permute_problem(qp_problem_t *qp, int *row_perm, int *col_perm);
-
-    void randomly_permute_problem(qp_problem_t *qp, int **out_row_perm, int **out_col_perm);
+    bool permute_problem(qp_problem_t *qp, int *row_perm, int *col_perm);
 
     qp_problem_t *permute_problem_return_new(const qp_problem_t *qp, int *row_perm, int *col_perm);
 
-    void generate_block_permutation(int n, int block_size, int *perm);
     void generate_cone_aware_permutation(const qp_problem_t *qp, permute_method_t method, int block_size, int *perm);
+    void generate_affine_cone_aware_row_permutation(const qp_problem_t *qp,
+                                                    permute_method_t method,
+                                                    int block_size,
+                                                    int *perm);
     bool validate_cone_permutation(const qp_problem_t *qp, const int *col_perm);
-    void generate_random_permutation(int n, int *perm);
-    void compute_inv_perm(int n, const int *perm, int *inv_perm);
-    void permute_double_array(double *arr, int n, const int *perm);
+    bool validate_affine_cone_row_permutation(const qp_problem_t *qp, const int *row_perm);
     void repermute_solution(pdhcg_result_t *result, int *row_perm, int *col_perm);
 #ifdef __cplusplus
 }

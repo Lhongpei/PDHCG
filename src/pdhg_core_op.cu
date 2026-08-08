@@ -15,6 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "distributed_conic.h"
 #include "distributed_interface.h"
 #include "internal_types.h"
 #include "pdhcg.h"
@@ -25,10 +26,6 @@ limitations under the License.
 #include "solver_state.h"
 #include "spmv_backend.h"
 #include "utils.h"
-#ifdef PDHCG_COMPILE_DISTRIBUTED
-#include "distributed_conic.h"
-#include "distributed_types.h"
-#endif
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusparse.h>
@@ -451,36 +448,37 @@ static const cone_dual_res_launcher_t dual_res_launch_table[NUM_CONE_TYPES][NUM_
         },
 };
 
+static void dispatch_cone_runtime_projection(pdhg_solver_state_t *state,
+                                             cone_runtime_t *runtime,
+                                             double *vector,
+                                             const double *coordinate_rescaling,
+                                             double *warm_start)
+{
+    for (int b = 0; b < runtime->num_buckets; ++b)
+    {
+        const cone_bucket_t *bk = &runtime->buckets[b];
+        const double *pa = runtime->power_alpha ? runtime->power_alpha + bk->offset : NULL;
+        proj_launch_table[bk->type][bk->method](vector,
+                                                coordinate_rescaling,
+                                                warm_start + bk->offset,
+                                                runtime->start_idx + bk->offset,
+                                                runtime->v_dim + bk->offset,
+                                                pa,
+                                                runtime->is_fixed,
+                                                bk->count);
+    }
+    project_split_cones(state, runtime, vector);
+}
+
 static void
 dispatch_cone_projection_with_warm_start(pdhg_solver_state_t *state, double *primal_solution, double *warm_start)
 {
-    if (state->cones.is_fixed)
-    {
-        restore_fixed_cone_slots_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-            primal_solution, state->initial_primal_solution, state->cones.is_fixed, state->num_variables);
-    }
-
-    for (int b = 0; b < state->cones.num_buckets; ++b)
-    {
-        const cone_bucket_t *bk = &state->cones.buckets[b];
-        const double *pa = state->cones.power_alpha ? state->cones.power_alpha + bk->offset : NULL;
-        proj_launch_table[bk->type][bk->method](primal_solution,
-                                                state->variable_rescaling,
-                                                warm_start + bk->offset,
-                                                state->cones.start_idx + bk->offset,
-                                                state->cones.v_dim + bk->offset,
-                                                pa,
-                                                state->cones.is_fixed,
-                                                bk->count);
-    }
-#ifdef PDHCG_COMPILE_DISTRIBUTED
-    project_split_cones(state, primal_solution);
-#endif
+    dispatch_cone_runtime_projection(state, &state->cones, primal_solution, state->variable_rescaling, warm_start);
 }
 
 static void dispatch_cone_projection(pdhg_solver_state_t *state, double *primal_solution)
 {
-    dispatch_cone_projection_with_warm_start(state, primal_solution, state->cones.primal_warm_start);
+    dispatch_cone_projection_with_warm_start(state, primal_solution, state->cones.projection_warm_start);
 }
 
 void project_primal_onto_cones(pdhg_solver_state_t *state, double *primal_solution)
@@ -495,12 +493,6 @@ static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state,
                                             double *reflected_primal,
                                             const double *current_primal)
 {
-    if (state->cones.is_fixed)
-    {
-        restore_fixed_cone_slots_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-            pdhg_primal, state->initial_primal_solution, state->cones.is_fixed, state->num_variables);
-    }
-
     for (int b = 0; b < state->cones.num_buckets; ++b)
     {
         const cone_bucket_t *bk = &state->cones.buckets[b];
@@ -511,17 +503,15 @@ static void dispatch_cone_projection_diag_q(pdhg_solver_state_t *state,
                                                                state->variable_rescaling,
                                                                Q_diag,
                                                                primal_step_size,
-                                                               state->cones.primal_warm_start + bk->offset,
+                                                               state->cones.projection_warm_start + bk->offset,
                                                                state->cones.start_idx + bk->offset,
                                                                state->cones.v_dim + bk->offset,
                                                                pa,
                                                                state->cones.is_fixed,
                                                                bk->count);
     }
-#ifdef PDHCG_COMPILE_DISTRIBUTED
-    project_split_cones(state, pdhg_primal);
+    project_split_cones(state, &state->cones, pdhg_primal);
     recompute_split_cone_reflected(state, reflected_primal, pdhg_primal, current_primal);
-#endif
 }
 
 static void dispatch_cone_dual_residual(pdhg_solver_state_t *state, const double *effective_obj)
@@ -541,16 +531,14 @@ static void dispatch_cone_dual_residual(pdhg_solver_state_t *state, const double
                                                     state->dual_product,
                                                     state->variable_rescaling,
                                                     state->pdhg_primal_solution,
-                                                    state->cones.dual_warm_start + bk->offset,
+                                                    state->cones.residual_warm_start + bk->offset,
                                                     state->cones.start_idx + bk->offset,
                                                     state->cones.v_dim + bk->offset,
                                                     pa,
                                                     state->cones.is_fixed,
                                                     bk->count);
     }
-#ifdef PDHCG_COMPILE_DISTRIBUTED
     compute_split_cone_dual_residual(state, effective_obj);
-#endif
 }
 
 static void recompute_reflected_at_cones(pdhg_solver_state_t *state)
@@ -642,6 +630,18 @@ static const double *cone_dual_residual_effective_obj(pdhg_solver_state_t *state
     return state->objective_vector;
 }
 
+static double cone_residual_norm(pdhg_solver_state_t *state, int count, const double *values, norm_type_t norm)
+{
+    if (count <= 0)
+        return 0.0;
+    if (norm == NORM_TYPE_L_INF)
+        return get_vector_inf_norm(state->blas_handle, count, values);
+
+    double result = 0.0;
+    CUBLAS_CHECK(cublasDnrm2_v2_64(state->blas_handle, count, values, 1, &result));
+    return result;
+}
+
 /*
  * Cone membership plus dual-cone membership does not enforce complementarity.
  * This gradient mapping is zero exactly when the current point is feasible and
@@ -659,11 +659,11 @@ static void augment_conic_projected_gradient_residual(pdhg_solver_state_t *state
         state->pdhg_primal_solution,
         effective_obj,
         state->dual_product,
+        state->variable_lower_bound,
+        state->variable_upper_bound,
         step_size,
         state->num_variables);
-    project_primal_onto_bounds_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-        state->delta_primal_solution, state->variable_lower_bound, state->variable_upper_bound, state->num_variables);
-    dispatch_cone_projection_with_warm_start(state, state->delta_primal_solution, state->cones.dual_warm_start);
+    dispatch_cone_projection_with_warm_start(state, state->delta_primal_solution, state->cones.residual_warm_start);
     augment_projected_gradient_residual_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
         state->dual_residual,
         state->pdhg_primal_solution,
@@ -675,27 +675,94 @@ static void augment_conic_projected_gradient_residual(pdhg_solver_state_t *state
 
 static double compute_cone_complementarity_norm(pdhg_solver_state_t *state, norm_type_t norm)
 {
-    double residual_norm = 0.0;
-    if (state->cones.num_blocks > 0)
-    {
-        if (norm == NORM_TYPE_L_INF)
-        {
-            residual_norm =
-                get_vector_inf_norm(state->blas_handle, state->cones.num_blocks, state->cones.complementarity_residual);
-        }
-        else
-        {
-            CUBLAS_CHECK(cublasDnrm2_v2_64(
-                state->blas_handle, state->cones.num_blocks, state->cones.complementarity_residual, 1, &residual_norm));
-        }
-    }
+    double residual_norm =
+        cone_residual_norm(state, state->cones.num_blocks, state->cones.complementarity_residual, norm);
 
-#ifdef PDHCG_COMPILE_DISTRIBUTED
     double distributed_norm = get_split_cone_complementarity_norm(state, norm);
     residual_norm =
         norm == NORM_TYPE_L_INF ? fmax(residual_norm, distributed_norm) : hypot(residual_norm, distributed_norm);
-#endif
     return residual_norm;
+}
+
+static bool has_affine_cone_constraints(const pdhg_solver_state_t *state)
+{
+    return state->affine_cones.num_blocks > 0 || state->affine_cones.split != NULL ||
+        pdhcg_get_global_num_affine_cones(state->grid_context) > 0;
+}
+
+static void compute_affine_cone_residuals(pdhg_solver_state_t *state,
+                                          norm_type_t norm,
+                                          double *dual_membership_norm,
+                                          double *complementarity_norm)
+{
+    *dual_membership_norm = 0.0;
+    *complementarity_norm = 0.0;
+
+    if (!has_affine_cone_constraints(state))
+        return;
+
+    int rows = state->num_constraints;
+    int blocks = (rows + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    double *projection_point = state->delta_dual_solution;
+    if (state->affine_cones.num_blocks > 0)
+    {
+        int threads = THREADS_PER_BLOCK;
+        prepare_affine_cone_residuals_kernel<<<state->affine_cones.num_blocks,
+                                               threads,
+                                               (size_t)threads * sizeof(double)>>>(
+            projection_point,
+            state->affine_cones.complementarity_residual,
+            state->primal_product,
+            state->affine_cone_offset,
+            state->pdhg_dual_solution,
+            state->affine_cones.start_idx,
+            state->affine_cones.v_dim,
+            state->constraint_bound_rescaling,
+            state->affine_cones.num_blocks);
+    }
+    prepare_split_affine_cone_residuals(
+        state, projection_point, state->primal_product, state->affine_cone_offset, state->pdhg_dual_solution);
+
+    dispatch_cone_runtime_projection(state,
+                                     &state->affine_cones,
+                                     projection_point,
+                                     state->affine_cones.coordinate_rescaling,
+                                     state->affine_cones.residual_warm_start);
+    if (rows > 0)
+    {
+        finish_affine_cone_residuals_kernel<<<blocks, THREADS_PER_BLOCK>>>(state->primal_residual,
+                                                                           state->primal_product,
+                                                                           state->affine_cone_offset,
+                                                                           state->constraint_rescaling,
+                                                                           projection_point,
+                                                                           state->affine_cones.coordinate_rescaling,
+                                                                           rows);
+    }
+    finalize_split_affine_cone_complementarity(state);
+
+    if (norm == NORM_TYPE_L_INF)
+    {
+        *dual_membership_norm = cone_residual_norm(state, rows, projection_point, norm);
+        *complementarity_norm = cone_residual_norm(
+            state, state->affine_cones.num_blocks, state->affine_cones.complementarity_residual, norm);
+        *complementarity_norm = fmax(*complementarity_norm, get_split_affine_cone_complementarity_norm(state, norm));
+        pdhcg_all_reduce_scalar(state->grid_context, dual_membership_norm, PDHCG_OP_MAX, PDHCG_SCOPE_COL, false);
+        pdhcg_all_reduce_scalar(state->grid_context, complementarity_norm, PDHCG_OP_MAX, PDHCG_SCOPE_COL, false);
+    }
+    else
+    {
+        *dual_membership_norm = cone_residual_norm(state, rows, projection_point, norm);
+        *complementarity_norm = cone_residual_norm(
+            state, state->affine_cones.num_blocks, state->affine_cones.complementarity_residual, norm);
+        double membership_squared = *dual_membership_norm * *dual_membership_norm;
+        double complementarity_squared = *complementarity_norm * *complementarity_norm;
+        double split_norm = get_split_affine_cone_complementarity_norm(state, norm);
+        complementarity_squared += split_norm * split_norm;
+        pdhcg_all_reduce_scalar(state->grid_context, &membership_squared, PDHCG_OP_SUM, PDHCG_SCOPE_COL, false);
+        pdhcg_all_reduce_scalar(state->grid_context, &complementarity_squared, PDHCG_OP_SUM, PDHCG_SCOPE_COL, false);
+        *dual_membership_norm = sqrt(membership_squared);
+        *complementarity_norm = sqrt(complementarity_squared);
+    }
 }
 
 static void compute_power_cone_primal_violation(pdhg_solver_state_t *state,
@@ -703,6 +770,11 @@ static void compute_power_cone_primal_violation(pdhg_solver_state_t *state,
                                                 double *absolute_violation,
                                                 double *relative_violation)
 {
+    *absolute_violation = 0.0;
+    *relative_violation = 0.0;
+    if (!state->cones.has_power_cones)
+        return;
+
     double absolute_accumulator = 0.0;
     double relative_accumulator = 0.0;
     int threads = THREADS_PER_BLOCK;
@@ -712,8 +784,8 @@ static void compute_power_cone_primal_violation(pdhg_solver_state_t *state,
         if (bucket->type != CONE_POWER)
             continue;
         int blocks = (bucket->count + threads - 1) / threads;
-        double *absolute_workspace = state->cones.dual_warm_start + bucket->offset;
-        double *relative_workspace = state->cones.primal_warm_start + bucket->offset;
+        double *absolute_workspace = state->cones.power_violation_workspace + bucket->offset;
+        double *relative_workspace = state->cones.power_violation_workspace + state->cones.num_blocks + bucket->offset;
         compute_power_cone_primal_violation_kernel<<<blocks, threads>>>(absolute_workspace,
                                                                         relative_workspace,
                                                                         state->pdhg_primal_solution,
@@ -724,19 +796,15 @@ static void compute_power_cone_primal_violation(pdhg_solver_state_t *state,
                                                                         bucket->count);
         if (optimality_norm == NORM_TYPE_L_INF)
         {
-            absolute_accumulator =
-                fmax(absolute_accumulator, get_vector_inf_norm(state->blas_handle, bucket->count, absolute_workspace));
-            relative_accumulator =
-                fmax(relative_accumulator, get_vector_inf_norm(state->blas_handle, bucket->count, relative_workspace));
+            absolute_accumulator = fmax(absolute_accumulator,
+                                        cone_residual_norm(state, bucket->count, absolute_workspace, optimality_norm));
+            relative_accumulator = fmax(relative_accumulator,
+                                        cone_residual_norm(state, bucket->count, relative_workspace, optimality_norm));
         }
         else
         {
-            double bucket_absolute_norm = 0.0;
-            double bucket_relative_norm = 0.0;
-            CUBLAS_CHECK(
-                cublasDnrm2_v2_64(state->blas_handle, bucket->count, absolute_workspace, 1, &bucket_absolute_norm));
-            CUBLAS_CHECK(
-                cublasDnrm2_v2_64(state->blas_handle, bucket->count, relative_workspace, 1, &bucket_relative_norm));
+            double bucket_absolute_norm = cone_residual_norm(state, bucket->count, absolute_workspace, optimality_norm);
+            double bucket_relative_norm = cone_residual_norm(state, bucket->count, relative_workspace, optimality_norm);
             absolute_accumulator += bucket_absolute_norm * bucket_absolute_norm;
             relative_accumulator += bucket_relative_norm * bucket_relative_norm;
         }
@@ -913,7 +981,7 @@ double compute_xQx(pdhg_solver_state_t *state, double *primal_sol, double *prima
 
 void lp_primal_update(pdhg_solver_state_t *state, double step_size)
 {
-    bool force_major_for_cone = (state->var_set_type == VAR_SET_CONTAIN_CONIC);
+    bool force_major_for_cone = state->has_variable_cones;
     if (state->is_this_major_iteration || force_major_for_cone ||
         ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0)
     {
@@ -945,7 +1013,7 @@ void lp_primal_update(pdhg_solver_state_t *state, double step_size)
 
 void diag_q_primal_update(pdhg_solver_state_t *state, double step_size)
 {
-    bool force_major_for_cone = (state->var_set_type == VAR_SET_CONTAIN_CONIC);
+    bool force_major_for_cone = state->has_variable_cones;
     if (state->is_this_major_iteration ||
         ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0 || force_major_for_cone)
     {
@@ -1046,7 +1114,7 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
             state->num_variables);
     }
 
-    if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
+    if (state->has_variable_cones)
     {
         dispatch_cone_projection(state, state->pdhg_primal_solution);
         vector_sub_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
@@ -1101,7 +1169,7 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
 
         pdhcg_all_reduce_scalar(state->grid_context, d_tmp, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, true);
 
-        if (state->var_set_type == VAR_SET_CONTAIN_CONIC && state->cones.bb_primal_snapshot)
+        if (state->has_variable_cones && state->cones.bb_primal_snapshot)
         {
             CUDA_CHECK(cudaMemcpyAsync(state->cones.bb_primal_snapshot,
                                        state->pdhg_primal_solution,
@@ -1137,7 +1205,7 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
                 state->num_variables);
         }
 
-        if (state->var_set_type == VAR_SET_CONTAIN_CONIC && state->cones.bb_primal_snapshot)
+        if (state->has_variable_cones && state->cones.bb_primal_snapshot)
         {
             dispatch_cone_projection(state, state->pdhg_primal_solution);
             vector_sub_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
@@ -1234,7 +1302,7 @@ void pdhg_update(pdhg_solver_state_t *state)
             exit(EXIT_FAILURE);
     }
 
-    if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
+    if (state->has_variable_cones)
     {
         quad_obj_type_t qt = state->quadratic_objective_term->quad_obj_type;
         if (qt == PDHCG_DIAG_Q)
@@ -1253,10 +1321,8 @@ void pdhg_update(pdhg_solver_state_t *state)
         {
             dispatch_cone_projection(state, state->pdhg_primal_solution);
             recompute_reflected_at_cones(state);
-#ifdef PDHCG_COMPILE_DISTRIBUTED
             recompute_split_cone_reflected(
                 state, state->reflected_primal_solution, state->pdhg_primal_solution, state->current_primal_solution);
-#endif
         }
     }
 
@@ -1275,29 +1341,63 @@ void pdhg_update(pdhg_solver_state_t *state)
     if (state->num_constraints == 0)
         return;
 
-    if (state->is_this_major_iteration || ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0)
+    bool store_pdhg_dual =
+        state->is_this_major_iteration || ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0;
+    bool has_local_affine_cones = state->affine_cones.num_blocks > 0 || state->affine_cones.split;
+    if (!has_local_affine_cones)
     {
-        compute_next_pdhg_dual_solution_major_kernel<<<state->num_blocks_dual, THREADS_PER_BLOCK>>>(
-            state->current_dual_solution,
-            state->pdhg_dual_solution,
-            state->reflected_dual_solution,
-            state->primal_product,
-            state->constraint_lower_bound,
-            state->constraint_upper_bound,
-            state->num_constraints,
-            dual_step_size);
+        if (store_pdhg_dual)
+        {
+            compute_next_pdhg_dual_solution_major_kernel<<<state->num_blocks_dual, THREADS_PER_BLOCK>>>(
+                state->current_dual_solution,
+                state->pdhg_dual_solution,
+                state->reflected_dual_solution,
+                state->primal_product,
+                state->affine_cone_offset,
+                state->constraint_lower_bound,
+                state->constraint_upper_bound,
+                state->num_constraints,
+                dual_step_size);
+        }
+        else
+        {
+            compute_next_pdhg_dual_solution_kernel<<<state->num_blocks_dual, THREADS_PER_BLOCK>>>(
+                state->current_dual_solution,
+                state->reflected_dual_solution,
+                state->primal_product,
+                state->affine_cone_offset,
+                state->constraint_lower_bound,
+                state->constraint_upper_bound,
+                state->num_constraints,
+                dual_step_size);
+        }
+        return;
     }
-    else
-    {
-        compute_next_pdhg_dual_solution_kernel<<<state->num_blocks_dual, THREADS_PER_BLOCK>>>(
-            state->current_dual_solution,
-            state->reflected_dual_solution,
-            state->primal_product,
-            state->constraint_lower_bound,
-            state->constraint_upper_bound,
-            state->num_constraints,
-            dual_step_size);
-    }
+
+    /* reflected_dual is scratch until the post-projection kernel on non-major iterations. */
+    double *projection_point = store_pdhg_dual ? state->pdhg_dual_solution : state->reflected_dual_solution;
+    prepare_constraint_dual_update_kernel<<<state->num_blocks_dual, THREADS_PER_BLOCK>>>(state->current_dual_solution,
+                                                                                         state->primal_product,
+                                                                                         state->affine_cone_offset,
+                                                                                         state->constraint_lower_bound,
+                                                                                         state->constraint_upper_bound,
+                                                                                         projection_point,
+                                                                                         state->num_constraints,
+                                                                                         dual_step_size);
+    dispatch_cone_runtime_projection(state,
+                                     &state->affine_cones,
+                                     projection_point,
+                                     state->affine_cones.coordinate_rescaling,
+                                     state->affine_cones.projection_warm_start);
+    finish_constraint_dual_update_kernel<<<state->num_blocks_dual, THREADS_PER_BLOCK>>>(
+        state->current_dual_solution,
+        state->primal_product,
+        state->affine_cone_offset,
+        projection_point,
+        store_pdhg_dual ? state->pdhg_dual_solution : NULL,
+        state->reflected_dual_solution,
+        state->num_constraints,
+        dual_step_size);
 }
 
 void halpern_update(pdhg_solver_state_t *state, double reflection_coefficient)
@@ -1404,11 +1504,9 @@ void perform_restart(pdhg_solver_state_t *state, const pdhg_parameters_t *params
 void initialize_step_size_and_primal_weight(pdhg_solver_state_t *state, const pdhg_parameters_t *params)
 {
     bool constraint_matrix_is_zero = state->constraint_matrix->num_nonzeros == 0;
-#ifdef PDHCG_COMPILE_DISTRIBUTED
     double has_nonzero_tile = constraint_matrix_is_zero ? 0.0 : 1.0;
     pdhcg_all_reduce_scalar(state->grid_context, &has_nonzero_tile, PDHCG_OP_MAX, PDHCG_SCOPE_GLOBAL, false);
     constraint_matrix_is_zero = has_nonzero_tile == 0.0;
-#endif
     if (constraint_matrix_is_zero)
     {
         state->step_size = 1.0;
@@ -1514,6 +1612,9 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
     double linear_absolute_primal_residual = 0.0;
     double power_cone_absolute_violation = 0.0;
     double power_cone_relative_violation = 0.0;
+    double affine_dual_membership_norm = 0.0;
+    double affine_complementarity_norm = 0.0;
+    bool has_affine_cones = has_affine_cone_constraints(state);
     pdhcg_spmv_execute(state->sparse_handle,
                        state->spmv_ctx_A,
                        &HOST_ONE,
@@ -1541,6 +1642,7 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         compute_lp_residual_kernel<<<state->num_blocks_primal_dual, THREADS_PER_BLOCK>>>(
             state->primal_residual,
             state->primal_product,
+            state->affine_cone_offset,
             state->constraint_lower_bound,
             state->constraint_upper_bound,
             state->pdhg_dual_solution,
@@ -1550,13 +1652,15 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
             state->objective_vector,
             state->constraint_rescaling,
             state->variable_rescaling,
+            state->delta_dual_solution,
             state->primal_slack,
             state->constraint_lower_bound_finite_val,
             state->constraint_upper_bound_finite_val,
+            has_affine_cones,
             state->num_constraints,
             state->num_variables);
 
-        if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
+        if (state->has_variable_cones)
         {
             const double *effective_obj = cone_dual_residual_effective_obj(state);
             dispatch_cone_dual_residual(state, effective_obj);
@@ -1568,6 +1672,7 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         compute_qp_residual_kernel<<<state->num_blocks_primal_dual, THREADS_PER_BLOCK>>>(
             state->primal_residual,
             state->primal_product,
+            state->affine_cone_offset,
             state->quadratic_objective_term->primal_obj_product,
             state->pdhg_primal_solution,
             state->constraint_lower_bound,
@@ -1581,20 +1686,31 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
             state->objective_vector,
             state->constraint_rescaling,
             state->variable_rescaling,
+            state->delta_dual_solution,
             state->primal_slack,
             state->constraint_lower_bound_finite_val,
             state->constraint_upper_bound_finite_val,
             state->step_size / state->primal_weight,
+            has_affine_cones,
             state->num_constraints,
             state->num_variables);
 
-        if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
+        if (state->has_variable_cones)
         {
             const double *effective_obj = cone_dual_residual_effective_obj(state);
             dispatch_cone_dual_residual(state, effective_obj);
             augment_conic_projected_gradient_residual(state, effective_obj);
         }
     }
+    if (state->affine_cones.num_blocks > 0 || state->affine_cones.split)
+    {
+        dispatch_cone_runtime_projection(state,
+                                         &state->affine_cones,
+                                         state->primal_residual,
+                                         state->affine_cones.coordinate_rescaling,
+                                         state->affine_cones.residual_warm_start);
+    }
+    compute_affine_cone_residuals(state, optimality_norm, &affine_dual_membership_norm, &affine_complementarity_norm);
     if (optimality_norm == NORM_TYPE_L_INF)
     {
         state->absolute_primal_residual =
@@ -1613,7 +1729,7 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
     }
     state->absolute_primal_residual /= state->constraint_bound_rescaling;
     linear_absolute_primal_residual = state->absolute_primal_residual;
-    if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
+    if (state->has_variable_cones)
     {
         compute_power_cone_primal_violation(
             state, optimality_norm, &power_cone_absolute_violation, &power_cone_relative_violation);
@@ -1631,6 +1747,8 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
             fmax(state->absolute_dual_residual, compute_cone_complementarity_norm(state, optimality_norm));
         pdhcg_all_reduce_scalar(
             state->grid_context, &state->absolute_dual_residual, PDHCG_OP_MAX, PDHCG_SCOPE_ROW, false);
+        state->absolute_dual_residual = fmax(state->absolute_dual_residual, affine_dual_membership_norm);
+        state->absolute_dual_residual = fmax(state->absolute_dual_residual, affine_complementarity_norm);
     }
     else
     {
@@ -1641,6 +1759,8 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         state->absolute_dual_residual += complementarity_norm * complementarity_norm;
         pdhcg_all_reduce_scalar(
             state->grid_context, &state->absolute_dual_residual, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
+        state->absolute_dual_residual += affine_dual_membership_norm * affine_dual_membership_norm;
+        state->absolute_dual_residual += affine_complementarity_norm * affine_complementarity_norm;
         state->absolute_dual_residual = sqrt(state->absolute_dual_residual);
     }
     state->absolute_dual_residual /= state->objective_vector_rescaling;
@@ -1662,13 +1782,11 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
             (state->constraint_bound_rescaling * state->objective_vector_rescaling) +
         state->objective_constant;
 
-    if (state->var_set_type == VAR_SET_CONTAIN_CONIC)
+    if (state->has_variable_cones)
     {
         const double *effective_obj = cone_dual_residual_effective_obj(state);
         set_cone_dual_slack(state, effective_obj);
-#ifdef PDHCG_COMPILE_DISTRIBUTED
         set_split_cone_dual_slack(state, state->dual_slack, effective_obj, state->dual_product);
-#endif
     }
 
     double base_dual_objective;
@@ -1812,6 +1930,7 @@ void compute_infeasibility_information(pdhg_solver_state_t *state)
     dual_solution_dual_objective_contribution_kernel<<<state->num_blocks_dual, THREADS_PER_BLOCK>>>(
         state->constraint_lower_bound_finite_val,
         state->constraint_upper_bound_finite_val,
+        state->affine_cone_offset,
         state->delta_dual_solution,
         state->num_constraints,
         state->primal_slack);

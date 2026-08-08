@@ -16,6 +16,7 @@ limitations under the License.
 */
 
 #include "preconditioner.h"
+#include "cone_utils.h"
 #include "utils.h"
 #include <math.h>
 #include <stdio.h>
@@ -25,10 +26,39 @@ limitations under the License.
 #define SCALING_EPSILON 1e-12
 #define CURTIS_REID_MIN_ABS 1e-300
 #define CURTIS_REID_LOG_SCALE_LIMIT 69.07755278982137
+#define PHASE_TAPER_CONE_THRESHOLD 8
 
-static int cone_block_length(const cone_blocks_t *cones, int block)
+typedef enum
 {
-    return (cones->type[block] == CONE_EXPONENTIAL || cones->type[block] == CONE_POWER) ? 3 : (cones->v_dim[block] + 2);
+    CONE_SCALING_RUIZ,
+    CONE_SCALING_POCK_CHAMBOLLE,
+} cone_scaling_phase_t;
+
+/*
+ * Cone-block aggregation follows HPR-SOCP's :phase_taper strategy:
+ * https://github.com/PolyU-IOR/HPR-SOCP
+ */
+static void apply_cone_preserving_scaling(double *scaling, const cone_blocks_t *cones, cone_scaling_phase_t phase)
+{
+    for (int block = 0; block < cones->num_cones; ++block)
+    {
+        int start = cones->start_idx[block];
+        int length = cone_block_length(cones, block);
+        double block_max = 0.0;
+        double sum_sq = 0.0;
+        for (int index = start; index < start + length; ++index)
+        {
+            block_max = fmax(block_max, scaling[index]);
+            sum_sq += scaling[index] * scaling[index];
+        }
+
+        double rms = sqrt(sum_sq / (double)length);
+        double block_scale = phase == CONE_SCALING_RUIZ
+            ? (length <= PHASE_TAPER_CONE_THRESHOLD ? block_max : rms)
+            : (length <= PHASE_TAPER_CONE_THRESHOLD ? rms : sqrt(block_max * rms));
+        for (int index = start; index < start + length; ++index)
+            scaling[index] = block_scale;
+    }
 }
 
 static double curtis_reid_exp_clamped(double value)
@@ -43,16 +73,28 @@ static double curtis_reid_exp_clamped(double value)
 }
 
 static void scale_problem(qp_problem_t *problem, const double *con_rescale, const double *var_rescale);
-static void curtis_reid_rescaling(
-    qp_problem_t *problem, int num_iters, bool uniform_cone_d, double *cum_con_rescale, double *cum_var_rescale);
-static void ruiz_rescaling(
-    qp_problem_t *problem, int num_iters, bool uniform_cone_d, double *cum_con_rescale, double *cum_var_rescale);
-static void pock_chambolle_rescaling(
-    qp_problem_t *problem, double alpha, bool uniform_cone_d, double *cum_con_rescale, double *cum_var_rescale);
+static void pin_scaled_fixed_cone_bounds(qp_problem_t *scaled_problem,
+                                         const qp_problem_t *source_problem,
+                                         const rescale_info_t *rescale_info);
+static void curtis_reid_rescaling(qp_problem_t *problem,
+                                  int num_iters,
+                                  bool use_cone_preserving_scaling,
+                                  double *cum_con_rescale,
+                                  double *cum_var_rescale);
+static void ruiz_rescaling(qp_problem_t *problem,
+                           int num_iters,
+                           bool use_cone_preserving_scaling,
+                           double *cum_con_rescale,
+                           double *cum_var_rescale);
+static void pock_chambolle_rescaling(qp_problem_t *problem,
+                                     double alpha,
+                                     bool use_cone_preserving_scaling,
+                                     double *cum_con_rescale,
+                                     double *cum_var_rescale);
 
 qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
 {
-    qp_problem_t *new_prob = (qp_problem_t *)safe_malloc(sizeof(qp_problem_t));
+    qp_problem_t *new_prob = (qp_problem_t *)safe_calloc(1, sizeof(qp_problem_t));
 
     new_prob->num_variables = prob->num_variables;
     new_prob->num_constraints = prob->num_constraints;
@@ -70,12 +112,14 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
     new_prob->objective_vector = safe_malloc(var_bytes);
     new_prob->constraint_lower_bound = safe_malloc(con_bytes);
     new_prob->constraint_upper_bound = safe_malloc(con_bytes);
+    new_prob->affine_cone_offset = safe_malloc(con_bytes);
 
     memcpy(new_prob->variable_lower_bound, prob->variable_lower_bound, var_bytes);
     memcpy(new_prob->variable_upper_bound, prob->variable_upper_bound, var_bytes);
     memcpy(new_prob->objective_vector, prob->objective_vector, var_bytes);
     memcpy(new_prob->constraint_lower_bound, prob->constraint_lower_bound, con_bytes);
     memcpy(new_prob->constraint_upper_bound, prob->constraint_upper_bound, con_bytes);
+    memcpy(new_prob->affine_cone_offset, prob->affine_cone_offset, con_bytes);
     new_prob->constraint_matrix =
         deepcopy_csr_component(prob->constraint_matrix, prob->num_constraints, prob->constraint_matrix_num_nonzeros);
     new_prob->objective_sparse_matrix = deepcopy_csr_component(
@@ -94,24 +138,13 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
         new_prob->primal_start = safe_malloc(var_bytes);
         memcpy(new_prob->primal_start, prob->primal_start, var_bytes);
     }
-    else
-    {
-        new_prob->primal_start = NULL;
-    }
     if (prob->dual_start)
     {
         new_prob->dual_start = safe_malloc(con_bytes);
         memcpy(new_prob->dual_start, prob->dual_start, con_bytes);
     }
-    else
-    {
-        new_prob->dual_start = NULL;
-    }
 
     new_prob->num_quadratic_constraints = prob->num_quadratic_constraints;
-    new_prob->quadratic_constraint_row_indices = NULL;
-    new_prob->quadratic_constraint_matrices = NULL;
-    new_prob->quadratic_constraint_matrix_num_nonzeros = NULL;
     if (prob->num_quadratic_constraints > 0)
     {
         int K = prob->num_quadratic_constraints;
@@ -131,33 +164,9 @@ qp_problem_t *deepcopy_problem(const qp_problem_t *prob)
         }
     }
 
-    new_prob->cones.num_cones = prob->cones.num_cones;
     new_prob->num_original_variables = prob->num_original_variables;
-    new_prob->cones.start_idx = NULL;
-    new_prob->cones.v_dim = NULL;
-    new_prob->cones.type = NULL;
-    new_prob->cones.power_alpha = NULL;
-    new_prob->cones.is_fixed = NULL;
-    if (prob->cones.num_cones > 0)
-    {
-        int K = prob->cones.num_cones;
-        new_prob->cones.start_idx = safe_malloc(K * sizeof(int));
-        new_prob->cones.v_dim = safe_malloc(K * sizeof(int));
-        new_prob->cones.type = safe_malloc(K * sizeof(cone_type_t));
-        memcpy(new_prob->cones.start_idx, prob->cones.start_idx, K * sizeof(int));
-        memcpy(new_prob->cones.v_dim, prob->cones.v_dim, K * sizeof(int));
-        memcpy(new_prob->cones.type, prob->cones.type, K * sizeof(cone_type_t));
-        if (prob->cones.power_alpha)
-        {
-            new_prob->cones.power_alpha = safe_malloc(K * sizeof(double));
-            memcpy(new_prob->cones.power_alpha, prob->cones.power_alpha, K * sizeof(double));
-        }
-        if (prob->cones.is_fixed)
-        {
-            new_prob->cones.is_fixed = safe_malloc(prob->num_variables * sizeof(char));
-            memcpy(new_prob->cones.is_fixed, prob->cones.is_fixed, prob->num_variables * sizeof(char));
-        }
-    }
+    cone_blocks_clone(&new_prob->cones, &prob->cones);
+    cone_blocks_clone(&new_prob->affine_cones, &prob->affine_cones);
 
     return new_prob;
 }
@@ -174,6 +183,7 @@ static void scale_problem(qp_problem_t *problem, const double *constraint_rescal
     {
         problem->constraint_lower_bound[i] /= constraint_rescaling[i];
         problem->constraint_upper_bound[i] /= constraint_rescaling[i];
+        problem->affine_cone_offset[i] /= constraint_rescaling[i];
     }
 
     for (int row = 0; row < problem->num_constraints; ++row)
@@ -216,13 +226,32 @@ static void scale_problem(qp_problem_t *problem, const double *constraint_rescal
     }
 }
 
+static void pin_scaled_fixed_cone_bounds(qp_problem_t *scaled_problem,
+                                         const qp_problem_t *source_problem,
+                                         const rescale_info_t *rescale_info)
+{
+    if (!source_problem->cones.is_fixed)
+        return;
+
+    for (int variable = 0; variable < source_problem->num_variables; ++variable)
+    {
+        if (!source_problem->cones.is_fixed[variable])
+            continue;
+
+        double value = source_problem->primal_start ? source_problem->primal_start[variable] : 0.0;
+        double scaled_value = value * rescale_info->var_rescale[variable] * rescale_info->con_bound_rescale;
+        scaled_problem->variable_lower_bound[variable] = scaled_value;
+        scaled_problem->variable_upper_bound[variable] = scaled_value;
+    }
+}
+
 /*
  * A. R. Curtis and J. K. Reid, "On the Automatic Scaling of Matrices
  * for Gaussian Elimination", IMA J. Appl. Math. 10(1), 118-124 (1972).
  */
 static void curtis_reid_rescaling(qp_problem_t *problem,
                                   int num_iterations,
-                                  bool uniform_cone_d,
+                                  bool use_cone_preserving_scaling,
                                   double *cum_constraint_rescaling,
                                   double *cum_variable_rescaling)
 {
@@ -275,6 +304,29 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
                 row_log_scale[row] = (end > begin) ? sum / (double)(end - begin) : 0.0;
             }
 
+            if (use_cone_preserving_scaling)
+            {
+                for (int block = 0; block < problem->affine_cones.num_cones; ++block)
+                {
+                    int start = problem->affine_cones.start_idx[block];
+                    int length = cone_block_length(&problem->affine_cones, block);
+                    double block_sum = 0.0;
+                    int block_count = 0;
+                    for (int row = start; row < start + length; ++row)
+                    {
+                        int begin = matrix->row_ptr[row];
+                        int end = matrix->row_ptr[row + 1];
+                        block_sum += row_log_abs_sum[row];
+                        block_count += end - begin;
+                        for (int nz = begin; nz < end; ++nz)
+                            block_sum -= col_log_scale[matrix->col_ind[nz]];
+                    }
+                    double block_log_scale = block_count > 0 ? block_sum / (double)block_count : 0.0;
+                    for (int row = start; row < start + length; ++row)
+                        row_log_scale[row] = block_log_scale;
+                }
+            }
+
             memcpy(col_sum, col_log_abs_sum, (size_t)num_vars * sizeof(double));
             for (int row = 0; row < num_cons; ++row)
             {
@@ -284,12 +336,12 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
             for (int col = 0; col < num_vars; ++col)
                 col_log_scale[col] = col_count[col] > 0 ? col_sum[col] / (double)col_count[col] : 0.0;
 
-            if (uniform_cone_d)
+            if (use_cone_preserving_scaling)
             {
                 /*
                  * Adding c_j = c_B for all j in cone block B gives the exact
-                 * block minimizer below. Heterogeneous mode skips this block
-                 * and retains the independent column minimizers above.
+                 * block minimizer below. With cone-preserving scaling disabled,
+                 * the independent column minimizers above are retained.
                  */
                 for (int block = 0; block < problem->cones.num_cones; ++block)
                 {
@@ -335,7 +387,7 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
 
 static void ruiz_rescaling(qp_problem_t *problem,
                            int num_iterations,
-                           bool uniform_cone_d,
+                           bool use_cone_preserving_scaling,
                            double *cum_constraint_rescaling,
                            double *cum_variable_rescaling)
 {
@@ -380,23 +432,10 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-        /* A single scale per cone preserves the cone geometry. Use the largest
-           coordinate scale during Ruiz equilibration so one weakly scaled
-           coordinate cannot dominate a small cone. */
-        if (uniform_cone_d)
+        if (use_cone_preserving_scaling)
         {
-            for (int b = 0; b < problem->cones.num_cones; ++b)
-            {
-                int s = problem->cones.start_idx[b];
-                int len = (problem->cones.type[b] == CONE_EXPONENTIAL || problem->cones.type[b] == CONE_POWER)
-                    ? 3
-                    : (problem->cones.v_dim[b] + 2);
-                double d_max = 0.0;
-                for (int j = s; j < s + len; ++j)
-                    d_max = fmax(d_max, var_rescale[j]);
-                for (int j = s; j < s + len; ++j)
-                    var_rescale[j] = d_max;
-            }
+            apply_cone_preserving_scaling(var_rescale, &problem->cones, CONE_SCALING_RUIZ);
+            apply_cone_preserving_scaling(con_rescale, &problem->affine_cones, CONE_SCALING_RUIZ);
         }
 
         scale_problem(problem, con_rescale, var_rescale);
@@ -411,7 +450,7 @@ static void ruiz_rescaling(qp_problem_t *problem,
 
 static void pock_chambolle_rescaling(qp_problem_t *problem,
                                      double alpha,
-                                     bool uniform_cone_d,
+                                     bool use_cone_preserving_scaling,
                                      double *cum_constraint_rescaling,
                                      double *cum_variable_rescaling)
 {
@@ -438,21 +477,10 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
     for (int i = 0; i < num_cons; ++i)
         con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-    if (uniform_cone_d)
+    if (use_cone_preserving_scaling)
     {
-        for (int b = 0; b < problem->cones.num_cones; ++b)
-        {
-            int s = problem->cones.start_idx[b];
-            int len = (problem->cones.type[b] == CONE_EXPONENTIAL || problem->cones.type[b] == CONE_POWER)
-                ? 3
-                : (problem->cones.v_dim[b] + 2);
-            double sum_sq = 0.0;
-            for (int j = s; j < s + len; ++j)
-                sum_sq += var_rescale[j] * var_rescale[j];
-            double d_rms = sqrt(sum_sq / (double)len);
-            for (int j = s; j < s + len; ++j)
-                var_rescale[j] = d_rms;
-        }
+        apply_cone_preserving_scaling(var_rescale, &problem->cones, CONE_SCALING_POCK_CHAMBOLLE);
+        apply_cone_preserving_scaling(con_rescale, &problem->affine_cones, CONE_SCALING_POCK_CHAMBOLLE);
     }
 
     scale_problem(problem, con_rescale, var_rescale);
@@ -480,6 +508,8 @@ static void bound_obj_rescaling(qp_problem_t *problem, rescale_info_t *rescale_i
             b_norm_sq += problem->constraint_upper_bound[i] * problem->constraint_upper_bound[i];
         }
     }
+    for (int i = 0; i < problem->num_constraints; ++i)
+        b_norm_sq += problem->affine_cone_offset[i] * problem->affine_cone_offset[i];
     double c_norm_sq = 0.0;
     for (int i = 0; i < problem->num_variables; ++i)
     {
@@ -492,6 +522,7 @@ static void bound_obj_rescaling(qp_problem_t *problem, rescale_info_t *rescale_i
     {
         problem->constraint_lower_bound[i] *= rescale_info->con_bound_rescale;
         problem->constraint_upper_bound[i] *= rescale_info->con_bound_rescale;
+        problem->affine_cone_offset[i] *= rescale_info->con_bound_rescale;
     }
     for (int i = 0; i < problem->num_variables; ++i)
     {
@@ -535,12 +566,12 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
     for (int i = 0; i < num_vars; ++i)
         rescale_info->var_rescale[i] = 1.0;
 
-    bool uniform_cone_d = !params->heterogeneous_cone_scaling;
+    bool use_cone_preserving_scaling = params->use_cone_preserving_scaling;
     if (params->curtis_reid_iterations > 0)
     {
         curtis_reid_rescaling(rescale_info->scaled_problem,
                               params->curtis_reid_iterations,
-                              uniform_cone_d,
+                              use_cone_preserving_scaling,
                               rescale_info->con_rescale,
                               rescale_info->var_rescale);
     }
@@ -548,7 +579,7 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
     {
         ruiz_rescaling(rescale_info->scaled_problem,
                        params->l_inf_ruiz_iterations,
-                       uniform_cone_d,
+                       use_cone_preserving_scaling,
                        rescale_info->con_rescale,
                        rescale_info->var_rescale);
     }
@@ -556,7 +587,7 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
     {
         pock_chambolle_rescaling(rescale_info->scaled_problem,
                                  params->pock_chambolle_alpha,
-                                 uniform_cone_d,
+                                 use_cone_preserving_scaling,
                                  rescale_info->con_rescale,
                                  rescale_info->var_rescale);
     }
@@ -569,6 +600,7 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
         rescale_info->con_bound_rescale = 1.0;
         rescale_info->obj_vec_rescale = 1.0;
     }
+    pin_scaled_fixed_cone_bounds(rescale_info->scaled_problem, working_problem, rescale_info);
     rescale_info->processed_problem = preprocess_qp_problem(rescale_info->scaled_problem);
     rescale_info->rescaling_time_sec = (double)(clock() - start_rescaling) / CLOCKS_PER_SEC;
     return rescale_info;

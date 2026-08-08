@@ -40,8 +40,8 @@ static int run_case(const double *primal_start, double expected)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
 
-    qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 0, NULL);
+    qp_problem_t *problem = create_qp_problem(
+        objective, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 0, NULL, 0, NULL, NULL);
     if (!problem)
         return 1;
 

@@ -17,10 +17,10 @@ static qp_problem_t *make_empty_cone_problem(cone_type_t type)
         .type = type,
         .start_idx = 0,
         .v_dim = 1,
-        .alpha = type == CONE_POWER ? 0.5 : 0.0,
+        .power_alpha = type == CONE_POWER ? 0.5 : 0.0,
         .is_fixed = NULL,
     };
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone);
+    return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
 }
 
 static int rejects_unsupported_fixed_sections(void)
@@ -81,7 +81,7 @@ static double initial_soc_dual_residual(double matrix_scale)
     A.data.csr.vals = &matrix_scale;
 
     qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone);
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem)
         return NAN;
     set_start_values(problem, primal_start, dual_start);
@@ -136,7 +136,8 @@ static int recognizes_soc_with_only_zero_w_fixed_as_optimal(norm_type_t optimali
         .is_fixed = NULL,
     };
 
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem || set_cone_fixed(problem, 0, v_dim, 0.0) != 0)
     {
         qp_problem_free(problem);
@@ -207,7 +208,8 @@ static int solves_fixed_rsoc_with_large_initial_step(norm_type_t optimality_norm
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
 
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
     {
         qp_problem_free(problem);
@@ -272,7 +274,8 @@ static int solves_fixed_soc_with_large_initial_step(norm_type_t optimality_norm)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
 
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem || set_cone_fixed(problem, 0, 2, 1.0) != 0)
     {
         qp_problem_free(problem);
@@ -326,7 +329,7 @@ static int solves_fixed_power_with_large_initial_step(norm_type_t optimality_nor
         .type = CONE_POWER,
         .start_idx = 0,
         .v_dim = 1,
-        .alpha = 0.5,
+        .power_alpha = 0.5,
         .is_fixed = NULL,
     };
     matrix_desc_t A = {0};
@@ -338,7 +341,8 @@ static int solves_fixed_power_with_large_initial_step(norm_type_t optimality_nor
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
 
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem || set_cone_fixed(problem, 0, 0, 1.0) != 0 || set_cone_fixed(problem, 0, 1, 1.0) != 0)
     {
         qp_problem_free(problem);
@@ -403,7 +407,8 @@ static int solves_fixed_exp_with_large_initial_step(norm_type_t optimality_norm)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
 
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0)
     {
         qp_problem_free(problem);
@@ -475,7 +480,8 @@ int main(void)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
 
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone);
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0)
     {
         qp_problem_free(problem);

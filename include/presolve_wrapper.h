@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-/* PDHCG-II optional PreFOS presolve adapter. */
+/* PDHCG optional PreFOS presolve adapter. */
 
 #ifndef PDHCG_PRESOLVE_WRAPPER_H
 #define PDHCG_PRESOLVE_WRAPPER_H

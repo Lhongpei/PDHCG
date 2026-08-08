@@ -70,7 +70,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
     const qp_problem_t *working_problem = original_problem;
     bool working_problem_needs_free = false;
 
-    if (params->presolve && pdhcg_presolve_available())
+    if (params->presolve && original_problem->affine_cones.num_cones == 0 && pdhcg_presolve_available())
     {
         presolve_info = pdhcg_presolve(original_problem, params);
         if (presolve_info)
@@ -124,7 +124,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
             (state->total_count % get_print_frequency(state->total_count) == 0))
         {
             compute_residual(state, params->optimality_norm);
-            if (state->var_set_type == VAR_SET_BOX_ONLY && state->is_this_major_iteration &&
+            if (!state->has_variable_cones && state->affine_cones.num_blocks == 0 && state->is_this_major_iteration &&
                 state->total_count < 3 * params->termination_evaluation_frequency)
             {
                 compute_infeasibility_information(state);

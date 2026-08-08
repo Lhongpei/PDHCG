@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "distributed_interface.h"
+#include "distributed_solver.h"
 #include "distributed_types.h"
 #include "distributed_utils.h"
 #include <mpi.h>
@@ -90,4 +91,29 @@ int pdhcg_get_grid_p_col(struct grid_context_s *ctx)
 int pdhcg_get_grid_row_coord(struct grid_context_s *ctx)
 {
     return ctx ? ctx->coords[0] : 0;
+}
+
+int pdhcg_get_global_num_variables(grid_context_t *ctx)
+{
+    return ctx ? ctx->global_num_variables : 0;
+}
+
+int pdhcg_get_variable_start(grid_context_t *ctx)
+{
+    return ctx ? ctx->n_start : 0;
+}
+
+int pdhcg_get_global_num_cones(grid_context_t *ctx)
+{
+    return ctx ? ctx->global_num_cones : 0;
+}
+
+int pdhcg_get_global_num_affine_cones(grid_context_t *ctx)
+{
+    return ctx ? ctx->global_num_affine_cones : 0;
+}
+
+pdhcg_result_t *pdhcg_distributed_optimize(const pdhg_parameters_t *params, const qp_problem_t *original_problem)
+{
+    return distributed_optimize(params, original_problem);
 }

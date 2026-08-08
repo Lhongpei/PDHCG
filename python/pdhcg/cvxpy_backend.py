@@ -27,6 +27,7 @@ from cvxpy.reductions.solvers import utilities
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
 
 from ._core import solve_once
+from .cones import ConeSpec, ConeType
 
 _STATUS_MAP = {
     "OPTIMAL": _cvx_s.OPTIMAL,
@@ -66,7 +67,7 @@ class PDHCG(ConicSolver):
             "  title  = {PDHCG: GPU-accelerated Primal-Dual Hybrid Conjugate Gradient QP solver},\n"
             "  author = {Li, Hongpei and collaborators},\n"
             "  year   = {2026},\n"
-            "  url    = {https://github.com/Lhongpei/PDHCG-II}\n"
+            "  url    = {https://github.com/Lhongpei/PDHCG}\n"
             "}"
         )
 
@@ -127,118 +128,80 @@ class PDHCG(ConicSolver):
         n_pow_blocks = len(pow_alphas)
         n_slack = soc_total + n_soc_blocks + 3 * n_exp + 3 * n_pow_blocks
         n_vars_total = n + n_slack
+        if n_vars_total > np.iinfo(np.int32).max or n_total_rows > np.iinfo(np.int32).max:
+            raise ValueError("PDHCG dimensions must fit signed 32-bit indices.")
 
-        # Build mapping matrix S: (n_cone_rows) x (n_slack). Each cvxpy cone row maps
-        # to exactly one internal slack slot; phantom w-slots have no cvxpy row (S
-        # column all zero, slot pinned via is_fixed / primal_start).
-        S_rows, S_cols = [], []
+        # Every CVXPY cone row maps to exactly one internal slack slot. Store the
+        # column map directly; row indices are simply arange(n_cone_rows).
+        S_cols = np.empty(n_cone_rows, dtype=np.int64)
 
-        # Track internal cone-block starts (offset into slack vector).
-        cones_specs: list[dict] = []
-        is_fixed_mask = np.zeros(n_slack, dtype=np.int8)
-        primal_start_slack = np.zeros(n_slack, dtype=np.float64)
-        # Precompute which cone rows are structurally constant (empty A-row).
-        # Such rows determine s_slot = b directly; pinning improves conditioning.
-        A_lp = A_cvx[: n_zero + n_nonneg, :] if (n_zero + n_nonneg) > 0 else None  # noqa
-        A_cone_dense_zero = (
-            (np.abs(A_cvx[n_zero + n_nonneg :, :]).sum(axis=1).A1 == 0)
-            if n_cone_rows > 0
-            else np.zeros(0, dtype=bool)
-        )
-        b_cone = b_cvx[n_zero + n_nonneg :] if n_cone_rows > 0 else np.zeros(0)
+        n_cones = n_soc_blocks + n_exp + n_pow_blocks
+        cone_types = np.empty(n_cones, dtype=np.int32)
+        cone_starts = np.empty(n_cones, dtype=np.int32)
+        cone_v_dims = np.ones(n_cones, dtype=np.int32)
+        cone_alphas = np.zeros(n_cones, dtype=np.float64)
+        is_fixed_mask = np.zeros(n_slack, dtype=np.uint8)
         slack_off = 0
         cvx_row_off = 0
-
-        cone_row_off = 0  # index into A_cone_dense_zero / b_cone
-
-        def maybe_pin(cone_slot_idx: int, cone_row_idx: int) -> bool:
-            """If cvxpy cone row `cone_row_idx` has all zeros in A_cvx, its s value
-            is fully determined by b_cvx. Pin the corresponding internal slot to
-            improve conditioning of the cone projection."""
-            if not A_cone_dense_zero[cone_row_idx]:
-                return False
-            is_fixed_mask[cone_slot_idx] = 1
-            primal_start_slack[cone_slot_idx] = float(b_cone[cone_row_idx])
-            return True
+        cone_idx = 0
 
         # --- SOC blocks ---
         for k in soc_dims:
             # cvxpy layout: (top, tail_0..tail_{k-2}) at rows cvx_row_off..cvx_row_off+k-1
             # internal layout: [v_0..v_{k-2}, w, z] at slots slack_off..slack_off+k
-            S_rows.append(cvx_row_off + 0)
-            S_cols.append(slack_off + k)  # z
-            pin_flags = [False] * (k + 1)
-            pin_flags[k - 1] = True  # phantom w
-            if maybe_pin(slack_off + k, cone_row_off + 0):
-                pin_flags[k] = True
-            for i in range(1, k):
-                S_rows.append(cvx_row_off + i)
-                S_cols.append(slack_off + i - 1)  # v_{i-1}
-                if maybe_pin(slack_off + i - 1, cone_row_off + i):
-                    pin_flags[i - 1] = True
+            mapped_slots = S_cols[cvx_row_off : cvx_row_off + k]
+            mapped_slots[0] = slack_off + k  # z
+            mapped_slots[1:] = np.arange(slack_off, slack_off + k - 1, dtype=np.int64)
             is_fixed_mask[slack_off + (k - 1)] = 1  # phantom w always pinned
 
-            cones_specs.append(
-                {
-                    "type": "soc",
-                    "start_idx": n + slack_off,
-                    "v_dim": k - 1,
-                    "is_fixed": pin_flags,
-                }
-            )
+            cone_types[cone_idx] = int(ConeType.SOC)
+            cone_starts[cone_idx] = n + slack_off
+            cone_v_dims[cone_idx] = k - 1
+            cone_idx += 1
             slack_off += k + 1
             cvx_row_off += k
-            cone_row_off += k
 
         # --- EXP blocks ---
-        for _ in range(n_exp):
-            pin_flags = [False, False, False]
-            for i in range(3):
-                S_rows.append(cvx_row_off + i)
-                S_cols.append(slack_off + i)
-                if maybe_pin(slack_off + i, cone_row_off + i):
-                    pin_flags[i] = True
-            spec = {"type": "exp", "start_idx": n + slack_off, "v_dim": 1}
-            if any(pin_flags):
-                spec["is_fixed"] = pin_flags
-            cones_specs.append(spec)
-            slack_off += 3
-            cvx_row_off += 3
-            cone_row_off += 3
+        if n_exp:
+            cone_slice = slice(cone_idx, cone_idx + n_exp)
+            cone_types[cone_slice] = int(ConeType.EXP)
+            cone_starts[cone_slice] = n + slack_off + 3 * np.arange(n_exp, dtype=np.int64)
+            row_count = 3 * n_exp
+            mapped_slots = np.arange(slack_off, slack_off + row_count, dtype=np.int64)
+            S_cols[cvx_row_off : cvx_row_off + row_count] = mapped_slots
+            cone_idx += n_exp
+            slack_off += row_count
+            cvx_row_off += row_count
 
         # --- POWER3D blocks ---
         # cvxpy PowCone3D: x^alpha * y^(1-alpha) >= |z|, x,y >= 0. Direct 1-1 mapping.
-        for alpha in pow_alphas:
-            pin_flags = [False, False, False]
-            for i in range(3):
-                S_rows.append(cvx_row_off + i)
-                S_cols.append(slack_off + i)
-                if maybe_pin(slack_off + i, cone_row_off + i):
-                    pin_flags[i] = True
-            spec = {
-                "type": "power",
-                "start_idx": n + slack_off,
-                "v_dim": 1,
-                "alpha": float(alpha),
-            }
-            if any(pin_flags):
-                spec["is_fixed"] = pin_flags
-            cones_specs.append(spec)
-            slack_off += 3
-            cvx_row_off += 3
-            cone_row_off += 3
+        if n_pow_blocks:
+            cone_slice = slice(cone_idx, cone_idx + n_pow_blocks)
+            cone_types[cone_slice] = int(ConeType.POWER)
+            cone_starts[cone_slice] = n + slack_off + 3 * np.arange(n_pow_blocks, dtype=np.int64)
+            cone_alphas[cone_slice] = np.asarray(pow_alphas, dtype=np.float64)
+            row_count = 3 * n_pow_blocks
+            mapped_slots = np.arange(slack_off, slack_off + row_count, dtype=np.int64)
+            S_cols[cvx_row_off : cvx_row_off + row_count] = mapped_slots
+            cone_idx += n_pow_blocks
+            slack_off += row_count
+            cvx_row_off += row_count
+
+        assert cone_idx == n_cones
+        assert slack_off == n_slack
+        assert cvx_row_off == n_cone_rows
 
         # --- Assemble A_new = [A_x, mapping matrix M(cvx rows -> internal slack cols)] ---
         # Zero + nonneg rows: no slack (absorbed into row bounds).
-        # Cone rows: A_cvx (x-part) + M (identity-like, from S_rows/S_cols).
+        # Cone rows: A_cvx (x-part) + M (identity-like row-to-slot mapping).
         n_row_lp = n_zero + n_nonneg
         A_top_x = A_cvx[:n_row_lp, :]  # LP rows: x-part
         A_bot_x = A_cvx[n_row_lp:, :]  # cone rows: x-part
 
         M = sp.csr_matrix(
             (
-                np.ones(len(S_rows), dtype=np.float64),
-                (np.asarray(S_rows, dtype=np.int64), np.asarray(S_cols, dtype=np.int64)),
+                np.ones(n_cone_rows, dtype=np.float64),
+                (np.arange(n_cone_rows, dtype=np.int64), S_cols),
             ),
             shape=(n_cone_rows, n_slack),
         )
@@ -279,15 +242,21 @@ class PDHCG(ConicSolver):
         var_ub = np.full(n_vars_total, np.inf, dtype=np.float64)
 
         # Assemble is_fixed / primal_start on the full [x; slack] vector.
-        is_fixed_full = np.zeros(n_vars_total, dtype=np.int8)
+        is_fixed_full = np.zeros(n_vars_total, dtype=np.uint8)
         primal_start_full = np.zeros(n_vars_total, dtype=np.float64)
         is_fixed_full[n:] = is_fixed_mask
-        primal_start_full[n:] = primal_start_slack
 
-        # Convert cones list-of-dicts to solve_once's expected form with is_fixed
-        # per cone (list of bool of length slot_count).
-        # SOC needs is_fixed on w-slot; other cones don't get is_fixed here.
-        # We already populated cones_specs with is_fixed above.
+        cones_spec = (
+            ConeSpec(
+                cone_types,
+                cone_starts,
+                cone_v_dims,
+                cone_alphas,
+                fixed_mask=is_fixed_full if n_soc_blocks else None,
+            )
+            if n_cones
+            else None
+        )
 
         # Merge solver_opts into params dict (accepted keys are the PDHCG params).
         params_dict = _translate_opts(solver_opts, verbose)
@@ -304,10 +273,10 @@ class PDHCG(ConicSolver):
             constraint_upper_bound=row_ub,
             zero_tolerance=0.0,
             params=params_dict,
-            primal_start=primal_start_full if is_fixed_mask.any() else None,
+            primal_start=primal_start_full if n_soc_blocks else None,
             dual_start=None,
             D=None,
-            cones=cones_specs if cones_specs else None,
+            cones=cones_spec,
         )
 
         # Build the solution dict expected by our invert().

@@ -20,8 +20,8 @@ static qp_problem_t *make_unconstrained_power_problem(double alpha, const double
     cone.type = CONE_POWER;
     cone.start_idx = 0;
     cone.v_dim = 1;
-    cone.alpha = alpha;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone);
+    cone.power_alpha = alpha;
+    return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
 }
 
 static qp_problem_t *make_quadratic_power_problem(double alpha, const double center[3], const double weights[3])
@@ -55,8 +55,8 @@ static qp_problem_t *make_quadratic_power_problem(double alpha, const double cen
     cone.type = CONE_POWER;
     cone.start_idx = 0;
     cone.v_dim = 1;
-    cone.alpha = alpha;
-    return create_qp_problem(objective, &Q, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone);
+    cone.power_alpha = alpha;
+    return create_qp_problem(objective, &Q, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
 }
 
 static pdhcg_result_t *solve_tiny_with_norm(qp_problem_t *problem, norm_type_t optimality_norm)
@@ -129,8 +129,9 @@ static int run_full_cone_case(double alpha, norm_type_t optimality_norm)
     cone.type = CONE_POWER;
     cone.start_idx = 0;
     cone.v_dim = 1;
-    cone.alpha = alpha;
-    qp_problem_t *problem = create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone);
+    cone.power_alpha = alpha;
+    qp_problem_t *problem =
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
     if (!problem)
         return 0;
     set_start_values(problem, primal_start, dual_start);

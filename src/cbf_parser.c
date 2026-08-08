@@ -17,8 +17,7 @@ limitations under the License.
 /* MOSEK Conic Benchmark Format (CBF) parser.
    Supports variable-side cones L=, L+, L-, F, Q, QR, EXP;
    constraint-side cones L=, L+, L-, Q, QR, EXP.
-   Nonlinear constraint-side cones are converted to auxiliary cone variables
-   y in K plus linear equalities A x - y = -b.
+   Nonlinear constraint-side cones are represented natively as A x + b in K.
    Rejects: PSDVAR, PSDCON, HCOORD, DCOORD, FCOORD, OBJFCOORD, INT,
    POW, POW*, EXP*, CHANGE blocks. */
 
@@ -718,21 +717,14 @@ static void cbf_consume_change(cbf_reader_t *r)
 }
 
 /* Compute qp_problem column layout:
-     [ LP vars | VAR cone-block vars | auxiliary CON cone-block vars ]
+     [ LP vars | VAR cone-block vars ]
    Return arrays:
      lp_offset[b] = column start of block b if LP, else -1
      cone_offset[b] = column start of VAR block b if cone, else -1
-     con_cone_offset[b] = column start of CON block b if nonlinear cone, else -1
      total_vars = final variable count
-     cbf_to_qp[i] = mapping from CBF variable index i to internal qp column index
-     con_to_qp[r] = mapping from nonlinear CBF constraint component r to its aux y column */
-static void cbf_build_layout(const cbf_state_t *s,
-                             int **lp_off_out,
-                             int **cone_off_out,
-                             int **con_cone_off_out,
-                             int *total_vars_out,
-                             int **cbf_to_qp_out,
-                             int **con_to_qp_out)
+     cbf_to_qp[i] = mapping from CBF variable index i to internal qp column index */
+static void
+cbf_build_layout(const cbf_state_t *s, int **lp_off_out, int **cone_off_out, int *total_vars_out, int **cbf_to_qp_out)
 {
     int nb = s->num_var_blocks;
     int *lp_off = (int *)safe_malloc(nb * sizeof(int));
@@ -782,40 +774,10 @@ static void cbf_build_layout(const cbf_state_t *s,
         }
     }
 
-    int ncb = s->num_con_blocks;
-    int *con_cone_off = (int *)safe_malloc((size_t)(ncb > 0 ? ncb : 1) * sizeof(int));
-    for (int i = 0; i < ncb; ++i)
-        con_cone_off[i] = -1;
-    for (int i = 0; i < ncb; ++i)
-    {
-        cbf_cone_t ct = s->con_blocks[i].type;
-        if (!cbf_is_nonlinear_cone(ct))
-            continue;
-        con_cone_off[i] = col;
-        col += cbf_internal_cone_slots(ct, s->con_blocks[i].dim);
-    }
-
-    int *con_to_qp = (int *)safe_malloc((size_t)(s->num_cons > 0 ? s->num_cons : 1) * sizeof(int));
-    for (int r = 0; r < s->num_cons; ++r)
-        con_to_qp[r] = -1;
-    for (int i = 0; i < ncb; ++i)
-    {
-        cbf_cone_t ct = s->con_blocks[i].type;
-        if (!cbf_is_nonlinear_cone(ct))
-            continue;
-        int start = s->con_blocks[i].start;
-        int dim = s->con_blocks[i].dim;
-        int base = con_cone_off[i];
-        for (int j = 0; j < dim; ++j)
-            con_to_qp[start + j] = cbf_map_cone_component(ct, dim, base, j);
-    }
-
     *lp_off_out = lp_off;
     *cone_off_out = cone_off;
-    *con_cone_off_out = con_cone_off;
     *total_vars_out = col;
     *cbf_to_qp_out = cbf_to_qp;
-    *con_to_qp_out = con_to_qp;
 }
 
 /* Sort (row, col) coordinates and coalesce duplicates into a CSR matrix.
@@ -944,7 +906,7 @@ static int cbf_mark_fixed_soc_radii(qp_problem_t *problem)
         if (column < 0 || column >= n || !is_radius[column] || !isfinite(coefficient) || coefficient == 0.0)
             continue;
 
-        double value = lower / coefficient;
+        double value = (lower - problem->affine_cone_offset[row]) / coefficient;
         if (!isfinite(value) || value < 0.0)
             continue;
 
@@ -966,7 +928,10 @@ static int cbf_mark_fixed_soc_radii(qp_problem_t *problem)
     if (fixed > 0)
     {
         if (!problem->cones.is_fixed)
+        {
+            problem->cones.fixed_mask_size = n;
             problem->cones.is_fixed = (char *)safe_calloc((size_t)n, sizeof(char));
+        }
         if (!problem->primal_start)
             problem->primal_start = (double *)safe_calloc((size_t)n, sizeof(double));
 
@@ -987,13 +952,37 @@ static int cbf_mark_fixed_soc_radii(qp_problem_t *problem)
 
 static qp_problem_t *cbf_finalize(cbf_state_t *s)
 {
-    int *lp_off, *cone_off, *con_cone_off, *cbf_to_qp, *con_to_qp;
+    int *lp_off, *cone_off, *cbf_to_qp;
     int total_vars;
-    cbf_build_layout(s, &lp_off, &cone_off, &con_cone_off, &total_vars, &cbf_to_qp, &con_to_qp);
+    cbf_build_layout(s, &lp_off, &cone_off, &total_vars, &cbf_to_qp);
+
+    int *cbf_row_to_qp = (int *)safe_malloc((size_t)(s->num_cons > 0 ? s->num_cons : 1) * sizeof(int));
+    int *constraint_block_start =
+        (int *)safe_malloc((size_t)(s->num_con_blocks > 0 ? s->num_con_blocks : 1) * sizeof(int));
+    int row_cursor = 0;
+    for (int b = 0; b < s->num_con_blocks; ++b)
+    {
+        cbf_cone_t ct = s->con_blocks[b].type;
+        int start = s->con_blocks[b].start;
+        int dim = s->con_blocks[b].dim;
+        constraint_block_start[b] = row_cursor;
+        if (cbf_is_lp_cone(ct))
+        {
+            for (int j = 0; j < dim; ++j)
+                cbf_row_to_qp[start + j] = row_cursor + j;
+        }
+        else
+        {
+            for (int j = 0; j < dim; ++j)
+                cbf_row_to_qp[start + j] = cbf_map_cone_component(ct, dim, row_cursor, j);
+        }
+        row_cursor += cbf_internal_cone_slots(ct, dim);
+    }
 
     qp_problem_t *out = (qp_problem_t *)safe_calloc(1, sizeof(qp_problem_t));
     out->num_variables = total_vars;
     out->num_constraints = s->num_cons;
+    out->affine_cone_offset = s->num_cons > 0 ? (double *)safe_calloc((size_t)s->num_cons, sizeof(double)) : NULL;
     out->num_original_variables = total_vars;
     out->objective_constant = s->obj_constant;
 
@@ -1038,17 +1027,11 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
         /* CBF_CONE_FREE: leave -inf/inf. */
     }
 
-    /* Cone-block descriptors. */
+    /* Variable-side cone-block descriptors. */
     int num_cones = 0;
     for (int b = 0; b < s->num_var_blocks; ++b)
     {
         cbf_cone_t ct = s->var_blocks[b].type;
-        if (cbf_is_nonlinear_cone(ct))
-            num_cones++;
-    }
-    for (int b = 0; b < s->num_con_blocks; ++b)
-    {
-        cbf_cone_t ct = s->con_blocks[b].type;
         if (cbf_is_nonlinear_cone(ct))
             num_cones++;
     }
@@ -1058,7 +1041,6 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
         out->cones.start_idx = (int *)safe_malloc(num_cones * sizeof(int));
         out->cones.v_dim = (int *)safe_malloc(num_cones * sizeof(int));
         out->cones.type = (cone_type_t *)safe_malloc(num_cones * sizeof(cone_type_t));
-        out->cones.power_alpha = NULL;
         int k = 0;
         for (int b = 0; b < s->num_var_blocks; ++b)
         {
@@ -1070,56 +1052,42 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
             out->cones.type[k] = cbf_internal_cone_type(ct);
             k++;
         }
+    }
+
+    int num_affine_cones = 0;
+    for (int b = 0; b < s->num_con_blocks; ++b)
+        num_affine_cones += cbf_is_nonlinear_cone(s->con_blocks[b].type);
+    out->affine_cones.num_cones = num_affine_cones;
+    if (num_affine_cones > 0)
+    {
+        out->affine_cones.start_idx = (int *)safe_malloc((size_t)num_affine_cones * sizeof(int));
+        out->affine_cones.v_dim = (int *)safe_malloc((size_t)num_affine_cones * sizeof(int));
+        out->affine_cones.type = (cone_type_t *)safe_malloc((size_t)num_affine_cones * sizeof(cone_type_t));
+        int cone = 0;
         for (int b = 0; b < s->num_con_blocks; ++b)
         {
             cbf_cone_t ct = s->con_blocks[b].type;
             if (!cbf_is_nonlinear_cone(ct))
                 continue;
-            out->cones.start_idx[k] = con_cone_off[b];
-            out->cones.v_dim[k] = cbf_internal_cone_v_dim(ct, s->con_blocks[b].dim);
-            out->cones.type[k] = cbf_internal_cone_type(ct);
-            k++;
+            out->affine_cones.start_idx[cone] = constraint_block_start[b];
+            out->affine_cones.v_dim[cone] = cbf_internal_cone_v_dim(ct, s->con_blocks[b].dim);
+            out->affine_cones.type[cone] = cbf_internal_cone_type(ct);
+            cone++;
         }
     }
 
-    /* Build A (num_cons x total_vars) from COO in internal column indexing.
-       CBF states: A x + b ∈ K_con, i.e., (Ax + b) participates in the cone.
-       For LP CON cones:
-         F   ->  no row restriction
-         L=  ->  A x = -b   (l = u = -b)
-         L+  ->  A x >= -b  (l = -b, u = +inf)
-         L-  ->  A x <= -b  (l = -inf, u = -b) */
-    int con_aux_nnz = 0;
-    for (int b = 0; b < s->num_con_blocks; ++b)
-    {
-        if (cbf_is_nonlinear_cone(s->con_blocks[b].type))
-            con_aux_nnz += s->con_blocks[b].dim;
-    }
-    int work_nnz = s->nnz_A + con_aux_nnz;
+    /* Build A in internal row/column indexing. CBF states A x + b in K_con;
+       LP cone rows use canonical zero bounds and nonlinear cone rows are
+       identified by affine_cones. */
+    int work_nnz = s->nnz_A;
     int *rows = (int *)safe_malloc((size_t)(work_nnz > 0 ? work_nnz : 1) * sizeof(int));
     int *cols = (int *)safe_malloc((size_t)(work_nnz > 0 ? work_nnz : 1) * sizeof(int));
     double *vals = (double *)safe_malloc((size_t)(work_nnz > 0 ? work_nnz : 1) * sizeof(double));
     for (int i = 0; i < s->nnz_A; ++i)
     {
-        rows[i] = s->A_row[i];
+        rows[i] = cbf_row_to_qp[s->A_row[i]];
         cols[i] = cbf_to_qp[s->A_col[i]];
         vals[i] = s->A_val[i];
-    }
-    int write = s->nnz_A;
-    for (int b = 0; b < s->num_con_blocks; ++b)
-    {
-        cbf_cone_t ct = s->con_blocks[b].type;
-        if (!cbf_is_nonlinear_cone(ct))
-            continue;
-        int start = s->con_blocks[b].start;
-        int dim = s->con_blocks[b].dim;
-        for (int j = 0; j < dim; ++j)
-        {
-            rows[write] = start + j;
-            cols[write] = con_to_qp[start + j];
-            vals[write] = -1.0;
-            write++;
-        }
     }
     int final_nnz = 0;
     CsrComponent *A = cbf_coo_to_csr(s->num_cons, total_vars, work_nnz, rows, cols, vals, &final_nnz);
@@ -1131,6 +1099,11 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
 
     out->constraint_lower_bound = (double *)safe_malloc((size_t)(s->num_cons > 0 ? s->num_cons : 1) * sizeof(double));
     out->constraint_upper_bound = (double *)safe_malloc((size_t)(s->num_cons > 0 ? s->num_cons : 1) * sizeof(double));
+    for (int row = 0; row < s->num_cons; ++row)
+    {
+        out->constraint_lower_bound[row] = -INFINITY;
+        out->constraint_upper_bound[row] = INFINITY;
+    }
     for (int b = 0; b < s->num_con_blocks; ++b)
     {
         cbf_cone_t ct = s->con_blocks[b].type;
@@ -1138,27 +1111,33 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
         int dim = s->con_blocks[b].dim;
         for (int j = 0; j < dim; ++j)
         {
-            int r = start + j;
-            double neg_b = -s->b[r];
+            int cbf_row = start + j;
+            int r = cbf_row_to_qp[cbf_row];
+            if (cbf_is_nonlinear_cone(ct))
+            {
+                out->affine_cone_offset[r] = s->b[cbf_row];
+                continue;
+            }
+            double shifted_zero = -s->b[cbf_row];
             if (ct == CBF_CONE_FREE)
             {
                 out->constraint_lower_bound[r] = -INFINITY;
                 out->constraint_upper_bound[r] = INFINITY;
             }
-            else if (ct == CBF_CONE_ZERO || cbf_is_nonlinear_cone(ct))
+            else if (ct == CBF_CONE_ZERO)
             {
-                out->constraint_lower_bound[r] = neg_b;
-                out->constraint_upper_bound[r] = neg_b;
+                out->constraint_lower_bound[r] = shifted_zero;
+                out->constraint_upper_bound[r] = shifted_zero;
             }
             else if (ct == CBF_CONE_LPOS)
             {
-                out->constraint_lower_bound[r] = neg_b;
+                out->constraint_lower_bound[r] = shifted_zero;
                 out->constraint_upper_bound[r] = INFINITY;
             }
             else
             { /* CBF_CONE_LNEG */
                 out->constraint_lower_bound[r] = -INFINITY;
-                out->constraint_upper_bound[r] = neg_b;
+                out->constraint_upper_bound[r] = shifted_zero;
             }
         }
     }
@@ -1166,9 +1145,6 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
     (void)cbf_mark_fixed_soc_radii(out);
 
     out->num_quadratic_constraints = 0;
-    out->quadratic_constraint_row_indices = NULL;
-    out->quadratic_constraint_matrices = NULL;
-    out->quadratic_constraint_matrix_num_nonzeros = NULL;
 
     /* MAX objsense negates Q too since max f = min -f. */
     if (s->nnz_Q > 0)
@@ -1193,9 +1169,9 @@ static qp_problem_t *cbf_finalize(cbf_state_t *s)
 
     free(lp_off);
     free(cone_off);
-    free(con_cone_off);
     free(cbf_to_qp);
-    free(con_to_qp);
+    free(cbf_row_to_qp);
+    free(constraint_block_start);
     return out;
 }
 

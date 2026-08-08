@@ -28,16 +28,16 @@ Model
 
 Links
 -----
-* Repository: https://github.com/Lhongpei/PDHCG-II
+* Repository: https://github.com/Lhongpei/PDHCG
 """
 
-from .model import Model
+from importlib.metadata import PackageNotFoundError, version
+
 from . import PDHCG
+from .cones import ConeSpec, ConeType
+from .model import Model
 
-__all__ = ["Model"]
-
-# versioning
-from importlib.metadata import version, PackageNotFoundError
+__all__ = ["ConeSpec", "ConeType", "Model", "PDHCG"]
 
 # get version from package metadata (toml file)
 try:

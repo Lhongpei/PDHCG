@@ -1,7 +1,7 @@
 
 ### C Interface
 
-PDHCG-II provides a C API for directly solving QPs in memory, defined in header file `include/pdhcg.h`.
+PDHCG provides a C API for directly solving QPs in memory, defined in header file `include/pdhcg.h`.
 
 #### Functions and Parameters
 
@@ -19,8 +19,11 @@ qp_problem_t *create_qp_problem(
     const double *var_lb,                // variable lower bounds (length n)
     const double *var_ub,                // variable upper bounds (length n)
     const double *objective_constant,    // scalar objective offset
-    int num_cones,                       // number of cone blocks (0 for plain QP)
-    const cone_spec_t *cones             // cone descriptors (NULL if num_cones=0)
+    int num_var_cones,                   // number of variable cone blocks
+    const cone_spec_t *var_cones,        // variable cone descriptors
+    int num_affine_cones,                // number of affine cone blocks
+    const cone_spec_t *affine_cones,     // descriptors indexing rows of A
+    const double *affine_cone_offset     // affine offset aligned with rows of A
 );
 
 pdhcg_result_t* solve_qp_problem(
@@ -42,7 +45,12 @@ The objective minimized is `0.5 * x^T (Q + R^T D R) x + c^T x + c0`. `Q`, `R`, a
 - `var_lb`: Variable lower bounds. If `NULL`, defaults to all `-INFINITY`.
 - `var_ub`: Variable upper bounds. If `NULL`, defaults to all `+INFINITY`.
 - `objective_constant`: Scalar constant term added to the objective value. If `NULL`, defaults to `0.0`.
-- `num_cones`, `cones`: Optional conic blocks. Supported types are Standard SOC, Rotated SOC, and Exponential (`cone_type_t`). Pass `0` and `NULL` for a plain QP. See [Types](c/types.md) for slot layout and `set_cone_fixed` in [Functions](c/functions.md) for pinning individual slots.
+- `num_var_cones`, `var_cones`: Optional conic variable blocks. Supported types are SOC, rotated SOC, exponential, and power cones. Pass `0` and `NULL` when no variable cones are present. See [Types](c/types.md) for slot layouts and `set_cone_fixed` in [Functions](c/functions.md) for pinning individual slots.
+- `num_affine_cones`, `affine_cones`: Optional native constraints `(A x + affine_cone_offset)[block] in K`. Each `start_idx` indexes the global rows of `A`; blocks must be disjoint, and their rows must not also have finite scalar bounds. Affine cone descriptors must set `is_fixed = NULL`.
+- `affine_cone_offset`: Offset vector aligned with all rows of `A`. Pass `NULL` for zero offsets. Values outside affine cone blocks are ignored.
+
+Affine cone constraints are handled directly without introducing slack variables.
+Ordinary scalar rows and affine cone rows may appear in any order in `A`.
 
 
 `solve_qp_problem` parameters:
@@ -60,7 +68,9 @@ pdhcg_result_t* solve_qp_problem_distributed(
 );
 ```
 
-This requires PDHCG to be compiled with `-DPDHCG_COMPILE_DISTRIBUTED=ON` and launched via `mpirun`.
+Distributed execution requires PDHCG to be compiled with
+`-DPDHCG_COMPILE_DISTRIBUTED=ON` and launched via `mpirun`. A non-distributed
+build keeps the function symbol but returns `NULL` with an explanatory error.
 
 #### Example: Solving a Small QP
 ```c
@@ -111,7 +121,7 @@ int main() {
 
     // 6. Build the QP problem
     // Note: We pass NULL for R_desc (low-rank factor), D_desc (middle matrix),
-    // and objective_constant. num_cones=0 / cones=NULL marks this as a plain QP.
+    // and objective_constant. Both cone counts are zero for a plain QP.
     qp_problem_t* prob = create_qp_problem(
         c,          // objective_c
         &Q_desc,    // Q_desc
@@ -123,8 +133,11 @@ int main() {
         lb,         // var_lb
         ub,         // var_ub
         NULL,       // objective_constant
-        0,          // num_cones
-        NULL        // cones
+        0,          // num_var_cones
+        NULL,       // var_cones
+        0,          // num_affine_cones
+        NULL,       // affine_cones
+        NULL        // affine_cone_offset
     );
 
     // 7. Solve (NULL → use default parameters)

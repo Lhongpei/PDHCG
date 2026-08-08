@@ -42,11 +42,6 @@ extern "C"
     __global__ void
     vector_add_kernel(const double *__restrict__ a, const double *__restrict__ b, double *__restrict__ out, int n);
 
-    __global__ void restore_fixed_cone_slots_kernel(double *__restrict__ primal_solution,
-                                                    const double *__restrict__ fixed_values,
-                                                    const char *__restrict__ is_fixed,
-                                                    int n);
-
     __global__ void project_primal_onto_bounds_kernel(double *__restrict__ primal_solution,
                                                       const double *__restrict__ variable_lower_bound,
                                                       const double *__restrict__ variable_upper_bound,
@@ -56,6 +51,8 @@ extern "C"
                                                             const double *__restrict__ primal_solution,
                                                             const double *__restrict__ effective_objective,
                                                             const double *__restrict__ dual_product,
+                                                            const double *__restrict__ variable_lower_bound,
+                                                            const double *__restrict__ variable_upper_bound,
                                                             double step_size,
                                                             int num_variables);
 
@@ -130,8 +127,9 @@ extern "C"
     __global__ void compute_next_pdhg_dual_solution_kernel(const double *current_dual,
                                                            double *reflected_dual,
                                                            const double *primal_product,
-                                                           const double *const_lb,
-                                                           const double *const_ub,
+                                                           const double *affine_cone_offset,
+                                                           const double *constraint_lower_bound,
+                                                           const double *constraint_upper_bound,
                                                            int n,
                                                            double step_size);
 
@@ -139,10 +137,29 @@ extern "C"
                                                                  double *pdhg_dual,
                                                                  double *reflected_dual,
                                                                  const double *primal_product,
-                                                                 const double *const_lb,
-                                                                 const double *const_ub,
+                                                                 const double *affine_cone_offset,
+                                                                 const double *constraint_lower_bound,
+                                                                 const double *constraint_upper_bound,
                                                                  int n,
                                                                  double step_size);
+
+    __global__ void prepare_constraint_dual_update_kernel(const double *current_dual,
+                                                          const double *primal_product,
+                                                          const double *affine_cone_offset,
+                                                          const double *constraint_lower_bound,
+                                                          const double *constraint_upper_bound,
+                                                          double *projected_constraint_value,
+                                                          int n,
+                                                          double step_size);
+
+    __global__ void finish_constraint_dual_update_kernel(const double *current_dual,
+                                                         const double *primal_product,
+                                                         const double *affine_cone_offset,
+                                                         const double *projected_constraint_value,
+                                                         double *pdhg_dual,
+                                                         double *reflected_dual,
+                                                         int n,
+                                                         double step_size);
 
     // ======================================================================
     // Halpern & Solution Management
@@ -290,6 +307,7 @@ extern "C"
 
     __global__ void compute_lp_residual_kernel(double *primal_residual,
                                                const double *primal_product,
+                                               const double *affine_cone_offset,
                                                const double *constraint_lower_bound,
                                                const double *constraint_upper_bound,
                                                const double *dual_solution,
@@ -299,14 +317,17 @@ extern "C"
                                                const double *objective_vector,
                                                const double *constraint_rescaling,
                                                const double *variable_rescaling,
+                                               double *affine_dual_membership,
                                                double *dual_obj_contribution,
                                                const double *const_lb_finite,
                                                const double *const_ub_finite,
+                                               bool defer_constraint_projection,
                                                int num_constraints,
                                                int num_variables);
 
     __global__ void compute_qp_residual_kernel(double *primal_residual,
                                                const double *primal_product,
+                                               const double *affine_cone_offset,
                                                const double *primal_obj_product,
                                                const double *primal_solution,
                                                const double *constraint_lower_bound,
@@ -320,12 +341,32 @@ extern "C"
                                                const double *objective_vector,
                                                const double *constraint_rescaling,
                                                const double *variable_rescaling,
+                                               double *affine_dual_membership,
                                                double *dual_obj_contribution,
                                                const double *const_lb_finite,
                                                const double *const_ub_finite,
                                                const double step_size,
+                                               bool defer_constraint_projection,
                                                int num_constraints,
                                                int num_variables);
+
+    __global__ void finish_affine_cone_residuals_kernel(double *primal_residual,
+                                                        const double *primal_product,
+                                                        const double *affine_cone_offset,
+                                                        const double *constraint_rescaling,
+                                                        double *dual_membership,
+                                                        const double *dual_membership_rescaling,
+                                                        int n);
+
+    __global__ void prepare_affine_cone_residuals_kernel(double *projection_point,
+                                                         double *complementarity_residual,
+                                                         const double *primal_product,
+                                                         const double *affine_cone_offset,
+                                                         const double *dual_solution,
+                                                         const int *start_idx,
+                                                         const int *v_dim,
+                                                         double constraint_bound_rescaling,
+                                                         int num_cones);
 
     __global__ void recover_primal_obj_dual_product(double *dual_product,
                                                     double *primal_obj_product,
@@ -359,6 +400,7 @@ extern "C"
     __global__ void
     dual_solution_dual_objective_contribution_kernel(const double *constraint_lower_bound_finite_val,
                                                      const double *constraint_upper_bound_finite_val,
+                                                     const double *affine_cone_offset,
                                                      const double *dual_solution,
                                                      int num_constraints,
                                                      double *dual_objective_dual_solution_contribution_array);

@@ -1,12 +1,12 @@
 # Citation
 
-If you use PDHCG-II in your research, please cite the following papers:
+If you use PDHCG in your research, please cite the following papers:
 
 ## Main Paper
 
 ```bibtex
 @misc{li2026pdhcgiienhancedversionpdhcg,
-      title={PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP},
+      title={PDHCG: An Enhanced First-Order Solver for Large-Scale Convex QP},
       author={Hongpei Li and Yicheng Huang and Huikang Liu and Dongdong Ge and Yinyu Ye},
       year={2026},
       eprint={2602.23967},
@@ -34,7 +34,7 @@ If you use PDHCG-II in your research, please cite the following papers:
 
 - [arXiv Preprint](https://arxiv.org/abs/2602.23967)
 - [INFORMS Journal on Computing](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983)
-- [GitHub Repository](https://github.com/Lhongpei/PDHCG-II)
+- [GitHub Repository](https://github.com/Lhongpei/PDHCG)
 
 ## Acknowledgments
 

@@ -176,11 +176,9 @@ mpirun -n 4 ./build/bin/pdhcg problem.mps ./output \
 
 ## Conic Examples
 
-The conic interface is the lower-level `solve_once` entry from `pdhcg._core`,
-extended with a `cones=` argument. Each entry is a dict
-`{"type": "soc"|"rsoc"|"exp", "start_idx": int, "v_dim": int, "is_fixed": [bool]?}`
-(`v_dim` is omitted for `exp`; see the [C API](c/functions.md) for the cone
-layout).
+The conic interface accepts a columnar `ConeSpec` through `Model` or the
+lower-level `solve_once` entry. See the [Python model API](python/model.md#cone-constraints)
+for its fields and the [C API](c/functions.md) for cone layouts.
 
 ### Standard SOC
 
@@ -190,6 +188,7 @@ Minimise `z` over `(v, w, z) in K_soc` with `v = 3`, `w = 4`. Optimum recovers
 ```python
 import numpy as np
 import scipy.sparse as sp
+from pdhcg import ConeSpec, ConeType
 from pdhcg._core import solve_once
 
 A = sp.csr_matrix([[1.0, 0.0, 0.0],
@@ -201,7 +200,7 @@ INF = np.full(3, 1e30)
 info = solve_once(
     None, None, A, c, 0.0,
     -INF, INF, con_lb, con_ub,
-    cones=[{"type": "soc", "start_idx": 0, "v_dim": 1}],
+    cones=ConeSpec(ConeType.SOC, np.array([0], dtype=np.int32)),
 )
 print(info["X"])  # [3., 4., 5.]
 ```
@@ -224,6 +223,7 @@ cone `(v, w, z)`. Variables are `(a, b, v, w, z)`; constraints pin `a = v`,
 ```python
 import numpy as np
 import scipy.sparse as sp
+from pdhcg import ConeSpec, ConeType
 from pdhcg._core import solve_once
 
 # (a, b, v, w, z)  with a - v = 0, b - w = 0
@@ -241,7 +241,7 @@ INF = np.full(5, 1e30)
 info = solve_once(
     Q, None, A, c, 0.0,
     -INF, INF, con_lb, con_ub,
-    cones=[{"type": "soc", "start_idx": 2, "v_dim": 1}],
+    cones=ConeSpec(ConeType.SOC, np.array([2], dtype=np.int32)),
 )
 print(info["X"])         # [3, 4, 3, 4, 5]
 print(info["PrimalObj"]) # -1.5
@@ -265,6 +265,7 @@ feasibility at the solution: `y_i * exp(z_i / y_i) <= t_i`.
 ```python
 import numpy as np
 import scipy.sparse as sp
+from pdhcg import ConeSpec, ConeType
 from pdhcg._core import solve_once
 
 u = np.array([[0.5, 1.0, 0.2], [0.3, 0.7, 1.0]])   # 2 buyers, 3 goods
@@ -294,8 +295,13 @@ con_b = np.concatenate([b, np.zeros(n)])
 
 primal_start = np.zeros(N)
 primal_start[c0+1::3] = 1.0                         # pin y_i = 1
-cones = [{"type": "exp", "start_idx": c0+3*i,
-          "is_fixed": [False, True, False]} for i in range(n)]
+fixed_mask = np.zeros(N, dtype=np.uint8)
+fixed_mask[c0+1::3] = 1
+cones = ConeSpec(
+    ConeType.EXP,
+    c0 + 3 * np.arange(n, dtype=np.int32),
+    fixed_mask=fixed_mask,
+)
 
 info = solve_once(None, None, A, c, 0.0, lb, ub, con_b, con_b.copy(),
                   primal_start=primal_start, cones=cones)

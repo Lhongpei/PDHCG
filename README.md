@@ -1,32 +1,33 @@
 # PDHCG: A First-Order Solver for Quadratic Conic Programming with Multi-GPU Acceleration
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![PyPI version](https://badge.fury.io/py/pdhcg.svg)](https://pypi.org/project/pdhcg/) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://lhongpei.github.io/PDHCG-II) [![Publication](https://img.shields.io/badge/DOI-10.1287/ijoc.2024.0983-B31B1B.svg)](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) [![arXiv](https://img.shields.io/badge/arXiv-2602.23967-b31b1b.svg)](https://arxiv.org/abs/2602.23967) [![qpsolvers](https://img.shields.io/badge/qpsolvers-supported-brightgreen.svg)](https://github.com/qpsolvers/qpsolvers) [![CVXPY](https://img.shields.io/badge/CVXPY-supported-brightgreen.svg)](https://www.cvxpy.org/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![PyPI version](https://badge.fury.io/py/pdhcg.svg)](https://pypi.org/project/pdhcg/) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://lhongpei.github.io/PDHCG) [![Publication](https://img.shields.io/badge/DOI-10.1287/ijoc.2024.0983-B31B1B.svg)](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) [![arXiv](https://img.shields.io/badge/arXiv-2602.23967-b31b1b.svg)](https://arxiv.org/abs/2602.23967) [![qpsolvers](https://img.shields.io/badge/qpsolvers-supported-brightgreen.svg)](https://github.com/qpsolvers/qpsolvers) [![CVXPY](https://img.shields.io/badge/CVXPY-supported-brightgreen.svg)](https://www.cvxpy.org/)
 
 
-**PDHCG** is a high-performance, GPU-accelerated implementation of the Primal-Dual Hybrid Gradient (PDHG) algorithm designed for solving large-scale Convex Quadratic Programming (QP) problems.
+**PDHCG** is a high-performance, GPU-accelerated implementation of the Primal-Dual Hybrid Gradient (PDHG) algorithm for large-scale convex quadratic and quadratic conic programming.
 
-For a detailed explanation of the methodology, please refer to our papers: [A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) and [PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP](https://arxiv.org/abs/2602.23967).
+For a detailed explanation of the methodology, please refer to our papers: [A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) and [PDHCG: An Enhanced First-Order Solver for Large-Scale Convex QP](https://arxiv.org/abs/2602.23967).
 
 
 ---
 
 ## Problem Formulation
 
-PDHCG solves convex quadratic programs in the following form, which allows a flexible input of the quadratic objective matrix as a sparse component plus a structured low-rank component:
+PDHCG solves convex quadratic conic programs in the following form, with a sparse quadratic objective component and an optional structured low-rank component:
 
 ```math
 \begin{aligned}
 \min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top D R) x + c^\top x \\
 \text{s.t.} \quad & \ell_c \le Ax \le u_c, \\
-                  & \ell_v \le x_I \le u_v, \\
-                  & x_J \in \mathcal{K} \quad \text{for cone blocks } J.
+                  & Fx + g \in \mathcal{K}_a, \\
+                  & \ell_v \le x \le u_v, \\
+                  & x_J \in \mathcal{K}_v \quad \text{for variable-cone blocks } J.
 \end{aligned}
 ```
 
 - $Q$ is the sparse symmetric quadratic component (optional).
 - $R \in \mathbb{R}^{k\times n}$ is a tall low-rank factor (optional, $k$ = rank).
 - $D \in \mathbb{R}^{k\times k}$ is an optional middle matrix that scales / weights / signs the low-rank term. When omitted it defaults to the identity, recovering the standard $Q + R^\top R$ formulation. $D$ may be **diagonal, sparse, dense, or indefinite** — the backend auto-detects the cheapest runtime representation.
-- Convex conic constraints (Standard SOC, Rotated SOC, Exponential cone) are supported as additional restrictions on the variable set.
+- Standard SOC, Rotated SOC, Exponential, and Power cones are supported both on variable blocks and through native affine constraints $Fx + g \in \mathcal{K}_a$.
 
 
 ## Installation (C++ Executable)
@@ -41,8 +42,8 @@ To use the standalone C++ solver, you must compile the project using CMake.
 ### Build from Source
 Clone the repository and compile the project using CMake.
 ```bash
-git clone https://github.com/Lhongpei/PDHCG-II.git
-cd PDHCG-II
+git clone https://github.com/Lhongpei/PDHCG.git
+cd PDHCG
 cmake -S . -B build
 cmake --build build --clean-first
 ```
@@ -50,8 +51,8 @@ This will create the solver binary at `./build/bin/pdhcg`.
 
 If your system has multiple CUDA versions or the default nvcc is outdated (e.g., in `/usr/bin/nvcc`), you should explicitly specify the path to your modern CUDA compiler using the CUDACXX environment variable.
 ```bash
-git clone https://github.com/Lhongpei/PDHCG-II.git
-cd PDHCG-II
+git clone https://github.com/Lhongpei/PDHCG.git
+cd PDHCG
 # Replace '/your/path/to/nvcc' with the actual path, e.g., /usr/local/cuda-12.6/bin/nvcc
 CUDACXX=/your/path/to/nvcc cmake -S . -B build
 cmake --build build --clean-first
@@ -69,10 +70,10 @@ cmake --build build --clean-first
 This requires MPI and NCCL to be installed on your system.
 
 Distributed conic solves preserve every cone as an ordered permutation unit. Small cones, exponential/power cones,
-heterogeneously scaled cones, unsupported fixed-slot patterns, and cones requiring a diagonal-Q metric stay on one
-column GPU. Large uniformly scaled SOC/RSOC blocks can span column GPUs; projection and dual-residual kernels reduce
-only per-cone statistics with NCCL and parallelize each local cone slice across multiple CUDA blocks. Raw QCQPs are
-reformulated on rank 0 before this partitioning step.
+cones with cone-preserving scaling disabled, unsupported fixed-slot patterns, and cones requiring a diagonal-Q metric
+stay on one column GPU. Large uniformly scaled SOC/RSOC blocks can span column GPUs; projection and dual-residual
+kernels reduce only per-cone statistics with NCCL and parallelize each local cone slice across multiple CUDA blocks.
+Raw QCQPs are reformulated on rank 0 before this partitioning step.
 
 ##  Usage (C++ Executable)
 
@@ -104,7 +105,7 @@ Solver Parameters:
 | --pock_chambolle_alpha | double | Value for Pock-Chambolle step size parameter $\alpha$. | 1.0 |
 | --no_pock_chambolle | flag | Disable Pock-Chambolle rescaling (enabled by default). | false |
 | --no_bound_obj_rescaling | flag | Disable bound objective rescaling (enabled by default). | false |
-| --heterogeneous_cone_scaling | flag | Keep per-element cone scaling instead of forcing one scaling value per cone block. | false |
+| --no_cone_preserving_scaling | flag | Keep coordinate-wise scaling within cone blocks. | false |
 | --sv_max_iter | int | Max iterations for singular value estimation (Power Method). | 5000 |
 | --sv_tol | double | Tolerance for singular value estimation. | 1e-4 |
 | --eval_freq | int | Frequency of termination criteria evaluation (in iterations). | 200 |
@@ -117,6 +118,31 @@ Solver Parameters:
 | --inner_min_tol | double | Minimum tolerance for the inner solver. | 1e-9 |
 | --no_diag_precond | flag | Disable the Jacobi diagonal preconditioner used in the inner subproblem (enabled by default). | false |
 | --soc_form | string | Cone formulation for QCQP transformations: rotated or standard. | rotated |
+
+#### Cone scaling aggregation
+
+With the default cone-preserving scaling,
+PDHCG first computes a positive candidate scale `d_j` for every coordinate,
+then broadcasts one scale over each cone block `B`. Define
+
+\[
+d_{\max}=\max_{j\in B}d_j,\qquad
+d_{\mathrm{rms}}=\sqrt{\frac{1}{|B|}\sum_{j\in B}d_j^2}.
+\]
+
+The block scale is
+
+| Scaling phase | Block size <= 8 | Block size > 8 |
+| :--- | :--- | :--- |
+| Ruiz | `d_max` | `d_rms` |
+| Pock-Chambolle | `d_rms` | `sqrt(d_max * d_rms)` |
+
+This preserves cone geometry while avoiding max-dominated scaling on large
+blocks. The aggregation follows the
+[`:phase_taper` strategy in HPR-SOCP](https://github.com/PolyU-IOR/HPR-SOCP/blob/0cccff309957e41225646a5e5d0bf811fe899daa/src/utils/scaling.jl#L462-L469),
+with its GPU implementation in `src/kernels.jl` at the same commit. PDHCG
+applies the rule to both variable and affine cone blocks. Setting
+`--no_cone_preserving_scaling` bypasses block aggregation.
 
 **Distributed Options** (only available when built with `-DPDHCG_COMPILE_DISTRIBUTED=ON`):
 | Option | Type | Description | Default |
@@ -145,7 +171,7 @@ mpirun -n 4 ./build/bin/pdhcg problem.mps ./output --grid_size 2,2
 
 > PDHCG is now officially supported as a backend in the popular [`qpsolvers`](https://github.com/qpsolvers/qpsolvers) ecosystem (v4.11.0+).
 
-PDHCG provides a user-friendly Python interface that allows you to define, solve, and analyze QP problems using familiar libraries like NumPy and SciPy.
+PDHCG provides a user-friendly Python interface for quadratic and quadratic conic problems using NumPy and SciPy.
 
 For detailed instructions on how to use the Python interface, including installation, modeling, and examples, please see the [Python Interface README](./python/README.md).
 
@@ -209,7 +235,7 @@ if m.X is not None:
 If you use this software or method in your research, please cite our paper:
 ```
 @misc{li2026pdhcgiienhancedversionpdhcg,
-      title={PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP},
+      title={PDHCG: An Enhanced First-Order Solver for Large-Scale Convex QP},
       author={Hongpei Li and Yicheng Huang and Huikang Liu and Dongdong Ge and Yinyu Ye},
       year={2026},
       eprint={2602.23967},

@@ -23,7 +23,6 @@ limitations under the License.
 typedef struct distributed_cone_partition_s
 {
     int num_cones;
-    int *global_start;
     int *v_dim;
     cone_type_t *type;
     unsigned char *fixed_mask;
@@ -52,15 +51,11 @@ struct grid_context_s
     int dims[2];
     int global_num_variables;
     int global_num_cones;
+    int global_num_affine_cones;
     int n_start;
     int n_end;
     int *variable_cuts;
     int *constraint_cuts;
     distributed_cone_partition_t split_cones;
+    distributed_cone_partition_t split_affine_cones;
 };
-
-typedef struct
-{
-    MPI_Request *reqs;
-    int num_reqs;
-} big_request_t;

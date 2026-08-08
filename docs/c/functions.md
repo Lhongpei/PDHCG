@@ -12,13 +12,16 @@ qp_problem_t *create_qp_problem(
     const double *con_lb, const double *con_ub,
     const double *var_lb, const double *var_ub,
     const double *objective_constant,
-    int num_cones,
-    const cone_spec_t *cones
+    int num_var_cones,
+    const cone_spec_t *var_cones,
+    int num_affine_cones,
+    const cone_spec_t *affine_cones,
+    const double *affine_cone_offset
 );
 ```
 
 Creates a QP problem of the form
-`min 0.5 * x^T (Q + R^T D R) x + c^T x` subject to `con_lb <= A x <= con_ub`, `var_lb <= x <= var_ub`, and optional conic blocks listed in `cones`. Pass `num_cones=0` and `cones=NULL` for a plain QP.
+`min 0.5 * x^T (Q + R^T D R) x + c^T x` subject to `con_lb <= A x <= con_ub`, `var_lb <= x <= var_ub`, optional variable cone blocks, and optional native affine cone blocks `(A x + affine_cone_offset)[block] in K`. Affine cone rows must not also have finite scalar bounds.
 
 **Parameters:**
 
@@ -34,8 +37,11 @@ Creates a QP problem of the form
 | `var_lb` | Variable lower bounds (size n) |
 | `var_ub` | Variable upper bounds (size n) |
 | `objective_constant` | Constant term in objective (can be NULL) |
-| `num_cones` | Number of cone blocks (0 for a plain QP) |
-| `cones` | Array of `cone_spec_t` (length `num_cones`, NULL if `num_cones=0`) |
+| `num_var_cones` | Number of variable cone blocks |
+| `var_cones` | Array of variable `cone_spec_t` descriptors, or NULL when the count is zero |
+| `num_affine_cones` | Number of affine cone blocks over rows of `A` |
+| `affine_cones` | Array of affine `cone_spec_t` descriptors, or NULL when the count is zero |
+| `affine_cone_offset` | Offset vector aligned with rows of `A`; NULL means zero |
 
 **Returns:** Pointer to allocated `qp_problem_t`, or NULL on error.
 
@@ -127,7 +133,9 @@ pdhcg_result_t *solve_qp_problem_distributed(
 Solves the QP problem using the distributed multi-GPU PDHCG algorithm.
 
 !!! note "Availability"
-    This function is only available when PDHCG is compiled with `-DPDHCG_COMPILE_DISTRIBUTED=ON`.
+    Distributed execution requires `-DPDHCG_COMPILE_DISTRIBUTED=ON`. In a
+    non-distributed build the API remains available but returns `NULL` with an
+    explanatory error.
 
 **Parameters:**
 

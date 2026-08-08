@@ -62,12 +62,6 @@ extern "C"
 
     typedef enum
     {
-        VAR_SET_BOX_ONLY = 0,
-        VAR_SET_CONTAIN_CONIC = 1,
-    } variable_set_type_t;
-
-    typedef enum
-    {
         CONE_ROTATED_SOC = 0,
         CONE_STANDARD_SOC = 1,
         CONE_EXPONENTIAL = 2,
@@ -82,16 +76,17 @@ extern "C"
         int *v_dim;          /* [num_cones] */
         cone_type_t *type;   /* [num_cones] */
         double *power_alpha; /* [num_cones]; alpha in (0,1) for CONE_POWER, else unused */
+        int fixed_mask_size; /* number of entries in is_fixed; zero when no mask is stored */
         char *is_fixed;
     } cone_blocks_t;
 
     typedef struct
     {
         cone_type_t type;
-        int start_idx;
+        int start_idx; /* variable index, or global A row for affine cones */
         int v_dim;
-        double alpha; /* required for CONE_POWER (in (0,1)); ignored otherwise */
-        const char *is_fixed;
+        double power_alpha;   /* required for CONE_POWER (in (0,1)); ignored otherwise */
+        const char *is_fixed; /* variable cones only; must be NULL for affine cones */
     } cone_spec_t;
 
     typedef struct
@@ -118,6 +113,11 @@ extern "C"
 
         double *constraint_lower_bound;
         double *constraint_upper_bound;
+
+        /* Affine cone rows model A x + affine_cone_offset in K.
+           The offset is zero outside affine cones. */
+        double *affine_cone_offset;
+        cone_blocks_t affine_cones;
 
         int num_quadratic_constraints;
         int *quadratic_constraint_row_indices;
@@ -186,7 +186,7 @@ extern "C"
         bool has_pock_chambolle_alpha;
         double pock_chambolle_alpha;
         bool bound_objective_rescaling;
-        bool heterogeneous_cone_scaling;
+        bool use_cone_preserving_scaling;
         int verbose;
         int termination_evaluation_frequency;
         int sv_max_iter;

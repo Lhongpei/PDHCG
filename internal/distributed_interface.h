@@ -1,6 +1,7 @@
 #ifndef PDHCG_DISTRIBUTED_INTERFACE_H
 #define PDHCG_DISTRIBUTED_INTERFACE_H
 
+#include "pdhcg_types.h"
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -33,6 +34,16 @@ extern "C"
     int pdhcg_get_grid_p_col(struct grid_context_s *ctx);
 
     int pdhcg_get_grid_row_coord(struct grid_context_s *ctx);
+
+    int pdhcg_get_global_num_variables(grid_context_t *ctx);
+
+    int pdhcg_get_variable_start(grid_context_t *ctx);
+
+    int pdhcg_get_global_num_cones(grid_context_t *ctx);
+
+    int pdhcg_get_global_num_affine_cones(grid_context_t *ctx);
+
+    pdhcg_result_t *pdhcg_distributed_optimize(const pdhg_parameters_t *params, const qp_problem_t *original_problem);
 
 #ifdef __cplusplus
 }

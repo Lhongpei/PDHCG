@@ -32,6 +32,7 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 | `PockChambolleAlpha` | float | 1.0 | Pock-Chambolle step size parameter |
 | `UsePockChambolle` | bool | True | Enable Pock-Chambolle rescaling |
 | `UseBoundObjectiveRescaling` | bool | True | Enable bound objective rescaling |
+| `UseConePreservingScaling` | bool | True | Broadcast one scaling value over every cone block |
 | `EvalFrequency` | int | 200 | Frequency of termination criteria evaluation |
 
 ### Inner Solver Parameters
@@ -64,4 +65,5 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 
 !!! note "Cone constraints"
     Cone specs are not solver parameters; they are part of the problem and are
-    passed via the `cones=` kwarg of `solve_once`. See [model.md](model.md#cone-constraints).
+    passed as a columnar `ConeSpec` to `Model(variable_cones=...)` or the
+    `cones=` kwarg of `solve_once`. See [model.md](model.md#cone-constraints).

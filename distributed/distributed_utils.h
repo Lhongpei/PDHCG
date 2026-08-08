@@ -57,22 +57,12 @@ extern "C"
     void serialize_qp_problem_to_ptr(const qp_problem_t *qp, char **ptr_ref);
     size_t get_qp_problem_size(const qp_problem_t *qp);
     void big_bcast_bytes(void **buffer_ptr, size_t *size_ptr, int root, MPI_Comm comm);
-    void big_send_bytes(const void *buffer, size_t size, int dest, MPI_Comm comm);
-    void big_recv_bytes(void **buffer_ptr, size_t *size_ptr, int source, MPI_Comm comm);
-    big_request_t big_isend_bytes(const void *buffer, size_t size, int dest, MPI_Comm comm);
-    void big_wait_bytes(big_request_t *breq, unsigned long long *p_len);
     void distribute_data_bcast_then_partition(const qp_problem_t *working_problem,
                                               rescale_info_t *rescale_info,
                                               grid_context_t *grid_context,
                                               const pdhg_parameters_t *params,
                                               qp_problem_t **out_local_qp,
                                               rescale_info_t **out_local_resc);
-    void distribute_data_partition_then_send(const qp_problem_t *working_problem,
-                                             rescale_info_t *rescale_info,
-                                             grid_context_t *grid_context,
-                                             const pdhg_parameters_t *params,
-                                             qp_problem_t **out_local_qp,
-                                             rescale_info_t **out_local_resc);
     void gather_distributed_vector(
         double *d_local_vec, int local_len, MPI_Comm comm_check, MPI_Comm comm_gather, double **result_ptr);
     void print_distributed_params(const pdhg_parameters_t *params);

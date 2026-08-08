@@ -25,7 +25,8 @@ extern "C"
 #endif
 
     /* Pass NULL for any optional matrix descriptor (defaults: Q=0, R=0, D=I).
-       Pass num_cones=0 and cones=NULL for a plain QP without cone constraints. */
+       Variable cone indices refer to variables; affine cone indices refer to
+       rows of A. affine_cone_offset is aligned with the rows of A. */
     qp_problem_t *create_qp_problem(const double *objective_c,
                                     const matrix_desc_t *Q_desc,
                                     const matrix_desc_t *R_desc,
@@ -36,8 +37,11 @@ extern "C"
                                     const double *var_lb,
                                     const double *var_ub,
                                     const double *objective_constant,
-                                    int num_cones,
-                                    const cone_spec_t *cones);
+                                    int num_var_cones,
+                                    const cone_spec_t *var_cones,
+                                    int num_affine_cones,
+                                    const cone_spec_t *affine_cones,
+                                    const double *affine_cone_offset);
 
     void set_start_values(qp_problem_t *prob, const double *primal, const double *dual);
 
@@ -48,10 +52,8 @@ extern "C"
     // solve the LP problem using PDHG
     pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters_t *params);
 
-#ifdef PDHCG_COMPILE_DISTRIBUTED
     // solve the QP problem using distributed multi-GPU PDHG
     pdhcg_result_t *solve_qp_problem_distributed(const pdhg_parameters_t *params, const qp_problem_t *original_problem);
-#endif
 
     // parameter
     void set_default_parameters(pdhg_parameters_t *params);

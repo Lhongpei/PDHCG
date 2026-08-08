@@ -23,6 +23,7 @@ import scipy.sparse as sp
 
 from . import PDHCG
 from ._core import get_default_params, read_problem_file, solve_once
+from .cones import ConeSpec
 
 # array-like type
 ArrayLike = Union[np.ndarray, list, tuple]
@@ -89,6 +90,7 @@ class Model:
     ```
     minimize      1/2 x^T (Q + R^T D R) x + c^T x
     subject to    l_c <= A x <= u_c
+                  F x + g in K
                   l_v <= x <= u_v
     ```
 
@@ -122,6 +124,10 @@ class Model:
         variable_lower_bound: Optional[ArrayLike] = None,
         variable_upper_bound: Optional[ArrayLike] = None,
         objective_constant: float = 0.0,
+        affine_cone_matrix: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+        affine_cone_offset: Optional[ArrayLike] = None,
+        affine_cones: Optional[ConeSpec] = None,
+        variable_cones: Optional[ConeSpec] = None,
     ):
         """
         Initialize the Model with the given parameters.
@@ -139,6 +145,11 @@ class Model:
             variable_lower_bound: Lower bounds for the decision variables.
             variable_upper_bound: Upper bounds for the decision variables.
             objective_constant: Constant term in the objective function.
+            affine_cone_matrix: Matrix F in the native constraint F x + g in K.
+            affine_cone_offset: Offset g, with one entry per row of F. Defaults to zero.
+            affine_cones: Compact cone metadata covering all rows of F.
+            variable_cones: Compact metadata for cone blocks in the variable vector.
+                Must be a :class:`pdhcg.ConeSpec`.
 
         Note:
             If variable bounds are not provided, they default to -inf and +inf respectively.
@@ -146,6 +157,7 @@ class Model:
         # problem dimensions
         self.num_vars = 0
         self.num_constrs = 0
+        self.num_affine_constrs = 0
 
         # Check A
         if constraint_matrix is not None:
@@ -186,11 +198,31 @@ class Model:
                     f"objective_matrix_low_rank dimensions mismatch variables ({self.num_vars})"
                 )
 
+        # Check F (if A, Q, and R were None, infer n from the affine cone map).
+        if affine_cone_matrix is not None:
+            if not hasattr(affine_cone_matrix, "shape") or len(affine_cone_matrix.shape) != 2:
+                raise ValueError(
+                    "affine_cone_matrix must be a 2D numpy.ndarray or scipy.sparse matrix."
+                )
+            if self.num_vars == 0:
+                self.num_vars = int(affine_cone_matrix.shape[1])
+            elif affine_cone_matrix.shape[1] != self.num_vars:
+                raise ValueError(
+                    f"affine_cone_matrix dimensions mismatch variables ({self.num_vars})"
+                )
+
+        if self.num_vars == 0 and objective_vector is not None:
+            objective_shape = np.asarray(objective_vector).shape
+            if len(objective_shape) != 1:
+                raise ValueError(f"objective_vector must be 1D, got shape {objective_shape}")
+            self.num_vars = int(objective_shape[0])
+
         if (
             self.num_vars == 0
             and constraint_matrix is None
             and objective_matrix is None
             and objective_matrix_low_rank is None
+            and affine_cone_matrix is None
         ):
             return None
 
@@ -210,8 +242,12 @@ class Model:
         self.setConstraintUpperBound(constraint_upper_bound)
         self.setVariableLowerBound(variable_lower_bound)
         self.setVariableUpperBound(variable_upper_bound)
-        # cones: list of dicts (see solve_once binding), populated by from_file for conic files
-        self._cones: Optional[list[dict]] = None
+        self._variable_cones: Optional[ConeSpec] = None
+        self.affine_F = None
+        self.affine_g = None
+        self._affine_cones: Optional[ConeSpec] = None
+        self.setVariableCones(variable_cones)
+        self.setAffineConeConstraints(affine_cone_matrix, affine_cone_offset, affine_cones)
         # initialize warm start values
         self._primal_start: Optional[np.ndarray] = None  # warm start primal solution
         self._dual_start: Optional[np.ndarray] = None  # warm start dual solution
@@ -253,6 +289,7 @@ class Model:
 
         Q = _to_csr(raw.get("Q"))
         A = _to_csr(raw.get("A"))
+        affine_F = _to_csr(raw.get("affine_F"))
         m = cls(
             objective_vector=raw["c"],
             constraint_matrix=A,
@@ -262,10 +299,17 @@ class Model:
             variable_lower_bound=raw["var_lb"],
             variable_upper_bound=raw["var_ub"],
             objective_constant=raw.get("obj_const", 0.0),
+            affine_cone_matrix=affine_F,
+            affine_cone_offset=raw.get("affine_g"),
+            affine_cones=(
+                ConeSpec.from_columnar(raw["affine_cones"])
+                if raw.get("affine_cones") is not None
+                else None
+            ),
+            variable_cones=(
+                ConeSpec.from_columnar(raw["cones"]) if raw.get("cones") is not None else None
+            ),
         )
-        cones = raw.get("cones")
-        if cones:
-            m._cones = list(cones)
         ps = raw.get("primal_start")
         if ps is not None:
             m._primal_start = np.asarray(ps, dtype=np.float64)
@@ -486,6 +530,74 @@ class Model:
         # clear cached solution
         self._clear_solution_cache()
 
+    def setAffineConeConstraints(
+        self,
+        F_like: Optional[Union[np.ndarray, sp.spmatrix]],
+        g: Optional[ArrayLike],
+        cones: Optional[ConeSpec],
+    ) -> None:
+        """Set the native affine cone constraint ``F x + g in K``."""
+        if F_like is None:
+            if g is not None or cones is not None:
+                raise ValueError(
+                    "affine_cone_matrix is required when affine offset or cones are provided"
+                )
+            self.affine_F = None
+            self.affine_g = None
+            self._affine_cones = None
+            self.num_affine_constrs = 0
+            self._clear_solution_cache()
+            return
+        if not isinstance(F_like, (np.ndarray, sp.spmatrix)):
+            raise TypeError(
+                "setAffineConeConstraints: F must be a numpy.ndarray or scipy.sparse matrix"
+            )
+        if len(F_like.shape) != 2 or F_like.shape[1] != self.num_vars:
+            raise ValueError(
+                f"setAffineConeConstraints: F shape {F_like.shape} must have {self.num_vars} columns"
+            )
+        if not isinstance(cones, ConeSpec):
+            raise TypeError("setAffineConeConstraints: cones must be a ConeSpec")
+        if len(cones) == 0:
+            raise ValueError("setAffineConeConstraints: cones must cover every row of F")
+        affine_F = _as_csr_f64_i32(F_like) if sp.issparse(F_like) else _as_dense_f64_c(F_like)
+        num_affine_constrs = int(F_like.shape[0])
+        if g is None:
+            affine_g = None
+        else:
+            affine_g = _as_dense_f64_c(g).ravel()
+            if affine_g.size != num_affine_constrs:
+                raise ValueError(
+                    "setAffineConeConstraints: affine offset length "
+                    f"{affine_g.size} != rows {num_affine_constrs}"
+                )
+        cones.validate_ambient(
+            num_affine_constrs,
+            allow_fixed=False,
+            require_cover=True,
+        )
+        self.affine_F = affine_F
+        self.affine_g = affine_g
+        self.num_affine_constrs = num_affine_constrs
+        self._affine_cones = cones
+        self._clear_solution_cache()
+
+    def setVariableCones(self, cones: Optional[ConeSpec]) -> None:
+        """Set cone blocks embedded directly in the variable vector."""
+        if cones is None:
+            self._variable_cones = None
+            self._clear_solution_cache()
+            return
+        if not isinstance(cones, ConeSpec):
+            raise TypeError("setVariableCones: cones must be a ConeSpec")
+        if len(cones) == 0:
+            self._variable_cones = None
+            self._clear_solution_cache()
+            return
+        cones.validate_ambient(self.num_vars, allow_fixed=True)
+        self._variable_cones = cones
+        self._clear_solution_cache()
+
     def setVariableLowerBound(self, lb: Optional[ArrayLike]) -> None:
         """
         Overwrite the decision variable lower bounds.
@@ -548,11 +660,12 @@ class Model:
         # set dual warm start
         if dual is not None:
             dual_arr = _as_dense_f64_c(dual).ravel()
-            if dual_arr.size == self.num_constrs:  # otherwise default to None
+            expected_dual_size = self.num_constrs + self.num_affine_constrs
+            if dual_arr.size == expected_dual_size:  # otherwise default to None
                 self._dual_start = dual_arr
             else:
                 warnings.warn(
-                    f"Warm start dual size mismatch (expected {self.num_constrs}, got {dual_arr.size}).",
+                    f"Warm start dual size mismatch (expected {expected_dual_size}, got {dual_arr.size}).",
                     RuntimeWarning,
                 )
         # clear dual warm start
@@ -616,7 +729,10 @@ class Model:
             primal_start=self._primal_start,
             dual_start=self._dual_start,
             D=getattr(self, "D", None),
-            cones=self._cones,
+            cones=self._variable_cones,
+            affine_F=self.affine_F,
+            affine_g=self.affine_g,
+            affine_cones=self._affine_cones,
         )
         # solutions
         self._x = np.asarray(info.get("X")) if info.get("X") is not None else None

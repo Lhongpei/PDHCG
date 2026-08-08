@@ -93,6 +93,12 @@ qp_problem_t *create_problem_with_dummy_constraint(const qp_problem_t *prob)
     {
         new_prob->constraint_matrix = (CsrComponent *)malloc(sizeof(CsrComponent));
     }
+    else
+    {
+        free(new_prob->constraint_matrix->row_ptr);
+        free(new_prob->constraint_matrix->col_ind);
+        free(new_prob->constraint_matrix->val);
+    }
 
     new_prob->constraint_matrix->row_ptr = (int *)malloc(2 * sizeof(int));
     new_prob->constraint_matrix->row_ptr[0] = 0;
@@ -114,6 +120,9 @@ qp_problem_t *create_problem_with_dummy_constraint(const qp_problem_t *prob)
 
     new_prob->constraint_upper_bound = (double *)malloc(1 * sizeof(double));
     new_prob->constraint_upper_bound[0] = INFINITY;
+
+    free(new_prob->affine_cone_offset);
+    new_prob->affine_cone_offset = (double *)calloc(1, sizeof(double));
 
     if (new_prob->dual_start != NULL)
     {
@@ -254,7 +263,7 @@ void check_termination_criteria(pdhg_solver_state_t *solver_state, const termina
     /* The current ray projection handles box recession directions only. Direct
        cones require cone/dual-cone membership checks before either certificate
        is valid. */
-    if (solver_state->var_set_type == VAR_SET_BOX_ONLY)
+    if (!solver_state->has_variable_cones)
     {
         if (primal_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
         {
@@ -319,7 +328,7 @@ void set_default_parameters(pdhg_parameters_t *params)
     params->has_pock_chambolle_alpha = true;
     params->pock_chambolle_alpha = 1.0;
     params->bound_objective_rescaling = true;
-    params->heterogeneous_cone_scaling = false;
+    params->use_cone_preserving_scaling = true;
     params->verbose = 1;
     params->termination_evaluation_frequency = 200;
     params->feasibility_polishing = false;
@@ -407,7 +416,7 @@ void print_initial_info(const pdhg_parameters_t *params, const qp_problem_t *pro
         printf("%*s\n", padding, text);
     };
 
-    print_centered("PDHCG-II");
+    print_centered("PDHCG");
     print_centered("A GPU-Accelerated First-Order Solver for Convex QPs");
     print_centered("(c) Hongpei Li, 2026");
     print_centered("Contact: ishongpeili@gmail.com");
@@ -459,6 +468,8 @@ void print_initial_info(const pdhg_parameters_t *params, const qp_problem_t *pro
     PRINT_DIFF_BOOL(
         "has_pock_chambolle_alpha", params->has_pock_chambolle_alpha, default_params.has_pock_chambolle_alpha);
     PRINT_DIFF_BOOL("bound_obj_rescaling", params->bound_objective_rescaling, default_params.bound_objective_rescaling);
+    PRINT_DIFF_BOOL(
+        "use_cone_preserving_scaling", params->use_cone_preserving_scaling, default_params.use_cone_preserving_scaling);
     PRINT_DIFF_INT("sv_max_iter", params->sv_max_iter, default_params.sv_max_iter);
     PRINT_DIFF_DBL("sv_tol", params->sv_tol, default_params.sv_tol);
     PRINT_DIFF_INT(

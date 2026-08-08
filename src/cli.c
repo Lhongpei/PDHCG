@@ -177,7 +177,7 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --no_pock_chambolle  Disable Pock-Chambolle rescaling (default: enabled).\n");
     fprintf(stderr, "      --pock_chambolle_alpha Value for Pock-Chambolle alpha (default: 1.0).\n");
     fprintf(stderr, "      --no_bound_obj_rescaling Disable bound objective rescaling.\n");
-    fprintf(stderr, "      --heterogeneous_cone_scaling Keep per-element cone scales (default: uniform per cone).\n");
+    fprintf(stderr, "      --no_cone_preserving_scaling Keep coordinate-wise cone scaling.\n");
     fprintf(stderr, "      --eval_freq <int>    Termination evaluation frequency (default: 200).\n");
     fprintf(stderr, "      --artificial_restart_threshold Artificial restart threshold (default: 0.36).\n");
     fprintf(stderr,
@@ -232,7 +232,7 @@ int run_pdhcg(int argc, char *argv[])
                                            {"presolve", required_argument, 0, 1018},
                                            {"no_diag_precond", no_argument, 0, 1019},
                                            {"soc_form", required_argument, 0, 1020},
-                                           {"heterogeneous_cone_scaling", no_argument, 0, 1021},
+                                           {"no_cone_preserving_scaling", no_argument, 0, 1021},
                                            {"artificial_restart_threshold", required_argument, 0, 1022},
                                            {"sufficient_reduction_for_restart", required_argument, 0, 1023},
                                            {"necessary_reduction_for_restart", required_argument, 0, 1024},
@@ -331,7 +331,7 @@ int run_pdhcg(int argc, char *argv[])
                 }
                 break;
             case 1021:
-                params.heterogeneous_cone_scaling = true;
+                params.use_cone_preserving_scaling = false;
                 break;
             case 1022:
                 params.restart_params.artificial_restart_threshold = atof(optarg);
@@ -437,7 +437,7 @@ int run_d_pdhcg(int argc, char *argv[])
                                            {"inner_min_tol", required_argument, 0, 1017},
                                            {"presolve", required_argument, 0, 1018},
                                            {"no_diag_precond", no_argument, 0, 1019},
-                                           {"heterogeneous_cone_scaling", no_argument, 0, 1021},
+                                           {"no_cone_preserving_scaling", no_argument, 0, 1021},
                                            {"artificial_restart_threshold", required_argument, 0, 1022},
                                            {"sufficient_reduction_for_restart", required_argument, 0, 1023},
                                            {"necessary_reduction_for_restart", required_argument, 0, 1024},
@@ -532,7 +532,7 @@ int run_d_pdhcg(int argc, char *argv[])
                 params.diag_jacobi_precond = false;
                 break;
             case 1021:
-                params.heterogeneous_cone_scaling = true;
+                params.use_cone_preserving_scaling = false;
                 break;
             case 1022:
                 params.restart_params.artificial_restart_threshold = atof(optarg);

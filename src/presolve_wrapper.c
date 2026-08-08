@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "presolve_wrapper.h"
+#include "cone_utils.h"
 
 #ifdef PREFOS_AVAILABLE
 
@@ -52,6 +53,13 @@ static double normalize_lower_bound(double value)
 static double normalize_upper_bound(double value)
 {
     return value >= PDHCG_INFINITY_SENTINEL ? INFINITY : value;
+}
+
+static double shifted_constraint_bound(double bound, double constant, int is_lower)
+{
+    if (isfinite(bound))
+        bound -= constant;
+    return is_lower ? normalize_lower_bound(bound) : normalize_upper_bound(bound);
 }
 
 static void *allocate_array(size_t count, size_t element_size)
@@ -250,7 +258,8 @@ static int append_fixed_cone_rows(const qp_problem_t *source, PreFOSInputAdapter
                 ++fixed_count;
 
     for (row = 0; row < original_rows; ++row)
-        if (normalize_lower_bound(source->constraint_lower_bound[row]) != source->constraint_lower_bound[row] ||
+        if (source->affine_cone_offset[row] != 0.0 ||
+            normalize_lower_bound(source->constraint_lower_bound[row]) != source->constraint_lower_bound[row] ||
             normalize_upper_bound(source->constraint_upper_bound[row]) != source->constraint_upper_bound[row])
             normalize_original_bounds = 1;
 
@@ -282,8 +291,10 @@ static int append_fixed_cone_rows(const qp_problem_t *source, PreFOSInputAdapter
         memcpy(adapter->owned_A_row_pointers, A->row_ptr, (original_rows + 1) * sizeof(int));
         for (row = 0; row < original_rows; ++row)
         {
-            adapter->owned_constraint_lower[row] = normalize_lower_bound(source->constraint_lower_bound[row]);
-            adapter->owned_constraint_upper[row] = normalize_upper_bound(source->constraint_upper_bound[row]);
+            adapter->owned_constraint_lower[row] =
+                shifted_constraint_bound(source->constraint_lower_bound[row], source->affine_cone_offset[row], 1);
+            adapter->owned_constraint_upper[row] =
+                shifted_constraint_bound(source->constraint_upper_bound[row], source->affine_cone_offset[row], 0);
         }
     }
     if (original_nnz > 0)
@@ -351,20 +362,16 @@ static int initialize_domains(const qp_problem_t *source, PreFOSInputAdapter *ad
         PreFOSConeBlock *target = &adapter->problem.cones[cone];
         int start = source->cones.start_idx[cone];
         int vector_dimension = source->cones.v_dim[cone];
+        int block_length = cone_block_length(&source->cones, (int)cone);
         size_t dimension;
         size_t index;
 
-        if (source->cones.type[cone] == CONE_EXPONENTIAL || source->cones.type[cone] == CONE_POWER)
-            dimension = 3;
-        else
+        if (block_length <= 0)
         {
-            if (vector_dimension < 0)
-            {
-                free(owner);
-                return 0;
-            }
-            dimension = (size_t)vector_dimension + 2;
+            free(owner);
+            return 0;
         }
+        dimension = (size_t)block_length;
         if (start < 0 || (size_t)start > n || dimension > n - (size_t)start)
         {
             free(owner);
@@ -460,7 +467,8 @@ static int initialize_prefos_input(const qp_problem_t *source, PreFOSInputAdapte
         (source->num_variables > 0 &&
          (!source->objective_vector || !source->variable_lower_bound || !source->variable_upper_bound)) ||
         (source->num_constraints > 0 &&
-         (!source->constraint_matrix || !source->constraint_lower_bound || !source->constraint_upper_bound)))
+         (!source->constraint_matrix || !source->constraint_lower_bound || !source->constraint_upper_bound ||
+          !source->affine_cone_offset)))
         return 0;
 
     adapter->problem.n = (size_t)source->num_variables;
@@ -561,6 +569,13 @@ static qp_problem_t *convert_prefos_to_pdhcg(const PreFOSPresolvedProblem *sourc
         return NULL;
     target->num_variables = (int)source->n;
     target->num_constraints = (int)source->A.rows;
+    target->affine_cone_offset =
+        target->num_constraints > 0 ? (double *)calloc((size_t)target->num_constraints, sizeof(double)) : NULL;
+    if (target->num_constraints > 0 && !target->affine_cone_offset)
+    {
+        free(target);
+        return NULL;
+    }
     target->constraint_matrix_num_nonzeros = (int)source->A.nnz;
     target->objective_sparse_matrix_num_nonzeros = (int)source->Q.nnz;
     target->objective_lowrank_matrix_num_nonzeros = (int)source->R.nnz;
@@ -645,10 +660,8 @@ failure:
         }
         free(target->variable_lower_bound);
         free(target->variable_upper_bound);
-        free(target->cones.start_idx);
-        free(target->cones.v_dim);
-        free(target->cones.type);
-        free(target->cones.power_alpha);
+        free(target->affine_cone_offset);
+        cone_blocks_free(&target->cones);
         free(target);
     }
     return NULL;
@@ -670,10 +683,8 @@ static void free_converted_problem(qp_problem_t *problem)
     }
     free(problem->variable_lower_bound);
     free(problem->variable_upper_bound);
-    free(problem->cones.start_idx);
-    free(problem->cones.v_dim);
-    free(problem->cones.type);
-    free(problem->cones.power_alpha);
+    free(problem->affine_cone_offset);
+    cone_blocks_free(&problem->cones);
     free(problem);
 }
 

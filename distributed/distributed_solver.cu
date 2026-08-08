@@ -317,8 +317,8 @@ static pdhcg_result_t *distributed_optimize_core(const pdhg_parameters_t *params
         {
             compute_residual(state, params->optimality_norm);
 
-            if (state->var_set_type == VAR_SET_BOX_ONLY && state->is_this_major_iteration &&
-                state->total_count < 3 * params->termination_evaluation_frequency)
+            if (!state->has_variable_cones && state->grid_context->global_num_affine_cones == 0 &&
+                state->is_this_major_iteration && state->total_count < 3 * params->termination_evaluation_frequency)
             {
                 compute_infeasibility_information(state);
             }
@@ -385,6 +385,12 @@ static pdhcg_result_t *distributed_optimize_core(const pdhg_parameters_t *params
 
 pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_problem_t *original_problem)
 {
+    pdhg_parameters_t default_params;
+    if (!params)
+    {
+        set_default_parameters(&default_params);
+        params = &default_params;
+    }
     pdhg_parameters_t sub_params = *params;
     int rank_global = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank_global);
@@ -457,7 +463,7 @@ pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_p
 
     if (grid_context.rank_global == 0)
     {
-        if (params->presolve && pdhcg_presolve_available())
+        if (params->presolve && original_problem->affine_cones.num_cones == 0 && pdhcg_presolve_available())
         {
             presolve_info = pdhcg_presolve(original_problem, params);
             if (presolve_info)
@@ -489,10 +495,8 @@ pdhcg_result_t *distributed_optimize(const pdhg_parameters_t *params, const qp_p
 
             generate_cone_aware_permutation(
                 working_problem, params->permute_method, params->permute_block_size, col_perm);
-            if (params->permute_method == FULL_RANDOM_PERMUTATION)
-                generate_random_permutation(working_problem->num_constraints, row_perm);
-            else
-                generate_block_permutation(working_problem->num_constraints, params->permute_block_size, row_perm);
+            generate_affine_cone_aware_row_permutation(
+                working_problem, params->permute_method, params->permute_block_size, row_perm);
 
             permuted_problem = permute_problem_return_new(working_problem, row_perm, col_perm);
             working_problem = permuted_problem;
