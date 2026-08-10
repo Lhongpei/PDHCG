@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static qp_problem_t *make_empty_cone_problem(cone_type_t type)
 {
@@ -23,35 +24,84 @@ static qp_problem_t *make_empty_cone_problem(cone_type_t type)
     return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
 }
 
-static int rejects_unsupported_fixed_sections(void)
+static int preserves_fixed_values_when_clearing_warm_start(void)
+{
+    static const double primal_start[] = {2.0, 1.25, 3.0};
+    qp_problem_t *problem = make_empty_cone_problem(CONE_STANDARD_SOC);
+    if (!problem || set_cone_fixed(problem, 0, 1, primal_start[1]) != 0)
+    {
+        qp_problem_free(problem);
+        return 0;
+    }
+
+    set_start_values(problem, primal_start, NULL);
+    set_start_values(problem, NULL, NULL);
+    int passed = problem->primal_start && problem->primal_start[0] == 0.0 &&
+        problem->primal_start[1] == primal_start[1] && problem->primal_start[2] == 0.0;
+    if (!passed)
+        fprintf(stderr, "clearing warm starts changed a fixed cone value\n");
+    qp_problem_free(problem);
+    return passed;
+}
+
+static int accepts_supported_and_rejects_empty_fixed_sections(void)
 {
     int passed = 1;
+    pdhg_parameters_t parameters;
+    set_default_parameters(&parameters);
+    parameters.verbose = 0;
+    parameters.termination_criteria.iteration_limit = 1;
+
     qp_problem_t *problem = make_empty_cone_problem(CONE_STANDARD_SOC);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0)
         passed = 0;
-    pdhcg_result_t *result = problem ? solve_qp_problem(problem, NULL) : NULL;
-    passed &= result == NULL;
+    pdhcg_result_t *result = problem ? solve_qp_problem(problem, &parameters) : NULL;
+    passed &= result != NULL;
     pdhcg_result_free(result);
     qp_problem_free(problem);
 
     problem = make_empty_cone_problem(CONE_EXPONENTIAL);
     if (!problem || set_cone_fixed(problem, 0, 0, 0.0) != 0)
         passed = 0;
-    result = problem ? solve_qp_problem(problem, NULL) : NULL;
-    passed &= result == NULL;
+    result = problem ? solve_qp_problem(problem, &parameters) : NULL;
+    passed &= result != NULL;
     pdhcg_result_free(result);
     qp_problem_free(problem);
 
     problem = make_empty_cone_problem(CONE_ROTATED_SOC);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0)
         passed = 0;
-    result = problem ? solve_qp_problem(problem, NULL) : NULL;
+    result = problem ? solve_qp_problem(problem, &parameters) : NULL;
+    passed &= result != NULL;
+    pdhcg_result_free(result);
+    qp_problem_free(problem);
+
+    problem = make_empty_cone_problem(CONE_STANDARD_SOC);
+    if (!problem || set_cone_fixed(problem, 0, 0, 2.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
+        passed = 0;
+    result = problem ? solve_qp_problem(problem, &parameters) : NULL;
+    passed &= result == NULL;
+    pdhcg_result_free(result);
+    qp_problem_free(problem);
+
+    problem = make_empty_cone_problem(CONE_EXPONENTIAL);
+    if (!problem || set_cone_fixed(problem, 0, 0, 1.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
+        passed = 0;
+    result = problem ? solve_qp_problem(problem, &parameters) : NULL;
+    passed &= result == NULL;
+    pdhcg_result_free(result);
+    qp_problem_free(problem);
+
+    problem = make_empty_cone_problem(CONE_ROTATED_SOC);
+    if (!problem || set_cone_fixed(problem, 0, 0, 1.0) != 0 || set_cone_fixed(problem, 0, 1, 0.0) != 0)
+        passed = 0;
+    result = problem ? solve_qp_problem(problem, &parameters) : NULL;
     passed &= result == NULL;
     pdhcg_result_free(result);
     qp_problem_free(problem);
 
     if (!passed)
-        fprintf(stderr, "unsupported fixed cone section was not rejected\n");
+        fprintf(stderr, "fixed cone section validation did not match nonempty-section semantics\n");
     return passed;
 }
 
@@ -120,8 +170,14 @@ static int projected_gradient_uses_adaptive_step(void)
 static int recognizes_soc_with_only_zero_w_fixed_as_optimal(norm_type_t optimality_norm, int v_dim)
 {
     static const int row_ptr[] = {0};
-    double objective[34] = {0.0};
-    double primal_start[34] = {0.0};
+    double *objective = (double *)calloc((size_t)v_dim + 2, sizeof(double));
+    double *primal_start = (double *)calloc((size_t)v_dim + 2, sizeof(double));
+    if (!objective || !primal_start)
+    {
+        free(objective);
+        free(primal_start);
+        return 0;
+    }
     objective[v_dim] = 1.0;
 
     matrix_desc_t A = {0};
@@ -141,6 +197,8 @@ static int recognizes_soc_with_only_zero_w_fixed_as_optimal(norm_type_t optimali
     if (!problem || set_cone_fixed(problem, 0, v_dim, 0.0) != 0)
     {
         qp_problem_free(problem);
+        free(objective);
+        free(primal_start);
         return 0;
     }
     set_start_values(problem, primal_start, NULL);
@@ -175,6 +233,8 @@ static int recognizes_soc_with_only_zero_w_fixed_as_optimal(norm_type_t optimali
 
     pdhcg_result_free(result);
     qp_problem_free(problem);
+    free(objective);
+    free(primal_start);
     return passed;
 }
 
@@ -527,12 +587,14 @@ int main(void)
     {
         passed &= recognizes_soc_with_only_zero_w_fixed_as_optimal(norms[norm], 1);
         passed &= recognizes_soc_with_only_zero_w_fixed_as_optimal(norms[norm], 32);
+        passed &= recognizes_soc_with_only_zero_w_fixed_as_optimal(norms[norm], 32768);
         passed &= solves_fixed_rsoc_with_large_initial_step(norms[norm]);
         passed &= solves_fixed_soc_with_large_initial_step(norms[norm]);
         passed &= solves_fixed_power_with_large_initial_step(norms[norm]);
         passed &= solves_fixed_exp_with_large_initial_step(norms[norm]);
     }
-    passed &= rejects_unsupported_fixed_sections();
+    passed &= accepts_supported_and_rejects_empty_fixed_sections();
+    passed &= preserves_fixed_values_when_clearing_warm_start();
 
     pdhcg_result_free(result);
     qp_problem_free(problem);

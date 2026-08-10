@@ -65,6 +65,77 @@ struct distributed_cone_split_s
     double *complementarity_residual;
 };
 
+static __device__ inline void project_standard_soc_with_fixed_w(
+    double vector_norm2, double fixed_w, double input_z, double *vector_factor, double *projected_z)
+{
+    double fixed_norm2 = fixed_w * fixed_w;
+    if (input_z >= 0.0 && fixed_norm2 + vector_norm2 <= input_z * input_z)
+    {
+        *vector_factor = 1.0;
+        *projected_z = input_z;
+        return;
+    }
+    if (!(vector_norm2 > 0.0))
+    {
+        *vector_factor = 1.0;
+        *projected_z = fmax(input_z, fabs(fixed_w));
+        return;
+    }
+    if (fixed_w == 0.0)
+    {
+        double vector_norm = sqrt(vector_norm2);
+        if (vector_norm <= -input_z)
+        {
+            *vector_factor = 0.0;
+            *projected_z = 0.0;
+        }
+        else
+        {
+            double scale = (vector_norm + input_z) / (2.0 * vector_norm);
+            *vector_factor = scale;
+            *projected_z = scale * vector_norm;
+        }
+        return;
+    }
+
+    double lower;
+    double upper;
+    bool lower_branch = input_z > 0.0;
+    if (input_z == 0.0)
+    {
+        *vector_factor = 0.5;
+        *projected_z = sqrt(fixed_norm2 + 0.25 * vector_norm2);
+        return;
+    }
+    if (lower_branch)
+    {
+        lower = 0.0;
+        upper = 1.0 - 1e-14;
+    }
+    else
+    {
+        lower = 1.0 + 1e-14;
+        upper = (1.0 + fabs(input_z) / fabs(fixed_w)) * (1.0 + 64.0 * DBL_EPSILON);
+    }
+
+    for (int iteration = 0; iteration < 80; ++iteration)
+    {
+        double lambda = 0.5 * (lower + upper);
+        double scaled_norm2 = fixed_norm2 + vector_norm2 / ((1.0 + lambda) * (1.0 + lambda));
+        double z = input_z / (1.0 - lambda);
+        double residual = scaled_norm2 - z * z;
+        if ((lower_branch && residual > 0.0) || (!lower_branch && residual < 0.0))
+            lower = lambda;
+        else
+            upper = lambda;
+        if (upper - lower <= 1e-13 * (1.0 + upper + lower))
+            break;
+    }
+    double lambda = 0.5 * (lower + upper);
+    *vector_factor = 1.0 / (1.0 + lambda);
+    *projected_z = input_z / (1.0 - lambda);
+}
+
 static __global__ void collect_projection_stats_kernel(const double *__restrict__ primal,
                                                        const int *__restrict__ local_start,
                                                        const int *__restrict__ local_first,
@@ -167,24 +238,8 @@ static __global__ void apply_projection_kernel(double *__restrict__ primal,
         }
         else if (aux0_fixed)
         {
-            /* Validation permits this section only for aux0 == 0. */
-            double norm = sqrt(sum_v2);
+            project_standard_soc_with_fixed_w(sum_v2, aux0, aux1, &vector_factor, &new_aux1);
             update_aux1 = true;
-            if (norm <= aux1)
-            {
-                vector_factor = 1.0;
-            }
-            else if (norm <= -aux1)
-            {
-                vector_factor = 0.0;
-                new_aux1 = 0.0;
-            }
-            else
-            {
-                double scale = (norm + aux1) / (2.0 * norm);
-                vector_factor = scale;
-                new_aux1 = scale * norm;
-            }
         }
         else
         {

@@ -507,27 +507,30 @@ void set_start_values(qp_problem_t *prob, const double *primal, const double *du
         }
     }
 
-    if (prob->primal_start)
-    {
-        free(prob->primal_start);
-        prob->primal_start = NULL;
-    }
-    if (prob->dual_start)
-    {
-        free(prob->dual_start);
-        prob->dual_start = NULL;
-    }
-
+    double *new_primal_start = NULL;
+    double *new_dual_start = NULL;
     if (primal)
     {
-        prob->primal_start = (double *)safe_malloc(n * sizeof(double));
-        memcpy(prob->primal_start, primal, n * sizeof(double));
+        new_primal_start = (double *)safe_malloc((size_t)n * sizeof(double));
+        memcpy(new_primal_start, primal, (size_t)n * sizeof(double));
+    }
+    else if (prob->cones.is_fixed && prob->primal_start)
+    {
+        new_primal_start = (double *)safe_calloc((size_t)n, sizeof(double));
+        for (int i = 0; i < n; ++i)
+            if (prob->cones.is_fixed[i])
+                new_primal_start[i] = prob->primal_start[i];
     }
     if (dual)
     {
-        prob->dual_start = (double *)safe_malloc(m * sizeof(double));
-        memcpy(prob->dual_start, dual, m * sizeof(double));
+        new_dual_start = (double *)safe_malloc((size_t)m * sizeof(double));
+        memcpy(new_dual_start, dual, (size_t)m * sizeof(double));
     }
+
+    free(prob->primal_start);
+    free(prob->dual_start);
+    prob->primal_start = new_primal_start;
+    prob->dual_start = new_dual_start;
 }
 
 int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
@@ -573,6 +576,67 @@ int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
     return 0;
 }
 
+static double fixed_vector_norm(const qp_problem_t *problem, int start, int length)
+{
+    double norm = 0.0;
+    for (int slot = 0; slot < length; ++slot)
+    {
+        int index = start + slot;
+        if (problem->cones.is_fixed[index])
+        {
+            double value = problem->primal_start ? problem->primal_start[index] : 0.0;
+            norm = hypot(norm, value);
+        }
+    }
+    return norm;
+}
+
+static int fixed_exp_section_is_nonempty(const qp_problem_t *problem, int start)
+{
+    int fixed_x = problem->cones.is_fixed[start + 0] != 0;
+    int fixed_y = problem->cones.is_fixed[start + 1] != 0;
+    int fixed_z = problem->cones.is_fixed[start + 2] != 0;
+    double x = problem->primal_start ? problem->primal_start[start + 0] : 0.0;
+    double y = problem->primal_start ? problem->primal_start[start + 1] : 0.0;
+    double z = problem->primal_start ? problem->primal_start[start + 2] : 0.0;
+
+    if ((fixed_x && !isfinite(x)) || (fixed_y && !isfinite(y)) || (fixed_z && !isfinite(z)))
+        return 0;
+
+    if (fixed_y)
+    {
+        if (y < 0.0)
+            return 0;
+        if (y == 0.0)
+            return (!fixed_x || x <= 0.0) && (!fixed_z || z >= 0.0);
+        if (fixed_z && !(z > 0.0))
+            return 0;
+        if (fixed_x && fixed_z)
+        {
+            double log_bound = log(y) + x / y;
+            double log_z = log(z);
+            double tolerance = 64.0 * DBL_EPSILON * (1.0 + fabs(log_bound) + fabs(log_z));
+            return log_bound <= log_z + tolerance;
+        }
+        return 1;
+    }
+
+    if (!fixed_z)
+        return 1;
+    if (z < 0.0)
+        return 0;
+    if (z == 0.0)
+        return !fixed_x || x <= 0.0;
+    if (!fixed_x || x <= 0.0)
+        return 1;
+
+    /* min_{y > 0} y exp(x / y) = e x for x > 0. */
+    double log_minimum = 1.0 + log(x);
+    double log_z = log(z);
+    double tolerance = 64.0 * DBL_EPSILON * (1.0 + fabs(log_minimum) + fabs(log_z));
+    return log_minimum <= log_z + tolerance;
+}
+
 int pdhcg_validate_fixed_cone_sections(const qp_problem_t *problem)
 {
     if (!problem || !problem->cones.is_fixed)
@@ -599,24 +663,10 @@ int pdhcg_validate_fixed_cone_sections(const qp_problem_t *problem)
 
         if (problem->cones.type[cone] == CONE_EXPONENTIAL)
         {
-            int fixed_x = problem->cones.is_fixed[start + 0] != 0;
-            int fixed_y = problem->cones.is_fixed[start + 1] != 0;
-            int fixed_z = problem->cones.is_fixed[start + 2] != 0;
-            double y = problem->primal_start ? problem->primal_start[start + 1] : 0.0;
-            if (!fixed_y || fixed_x || fixed_z)
+            if (!fixed_exp_section_is_nonempty(problem, start))
             {
-                fprintf(stderr,
-                        "[solve_qp_problem] exponential cone %d uses an unsupported fixed-slot pattern; "
-                        "only fixing y is supported.\n",
-                        cone);
-                return -1;
-            }
-            if (!isfinite(y) || y < 0.0)
-            {
-                fprintf(stderr,
-                        "[solve_qp_problem] exponential cone %d has invalid fixed y=%.17g; expected y >= 0.\n",
-                        cone,
-                        y);
+                fprintf(
+                    stderr, "[solve_qp_problem] exponential cone %d has an empty or non-finite fixed section.\n", cone);
                 return -1;
             }
             continue;
@@ -624,30 +674,28 @@ int pdhcg_validate_fixed_cone_sections(const qp_problem_t *problem)
 
         if (problem->cones.type[cone] == CONE_STANDARD_SOC)
         {
-            int fixed_vector = 0;
-            for (int slot = 0; slot < vector_dimension; ++slot)
-                fixed_vector |= problem->cones.is_fixed[start + slot] != 0;
             int w_index = start + vector_dimension;
             int z_index = w_index + 1;
-            int fixed_w = problem->cones.is_fixed[w_index] != 0;
             int fixed_z = problem->cones.is_fixed[z_index] != 0;
-            double w = problem->primal_start ? problem->primal_start[w_index] : 0.0;
             double z = problem->primal_start ? problem->primal_start[z_index] : 0.0;
-            if (fixed_vector || (fixed_w && !fixed_z && w != 0.0))
+            for (int slot = 0; slot < vector_dimension + 2; ++slot)
             {
-                fprintf(stderr,
-                        "[solve_qp_problem] standard SOC %d uses an unsupported fixed-slot pattern; "
-                        "fixed vector slots and a nonzero fixed w without fixed z are not supported.\n",
-                        cone);
-                return -1;
+                int index = start + slot;
+                double value = problem->primal_start ? problem->primal_start[index] : 0.0;
+                if (problem->cones.is_fixed[index] && !isfinite(value))
+                {
+                    fprintf(stderr, "[solve_qp_problem] standard SOC %d has a non-finite fixed value.\n", cone);
+                    return -1;
+                }
             }
-            if (fixed_z && (!isfinite(z) || z < 0.0 || (fixed_w && (!isfinite(w) || fabs(w) > z))))
+            double fixed_norm = fixed_vector_norm(problem, start, vector_dimension + 1);
+            if (fixed_z && (!(z >= 0.0) || fixed_norm > z))
             {
                 fprintf(stderr,
-                        "[solve_qp_problem] standard SOC %d has an empty fixed section (w=%.17g%s, z=%.17g).\n",
+                        "[solve_qp_problem] standard SOC %d has an empty fixed section "
+                        "(fixed vector norm=%.17g, fixed z=%.17g).\n",
                         cone,
-                        w,
-                        fixed_w ? " fixed" : "",
+                        fixed_norm,
                         z);
                 return -1;
             }
@@ -656,30 +704,41 @@ int pdhcg_validate_fixed_cone_sections(const qp_problem_t *problem)
 
         if (problem->cones.type[cone] == CONE_ROTATED_SOC)
         {
-            int fixed_vector = 0;
-            for (int slot = 0; slot < vector_dimension; ++slot)
-                fixed_vector |= problem->cones.is_fixed[start + slot] != 0;
             int s_index = start + vector_dimension;
             int t_index = s_index + 1;
             int fixed_s = problem->cones.is_fixed[s_index] != 0;
             int fixed_t = problem->cones.is_fixed[t_index] != 0;
             double s = problem->primal_start ? problem->primal_start[s_index] : 0.0;
             double t = problem->primal_start ? problem->primal_start[t_index] : 0.0;
-            if (fixed_vector || !fixed_s || !fixed_t)
+            for (int slot = 0; slot < vector_dimension + 2; ++slot)
             {
-                fprintf(stderr,
-                        "[solve_qp_problem] rotated SOC %d uses an unsupported fixed-slot pattern; "
-                        "only fixing both s and t is supported.\n",
-                        cone);
-                return -1;
+                int index = start + slot;
+                double value = problem->primal_start ? problem->primal_start[index] : 0.0;
+                if (problem->cones.is_fixed[index] && !isfinite(value))
+                {
+                    fprintf(stderr, "[solve_qp_problem] rotated SOC %d has a non-finite fixed value.\n", cone);
+                    return -1;
+                }
             }
-            if (!isfinite(s) || !isfinite(t) || s < 0.0 || t < 0.0)
+            double fixed_norm = fixed_vector_norm(problem, start, vector_dimension);
+            int empty = (fixed_s && s < 0.0) || (fixed_t && t < 0.0);
+            if (!empty && fixed_s && fixed_t)
+                empty = fixed_norm > 1.41421356237309504880 * sqrt(s) * sqrt(t);
+            else if (fixed_s && s == 0.0)
+                empty |= fixed_norm > 0.0;
+            else if (fixed_t && t == 0.0)
+                empty |= fixed_norm > 0.0;
+            if (empty)
             {
                 fprintf(stderr,
-                        "[solve_qp_problem] rotated SOC %d has an empty fixed section (s=%.17g, t=%.17g).\n",
+                        "[solve_qp_problem] rotated SOC %d has an empty fixed section "
+                        "(fixed vector norm=%.17g, s=%.17g%s, t=%.17g%s).\n",
                         cone,
+                        fixed_norm,
                         s,
-                        t);
+                        fixed_s ? " fixed" : "",
+                        t,
+                        fixed_t ? " fixed" : "");
                 return -1;
             }
             continue;

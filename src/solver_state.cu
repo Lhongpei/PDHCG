@@ -15,6 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "cone_dispatch.h"
 #include "distributed_conic.h"
 #include "internal_types.h"
 #include "pdhcg.h"
@@ -451,14 +452,19 @@ pick_cone_proj_method(const cone_blocks_t *cones, int cone, const double *coordi
         return PROJ_METHOD_THREAD;
     if (type != CONE_STANDARD_SOC && type != CONE_ROTATED_SOC)
         return PROJ_METHOD_WARP;
+
+    int start = cones->start_idx[cone];
+    if (cones->is_fixed)
+    {
+        for (int slot = 0; slot < v_dim + 2; ++slot)
+            if (cones->is_fixed[start + slot])
+                return v_dim >= PDHCG_LARGE_CONE_MIN_VDIM ? PROJ_METHOD_GRID_WEIGHTED : PROJ_METHOD_BLOCK;
+    }
     if (v_dim < PDHCG_LARGE_CONE_MIN_VDIM || !coordinate_rescaling)
         return PROJ_METHOD_WARP;
 
-    int start = cones->start_idx[cone];
     int endpoint0 = start + v_dim;
     int endpoint1 = endpoint0 + 1;
-    if (cones->is_fixed && (cones->is_fixed[endpoint0] || cones->is_fixed[endpoint1]))
-        return PROJ_METHOD_WARP;
 
     double d0 = coordinate_rescaling[endpoint0];
     double d1 = coordinate_rescaling[endpoint1];
@@ -469,7 +475,7 @@ pick_cone_proj_method(const cone_blocks_t *cones, int cone, const double *coordi
     if (type == CONE_STANDARD_SOC)
     {
         if (d0 != d1)
-            return PROJ_METHOD_WARP;
+            return PROJ_METHOD_GRID_WEIGHTED;
     }
     else
     {
@@ -479,13 +485,13 @@ pick_cone_proj_method(const cone_blocks_t *cones, int cone, const double *coordi
             scalar_uniform = coordinate_rescaling[start + i] == d_ref;
         if (scalar_uniform)
             return PROJ_METHOD_GRID;
-        d_vector = sqrt(d0 * d1);
+        d_vector = sqrt(d0) * sqrt(d1);
     }
 
     for (int i = 0; i < v_dim; ++i)
     {
         if (coordinate_rescaling[start + i] != d_vector)
-            return PROJ_METHOD_WARP;
+            return PROJ_METHOD_GRID_WEIGHTED;
     }
     return PROJ_METHOD_GRID;
 }
@@ -568,15 +574,16 @@ initialize_cone_layout(cone_runtime_t *runtime, const cone_blocks_t *cones, cons
     free(vdim_perm);
     free(methods);
 
-    size_t wb = (size_t)K * sizeof(double);
-    CUDA_CHECK(cudaMalloc(&runtime->projection_warm_start, wb));
-    CUDA_CHECK(cudaMemset(runtime->projection_warm_start, 0, wb));
-    CUDA_CHECK(cudaMalloc(&runtime->residual_warm_start, wb));
-    CUDA_CHECK(cudaMemset(runtime->residual_warm_start, 0, wb));
-    CUDA_CHECK(cudaMalloc(&runtime->complementarity_residual, wb));
-    CUDA_CHECK(cudaMemset(runtime->complementarity_residual, 0, wb));
+    size_t scalar_bytes = (size_t)K * sizeof(double);
+    size_t workspace_bytes = PDHCG_CONE_WORKSPACE_STRIDE * scalar_bytes;
+    CUDA_CHECK(cudaMalloc(&runtime->projection_warm_start, workspace_bytes));
+    CUDA_CHECK(cudaMemset(runtime->projection_warm_start, 0, workspace_bytes));
+    CUDA_CHECK(cudaMalloc(&runtime->residual_warm_start, workspace_bytes));
+    CUDA_CHECK(cudaMemset(runtime->residual_warm_start, 0, workspace_bytes));
+    CUDA_CHECK(cudaMalloc(&runtime->complementarity_residual, scalar_bytes));
+    CUDA_CHECK(cudaMemset(runtime->complementarity_residual, 0, scalar_bytes));
     if (runtime->axis == CONE_AXIS_VARIABLE && runtime->has_power_cones)
-        CUDA_CHECK(cudaMalloc(&runtime->power_violation_workspace, 2 * wb));
+        CUDA_CHECK(cudaMalloc(&runtime->power_violation_workspace, 2 * scalar_bytes));
 }
 
 static void initialize_cone_runtime(pdhg_solver_state_t *state,
@@ -972,7 +979,7 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
     initialize_cone_runtime(state, working_problem, rescale_info);
     if (state->has_variable_cones)
     {
-        project_primal_onto_cones(state, state->initial_primal_solution);
+        project_cone_runtime(state, &state->cones, state->initial_primal_solution, state->cones.projection_warm_start);
         CUDA_CHECK(cudaGetLastError());
     }
     if (state->num_variables > 0)

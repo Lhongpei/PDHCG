@@ -73,6 +73,7 @@ test/*
 !test/test_conic_kkt_termination.c
 !test/test_power_cone.c
 !test/test_power_cone_projection.cu
+!test/test_fixed_cone_sections.cu
 /.vscode
 /.venv
 /_b

@@ -57,7 +57,9 @@ void set_start_values(
 );
 ```
 
-Sets initial primal and dual solutions for warm starting.
+Sets initial primal and dual solutions for warm starting. Passing `NULL` clears
+the corresponding warm start, while values pinned by `set_cone_fixed` remain
+part of the model and are preserved.
 
 **Parameters:**
 
@@ -67,7 +69,8 @@ Sets initial primal and dual solutions for warm starting.
 | `primal` | Primal solution vector (size n, can be NULL) |
 | `dual` | Dual solution vector (size m, can be NULL) |
 
-Rejects any slot already pinned by `set_cone_fixed`.
+Rejects a primal warm start that changes a value already pinned by
+`set_cone_fixed`.
 
 ---
 
@@ -82,9 +85,9 @@ int set_cone_fixed(
 );
 ```
 
-Pins one slot of cone `cone_idx` to `value`. Allocates the `is_fixed` flag array on first use and also writes `primal_start[start_idx + slot] = value` so the projection sees the constant. Typical use: fix the `y` slot of an exponential cone (e.g. Fisher-market entropy term with `y = 1`).
+Pins one slot of cone `cone_idx` to `value`. Allocates the `is_fixed` flag array on first use and also writes `primal_start[start_idx + slot] = value` so the projection sees the constant. During preprocessing, that slot is also converted to equal lower and upper bounds. Typical use: fix the `y` slot of an exponential cone (e.g. Fisher-market entropy term with `y = 1`).
 
-The solver currently supports these fixed cross-sections: `y` only for an exponential cone; `z` (optionally also `w`) or `w = 0` for a standard SOC; both `s` and `t` for a rotated SOC; and any feasible fixed-slot pattern for a power cone. Unsupported or empty fixed sections are rejected when solving instead of being projected approximately.
+Variable SOC, rotated-SOC, exponential, and power cones support every fixed-slot pattern whose intersection with the cone is nonempty. The solver validates the section before preprocessing and rejects empty or non-finite sections. Projection and stationarity residuals use the same weighted fixed-section operator, including diagonal quadratic objectives and large SOC/rotated-SOC blocks.
 
 **Parameters:**
 

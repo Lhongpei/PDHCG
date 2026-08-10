@@ -226,7 +226,14 @@ static qp_problem_t *make_power_problem(void)
     return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones, 0, NULL, NULL);
 }
 
-static qp_problem_t *make_large_soc_problem(int v_dim, int fix_zero_w)
+enum fixed_soc_endpoint
+{
+    FIX_SOC_NONE = 0,
+    FIX_SOC_W = 1,
+    FIX_SOC_Z = 2,
+};
+
+static qp_problem_t *make_large_soc_problem(int v_dim, int fixed_endpoint, double fixed_value)
 {
     int n = v_dim + 2;
     int *row_ptr = (int *)malloc((size_t)(v_dim + 1) * sizeof(int));
@@ -253,9 +260,12 @@ static qp_problem_t *make_large_soc_problem(int v_dim, int fix_zero_w)
         rhs[i] = value;
     }
     row_ptr[v_dim] = v_dim;
-    if (fix_zero_w)
+    if (fixed_endpoint == FIX_SOC_W)
         objective[n - 2] = 100.0;
-    objective[n - 1] = 1.0;
+    else if (fixed_endpoint == FIX_SOC_Z)
+        objective[n - 2] = -1.0;
+    if (fixed_endpoint != FIX_SOC_Z)
+        objective[n - 1] = 1.0;
 
     cone_spec_t cone = {
         .type = CONE_STANDARD_SOC,
@@ -274,7 +284,8 @@ static qp_problem_t *make_large_soc_problem(int v_dim, int fix_zero_w)
     A.data.csr.vals = values;
     qp_problem_t *problem =
         create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
-    if (problem && fix_zero_w && set_cone_fixed(problem, 0, v_dim, 0.0) != 0)
+    if (problem && fixed_endpoint != FIX_SOC_NONE &&
+        set_cone_fixed(problem, 0, v_dim + fixed_endpoint - 1, fixed_value) != 0)
     {
         qp_problem_free(problem);
         problem = NULL;
@@ -522,7 +533,7 @@ int main(int argc, char **argv)
     if (!all_column_grid)
     {
         const int fixed_w_v_dim = 1025;
-        problem = rank == 0 ? make_large_soc_problem(fixed_w_v_dim, 1) : NULL;
+        problem = rank == 0 ? make_large_soc_problem(fixed_w_v_dim, FIX_SOC_W, 0.0) : NULL;
         parameters.permute_method = FULL_RANDOM_PERMUTATION;
         result = solve_qp_problem_distributed(&parameters, problem);
         if (rank == 0)
@@ -539,6 +550,64 @@ int main(int argc, char **argv)
                 fabs(result->primal_solution[fixed_w_v_dim + 1] - 1.0) > 2e-4)
             {
                 fprintf(stderr, "distributed fixed-zero-w SOC solve returned an incorrect solution\n");
+                failed = 1;
+            }
+            pdhcg_result_free(result);
+            qp_problem_free(problem);
+        }
+
+        problem = rank == 0 ? make_large_soc_problem(fixed_w_v_dim, FIX_SOC_W, 0.75) : NULL;
+        parameters.permute_method = FULL_RANDOM_PERMUTATION;
+        result = solve_qp_problem_distributed(&parameters, problem);
+        if (rank == 0)
+        {
+            const double expected_v = 1.0 / sqrt((double)fixed_w_v_dim);
+            const double expected_z = 1.25;
+            double max_v_error = 0.0;
+            if (result)
+            {
+                for (int i = 0; i < fixed_w_v_dim; ++i)
+                    max_v_error = fmax(max_v_error, fabs(result->primal_solution[i] - expected_v));
+            }
+            if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL || max_v_error > 2e-4 ||
+                fabs(result->primal_solution[fixed_w_v_dim] - 0.75) > 1e-12 ||
+                fabs(result->primal_solution[fixed_w_v_dim + 1] - expected_z) > 2e-4)
+            {
+                fprintf(stderr,
+                        "distributed fixed-nonzero-w SOC solve returned an incorrect solution "
+                        "(status=%d, w=%.9g, z=%.9g)\n",
+                        result ? (int)result->termination_reason : -1,
+                        result ? result->primal_solution[fixed_w_v_dim] : NAN,
+                        result ? result->primal_solution[fixed_w_v_dim + 1] : NAN);
+                failed = 1;
+            }
+            pdhcg_result_free(result);
+            qp_problem_free(problem);
+        }
+
+        problem = rank == 0 ? make_large_soc_problem(fixed_w_v_dim, FIX_SOC_Z, 2.0) : NULL;
+        parameters.permute_method = FULL_RANDOM_PERMUTATION;
+        result = solve_qp_problem_distributed(&parameters, problem);
+        if (rank == 0)
+        {
+            const double expected_v = 1.0 / sqrt((double)fixed_w_v_dim);
+            const double expected_w = sqrt(3.0);
+            double max_v_error = 0.0;
+            if (result)
+            {
+                for (int i = 0; i < fixed_w_v_dim; ++i)
+                    max_v_error = fmax(max_v_error, fabs(result->primal_solution[i] - expected_v));
+            }
+            if (!result || result->termination_reason != TERMINATION_REASON_OPTIMAL || max_v_error > 2e-4 ||
+                fabs(result->primal_solution[fixed_w_v_dim] - expected_w) > 2e-4 ||
+                fabs(result->primal_solution[fixed_w_v_dim + 1] - 2.0) > 1e-12)
+            {
+                fprintf(stderr,
+                        "distributed fixed-z SOC solve returned an incorrect solution "
+                        "(status=%d, w=%.9g, z=%.9g)\n",
+                        result ? (int)result->termination_reason : -1,
+                        result ? result->primal_solution[fixed_w_v_dim] : NAN,
+                        result ? result->primal_solution[fixed_w_v_dim + 1] : NAN);
                 failed = 1;
             }
             pdhcg_result_free(result);
@@ -696,7 +765,7 @@ int main(int argc, char **argv)
     }
 
     const int large_v_dim = 1025;
-    problem = rank == 0 ? make_large_soc_problem(large_v_dim, 0) : NULL;
+    problem = rank == 0 ? make_large_soc_problem(large_v_dim, FIX_SOC_NONE, 0.0) : NULL;
     parameters.permute_method = FULL_RANDOM_PERMUTATION;
     result = solve_qp_problem_distributed(&parameters, problem);
     if (rank == 0)

@@ -111,8 +111,8 @@ typedef struct
     int *v_dim;                           /* permuted by bucket */
     double *power_alpha;                  /* permuted by bucket; NULL if no power cones */
     char *is_fixed;                       /* NULL if no fixes */
-    double *projection_warm_start;        /* device [num_blocks] */
-    double *residual_warm_start;          /* device [num_blocks] */
+    double *projection_warm_start;        /* device [PDHCG_CONE_WORKSPACE_STRIDE * num_blocks] */
+    double *residual_warm_start;          /* device [PDHCG_CONE_WORKSPACE_STRIDE * num_blocks] */
     double *complementarity_residual;     /* device [num_blocks] */
     double *power_violation_workspace;    /* device [2 * num_blocks], variable side only */
     double *coordinate_rescaling;         /* device [num_constraints], affine side only */
@@ -237,12 +237,16 @@ typedef enum
 {
     PROJ_METHOD_THREAD = 0,
     PROJ_METHOD_WARP = 1,
-    PROJ_METHOD_GRID = 2,
-    NUM_PROJ_METHODS = 3
+    PROJ_METHOD_BLOCK = 2,
+    PROJ_METHOD_GRID = 3,
+    PROJ_METHOD_GRID_WEIGHTED = 4,
+    NUM_PROJ_METHODS = 5
 } cone_proj_method_t;
 
 #define PDHCG_LARGE_CONE_MIN_VDIM 32768
 #define PDHCG_LARGE_CONE_BLOCKS_PER_CONE 128
+#define PDHCG_CONE_WORKSPACE_STRIDE 8
+#define PDHCG_CONE_GRID_ROOT_ITERATIONS 40
 
 typedef struct cone_bucket_s
 {

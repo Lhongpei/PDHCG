@@ -130,8 +130,9 @@ Input descriptor for a single cone block. In `var_cones`, `start_idx` indexes
 the variable vector; in `affine_cones`, it indexes the global rows of `A`. The
 slot count is `v_dim + 2` for SOC/RSOC and `3` for
 exponential/power cones. Power cones require `power_alpha` in `(0,1)`.
-Variable cones may provide an `is_fixed` array of `slot_count` bytes; affine
-cones must set it to NULL.
+Variable cones may provide an `is_fixed` array of `slot_count` bytes. Every
+mathematically nonempty fixed-slot pattern is supported for all four cone
+types. Affine cones must set `is_fixed` to NULL.
 
 ## Cone Blocks
 

@@ -132,7 +132,8 @@ void set_start_values(
 );
 ```
 
-Sets initial primal and dual solutions for warm starting.
+Sets initial primal and dual solutions for warm starting. A `NULL` primal clears
+free-coordinate warm starts but preserves values pinned by `set_cone_fixed`.
 
 ### Solving
 

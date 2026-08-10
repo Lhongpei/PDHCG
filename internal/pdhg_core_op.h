@@ -33,8 +33,6 @@ extern "C"
     void pdhg_update(pdhg_solver_state_t *state);
     void halpern_update(pdhg_solver_state_t *state, double reflection_coefficient);
 
-    void project_primal_onto_cones(pdhg_solver_state_t *state, double *primal_solution);
-
     void rescale_solution(pdhg_solver_state_t *state);
 
     pdhcg_result_t *create_result_from_state(pdhg_solver_state_t *state, const qp_problem_t *original_problem);

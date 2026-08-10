@@ -791,6 +791,53 @@ __global__ void prepare_affine_cone_residuals_kernel(double *projection_point,
         complementarity_residual[cone] = fabs(partial_sum[0]) / constraint_bound_rescaling;
 }
 
+__global__ void prepare_affine_cone_residuals_grid_kernel(double *projection_point,
+                                                          double *complementarity_accumulator,
+                                                          const double *primal_product,
+                                                          const double *affine_cone_offset,
+                                                          const double *dual_solution,
+                                                          const int *start_idx,
+                                                          const int *v_dim,
+                                                          int num_cones,
+                                                          int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    int start = start_idx[cone];
+    int length = v_dim[cone] + 2;
+    double dot = 0.0;
+    for (int slot = part * blockDim.x + threadIdx.x; slot < length; slot += blocks_per_cone * blockDim.x)
+    {
+        int index = start + slot;
+        double dual = dual_solution[index];
+        projection_point[index] = -dual;
+        dot += dual * (primal_product[index] + affine_cone_offset[index]);
+    }
+
+    extern __shared__ double partial_sum[];
+    partial_sum[threadIdx.x] = dot;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (threadIdx.x < stride)
+            partial_sum[threadIdx.x] += partial_sum[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        atomicAdd(complementarity_accumulator + cone, partial_sum[0]);
+}
+
+__global__ void finish_affine_cone_complementarity_kernel(double *complementarity_residual,
+                                                          double constraint_bound_rescaling,
+                                                          int num_cones)
+{
+    int cone = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cone < num_cones)
+        complementarity_residual[cone] = fabs(complementarity_residual[cone]) / constraint_bound_rescaling;
+}
+
 __global__ void recover_primal_obj_dual_product(double *dual_product,
                                                 double *primal_obj_product,
                                                 const double *variable_rescaling,

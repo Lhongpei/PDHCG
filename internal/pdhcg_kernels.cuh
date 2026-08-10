@@ -368,6 +368,20 @@ extern "C"
                                                          double constraint_bound_rescaling,
                                                          int num_cones);
 
+    __global__ void prepare_affine_cone_residuals_grid_kernel(double *projection_point,
+                                                              double *complementarity_accumulator,
+                                                              const double *primal_product,
+                                                              const double *affine_cone_offset,
+                                                              const double *dual_solution,
+                                                              const int *start_idx,
+                                                              const int *v_dim,
+                                                              int num_cones,
+                                                              int blocks_per_cone);
+
+    __global__ void finish_affine_cone_complementarity_kernel(double *complementarity_residual,
+                                                              double constraint_bound_rescaling,
+                                                              int num_cones);
+
     __global__ void recover_primal_obj_dual_product(double *dual_product,
                                                     double *primal_obj_product,
                                                     const double *variable_rescaling,
@@ -439,6 +453,90 @@ extern "C"
                                                     const char *__restrict__ is_fixed,
                                                     int num_blocks);
 
+    __global__ void project_rotated_soc_block_kernel(double *__restrict__ primal_solution,
+                                                     const double *__restrict__ variable_rescaling,
+                                                     const double *__restrict__ Q_diag,
+                                                     double tau,
+                                                     double *__restrict__ warm_start,
+                                                     const int *__restrict__ start_idx,
+                                                     const int *__restrict__ v_dim,
+                                                     const char *__restrict__ is_fixed,
+                                                     int num_blocks);
+
+    __global__ void initialize_rotated_soc_grid_weighted_kernel(const double *__restrict__ primal_solution,
+                                                                const double *__restrict__ variable_rescaling,
+                                                                const double *__restrict__ Q_diag,
+                                                                double tau,
+                                                                double *__restrict__ workspace,
+                                                                const int *__restrict__ start_idx,
+                                                                const int *__restrict__ v_dim,
+                                                                const char *__restrict__ is_fixed,
+                                                                int num_cones,
+                                                                int blocks_per_cone);
+
+    __global__ void
+    finalize_rotated_soc_grid_weighted_initialization_kernel(const double *__restrict__ primal_solution,
+                                                             const double *__restrict__ variable_rescaling,
+                                                             const double *__restrict__ Q_diag,
+                                                             double tau,
+                                                             double *__restrict__ workspace,
+                                                             const int *__restrict__ start_idx,
+                                                             const int *__restrict__ v_dim,
+                                                             const char *__restrict__ is_fixed,
+                                                             int num_cones);
+
+    __global__ void reduce_rotated_soc_grid_weighted_root_kernel(const double *__restrict__ primal_solution,
+                                                                 const double *__restrict__ variable_rescaling,
+                                                                 const double *__restrict__ Q_diag,
+                                                                 double tau,
+                                                                 double *__restrict__ workspace,
+                                                                 const int *__restrict__ start_idx,
+                                                                 const int *__restrict__ v_dim,
+                                                                 const char *__restrict__ is_fixed,
+                                                                 int num_cones,
+                                                                 int blocks_per_cone);
+
+    __global__ void finalize_rotated_soc_grid_weighted_root_kernel(const double *__restrict__ primal_solution,
+                                                                   const double *__restrict__ variable_rescaling,
+                                                                   const double *__restrict__ Q_diag,
+                                                                   double tau,
+                                                                   double *__restrict__ workspace,
+                                                                   const int *__restrict__ start_idx,
+                                                                   const int *__restrict__ v_dim,
+                                                                   const char *__restrict__ is_fixed,
+                                                                   int num_cones);
+
+    __global__ void reduce_rotated_soc_grid_axis_objective_kernel(const double *__restrict__ primal_solution,
+                                                                  const double *__restrict__ variable_rescaling,
+                                                                  const double *__restrict__ Q_diag,
+                                                                  double tau,
+                                                                  double *__restrict__ workspace,
+                                                                  const int *__restrict__ start_idx,
+                                                                  const int *__restrict__ v_dim,
+                                                                  const char *__restrict__ is_fixed,
+                                                                  int num_cones,
+                                                                  int blocks_per_cone);
+
+    __global__ void finalize_rotated_soc_grid_axis_objective_kernel(const double *__restrict__ primal_solution,
+                                                                    const double *__restrict__ variable_rescaling,
+                                                                    const double *__restrict__ Q_diag,
+                                                                    double tau,
+                                                                    double *__restrict__ workspace,
+                                                                    const int *__restrict__ start_idx,
+                                                                    const int *__restrict__ v_dim,
+                                                                    int num_cones);
+
+    __global__ void apply_rotated_soc_grid_weighted_kernel(double *__restrict__ primal_solution,
+                                                           const double *__restrict__ variable_rescaling,
+                                                           const double *__restrict__ Q_diag,
+                                                           double tau,
+                                                           const double *__restrict__ workspace,
+                                                           const int *__restrict__ start_idx,
+                                                           const int *__restrict__ v_dim,
+                                                           const char *__restrict__ is_fixed,
+                                                           int num_cones,
+                                                           int blocks_per_cone);
+
     __global__ void project_rotated_soc_grid_reduce_kernel(double *__restrict__ primal_solution,
                                                            double *__restrict__ workspace,
                                                            const int *__restrict__ start_idx,
@@ -474,6 +572,69 @@ extern "C"
                                                      const int *__restrict__ v_dim,
                                                      const char *__restrict__ is_fixed,
                                                      int num_blocks);
+
+    __global__ void project_standard_soc_block_kernel(double *__restrict__ primal_solution,
+                                                      const double *__restrict__ variable_rescaling,
+                                                      const double *__restrict__ Q_diag,
+                                                      double tau,
+                                                      double *__restrict__ warm_start,
+                                                      const int *__restrict__ start_idx,
+                                                      const int *__restrict__ v_dim,
+                                                      const char *__restrict__ is_fixed,
+                                                      int num_blocks);
+
+    __global__ void initialize_standard_soc_grid_weighted_kernel(const double *__restrict__ primal_solution,
+                                                                 const double *__restrict__ variable_rescaling,
+                                                                 const double *__restrict__ Q_diag,
+                                                                 double tau,
+                                                                 double *__restrict__ workspace,
+                                                                 const int *__restrict__ start_idx,
+                                                                 const int *__restrict__ v_dim,
+                                                                 const char *__restrict__ is_fixed,
+                                                                 int num_cones,
+                                                                 int blocks_per_cone);
+
+    __global__ void
+    finalize_standard_soc_grid_weighted_initialization_kernel(const double *__restrict__ primal_solution,
+                                                              const double *__restrict__ variable_rescaling,
+                                                              const double *__restrict__ Q_diag,
+                                                              double tau,
+                                                              double *__restrict__ workspace,
+                                                              const int *__restrict__ start_idx,
+                                                              const int *__restrict__ v_dim,
+                                                              const char *__restrict__ is_fixed,
+                                                              int num_cones);
+
+    __global__ void reduce_standard_soc_grid_weighted_root_kernel(const double *__restrict__ primal_solution,
+                                                                  const double *__restrict__ variable_rescaling,
+                                                                  const double *__restrict__ Q_diag,
+                                                                  double tau,
+                                                                  double *__restrict__ workspace,
+                                                                  const int *__restrict__ start_idx,
+                                                                  const int *__restrict__ v_dim,
+                                                                  const char *__restrict__ is_fixed,
+                                                                  int num_cones,
+                                                                  int blocks_per_cone);
+
+    __global__ void finalize_standard_soc_grid_weighted_root_kernel(double *__restrict__ primal_solution,
+                                                                    const double *__restrict__ variable_rescaling,
+                                                                    const double *__restrict__ Q_diag,
+                                                                    double tau,
+                                                                    double *__restrict__ workspace,
+                                                                    const int *__restrict__ start_idx,
+                                                                    const int *__restrict__ v_dim,
+                                                                    int num_cones);
+
+    __global__ void apply_standard_soc_grid_weighted_kernel(double *__restrict__ primal_solution,
+                                                            const double *__restrict__ variable_rescaling,
+                                                            const double *__restrict__ Q_diag,
+                                                            double tau,
+                                                            const double *__restrict__ workspace,
+                                                            const int *__restrict__ start_idx,
+                                                            const int *__restrict__ v_dim,
+                                                            const char *__restrict__ is_fixed,
+                                                            int num_cones,
+                                                            int blocks_per_cone);
 
     __global__ void project_standard_soc_grid_reduce_kernel(double *__restrict__ primal_solution,
                                                             double *__restrict__ workspace,
@@ -698,6 +859,13 @@ extern "C"
                                                             const int *__restrict__ v_dim,
                                                             int num_cones);
 
+    __global__ void recompute_reflected_at_cone_block_kernel(double *__restrict__ reflected_primal,
+                                                             const double *__restrict__ pdhg_primal,
+                                                             const double *__restrict__ current_primal,
+                                                             const int *__restrict__ start_idx,
+                                                             const int *__restrict__ v_dim,
+                                                             int num_cones);
+
     __global__ void recompute_reflected_at_cone_grid_kernel(double *__restrict__ reflected_primal,
                                                             const double *__restrict__ pdhg_primal,
                                                             const double *__restrict__ current_primal,
@@ -705,6 +873,12 @@ extern "C"
                                                             const int *__restrict__ v_dim,
                                                             int num_cones,
                                                             int blocks_per_cone);
+
+    __global__ void clear_cone_residual_grid_kernel(double *__restrict__ dual_residual,
+                                                    const int *__restrict__ start_idx,
+                                                    const int *__restrict__ v_dim,
+                                                    int num_cones,
+                                                    int blocks_per_cone);
 
     __global__ void project_rotated_soc_diag_q_kernel(double *__restrict__ pdhg_primal,
                                                       double *__restrict__ reflected_primal,
