@@ -84,7 +84,8 @@ static qp_problem_t *build_overlap(void)
     double con_lb[] = {0.0, 0.0, 1.0, 1.0};
     double con_ub[] = {0.0, 0.0, 1.0, 1.0};
     cone_spec_t cones[] = {{.type = CONE_ROTATED_SOC, .start_idx = 2, .v_dim = 2, .is_fixed = NULL}};
-    return create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+    return create_qp_problem(
+        c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
 }
 
 /* Version B: vars (x, y, y_q, v1, v2, s, t); Q on y_q (NOT on y);
@@ -128,7 +129,8 @@ static qp_problem_t *build_separated(void)
     double con_lb[] = {0.0, 0.0, 0.0, 1.0, 1.0};
     double con_ub[] = {0.0, 0.0, 0.0, 1.0, 1.0};
     cone_spec_t cones[] = {{.type = CONE_ROTATED_SOC, .start_idx = 3, .v_dim = 2, .is_fixed = NULL}};
-    return create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+    return create_qp_problem(
+        c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
 }
 
 int main(void)

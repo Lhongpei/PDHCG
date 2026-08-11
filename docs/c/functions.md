@@ -14,14 +14,18 @@ qp_problem_t *create_qp_problem(
     const double *objective_constant,
     int num_var_cones,
     const cone_spec_t *var_cones,
+    const matrix_desc_t *affine_cone_matrix_desc,
+    const double *affine_cone_offset,
     int num_affine_cones,
-    const cone_spec_t *affine_cones,
-    const double *affine_cone_offset
+    const cone_spec_t *affine_cones
 );
 ```
 
 Creates a QP problem of the form
-`min 0.5 * x^T (Q + R^T D R) x + c^T x` subject to `con_lb <= A x <= con_ub`, `var_lb <= x <= var_ub`, optional variable cone blocks, and optional native affine cone blocks `(A x + affine_cone_offset)[block] in K`. Affine cone rows must not also have finite scalar bounds.
+`min 0.5 * x^T (Q + R^T D R) x + c^T x` subject to
+`con_lb <= A x <= con_ub`, `F x + affine_cone_offset in K`,
+`var_lb <= x <= var_ub`, and optional variable cone blocks. The affine cone
+blocks must be disjoint and cover every row of `F`.
 
 **Parameters:**
 
@@ -39,9 +43,10 @@ Creates a QP problem of the form
 | `objective_constant` | Constant term in objective (can be NULL) |
 | `num_var_cones` | Number of variable cone blocks |
 | `var_cones` | Array of variable `cone_spec_t` descriptors, or NULL when the count is zero |
-| `num_affine_cones` | Number of affine cone blocks over rows of `A` |
+| `affine_cone_matrix_desc` | Matrix `F` in the native affine cone constraint; NULL when no affine cones are present |
+| `affine_cone_offset` | Offset vector with one entry per row of `F`; NULL means zero |
+| `num_affine_cones` | Number of affine cone blocks covering `F` |
 | `affine_cones` | Array of affine `cone_spec_t` descriptors, or NULL when the count is zero |
-| `affine_cone_offset` | Offset vector aligned with rows of `A`; NULL means zero |
 
 **Returns:** Pointer to allocated `qp_problem_t`, or NULL on error.
 
@@ -67,7 +72,7 @@ part of the model and are preserved.
 |-----------|-------------|
 | `prob` | QP problem pointer |
 | `primal` | Primal solution vector (size n, can be NULL) |
-| `dual` | Dual solution vector (size m, can be NULL) |
+| `dual` | Dual solution vector (size `m + p`, ordered as `[dual_A, dual_F]`; can be NULL) |
 
 Rejects a primal warm start that changes a value already pinned by
 `set_cone_fixed`.

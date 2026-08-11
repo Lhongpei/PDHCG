@@ -59,11 +59,15 @@ def test_low_level_rejects_legacy_cone_dicts() -> None:
 
 
 @pytest.mark.gpu
-def test_model_native_affine_soc_columnar_input() -> None:
+@pytest.mark.parametrize("sparse", [False, True], ids=["dense", "csr"])
+def test_model_native_affine_soc_columnar_input(sparse: bool) -> None:
+    affine_matrix = np.array([[0.0], [0.0], [1.0]])
+    if sparse:
+        affine_matrix = sp.csr_matrix(affine_matrix)
     model = _quiet_model(
         Model(
             objective_vector=np.array([1.0]),
-            affine_cone_matrix=sp.csr_matrix([[0.0], [0.0], [1.0]]),
+            affine_cone_matrix=affine_matrix,
             affine_cone_offset=np.array([3.0, 4.0, 0.0]),
             affine_cones=ConeSpec(
                 ConeType.SOC,

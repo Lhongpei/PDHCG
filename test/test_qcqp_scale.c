@@ -157,7 +157,8 @@ static qp_problem_t *build_aux(int N)
         cones[i].v_dim = 1;
         cones[i].is_fixed = NULL;
     }
-    qp_problem_t *prob = create_qp_problem(c, NULL, NULL, NULL, &A, clb, cub, vlb, vub, NULL, N, cones, 0, NULL, NULL);
+    qp_problem_t *prob =
+        create_qp_problem(c, NULL, NULL, NULL, &A, clb, cub, vlb, vub, NULL, N, cones, NULL, NULL, 0, NULL);
     free(cones);
     free(clb);
     free(cub);
@@ -239,7 +240,8 @@ static qp_problem_t *build_no_aux(int N)
         cones[i].v_dim = 1;
         cones[i].is_fixed = NULL;
     }
-    qp_problem_t *prob = create_qp_problem(c, NULL, NULL, NULL, &A, clb, cub, vlb, vub, NULL, N, cones, 0, NULL, NULL);
+    qp_problem_t *prob =
+        create_qp_problem(c, NULL, NULL, NULL, &A, clb, cub, vlb, vub, NULL, N, cones, NULL, NULL, 0, NULL);
     free(cones);
     free(clb);
     free(cub);

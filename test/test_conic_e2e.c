@@ -44,7 +44,7 @@ static int run_test_standard_soc(void)
         {.type = CONE_STANDARD_SOC, .start_idx = 0, .v_dim = 1},
     };
     qp_problem_t *prob =
-        create_qp_problem(c, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+        create_qp_problem(c, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
     if (!prob)
     {
         printf("  FAIL: create_qp_problem returned NULL\n");
@@ -105,7 +105,7 @@ static int run_test_rotated_soc(void)
         {.type = CONE_ROTATED_SOC, .start_idx = 0, .v_dim = 1},
     };
     qp_problem_t *prob =
-        create_qp_problem(c, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+        create_qp_problem(c, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
     if (!prob)
     {
         printf("  FAIL: create_qp_problem returned NULL\n");
@@ -173,7 +173,7 @@ static int run_test_exp_cone(void)
         {.type = CONE_EXPONENTIAL, .start_idx = 0, .v_dim = 1},
     };
     qp_problem_t *prob =
-        create_qp_problem(c, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+        create_qp_problem(c, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
     if (!prob)
     {
         printf("  FAIL: create_qp_problem returned NULL\n");

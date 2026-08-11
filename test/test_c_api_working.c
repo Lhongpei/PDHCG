@@ -95,7 +95,8 @@ int main()
     double cu[] = {1.0};
 
     printf("Creating problem...\n");
-    qp_problem_t *prob = create_qp_problem(c, NULL, NULL, NULL, &A_desc, cl, cu, lb, ub, NULL, 0, NULL, 0, NULL, NULL);
+    qp_problem_t *prob =
+        create_qp_problem(c, NULL, NULL, NULL, &A_desc, cl, cu, lb, ub, NULL, 0, NULL, NULL, NULL, 0, NULL);
     if (!prob)
     {
         printf("FAIL: create_qp_problem failed\n");

@@ -30,7 +30,8 @@ static qp_problem_t *make_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
+    return create_qp_problem(
+        objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, NULL, NULL, 0, NULL);
 }
 
 static qp_problem_t *make_fixed_rsoc_problem(void)
@@ -57,8 +58,8 @@ static qp_problem_t *make_fixed_rsoc_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, zero, zero, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
+    qp_problem_t *problem = create_qp_problem(
+        objective, NULL, NULL, NULL, &A, zero, zero, var_lb, var_ub, NULL, 1, &cone, NULL, NULL, 0, NULL);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
     {
         qp_problem_free(problem);
@@ -93,8 +94,8 @@ static qp_problem_t *make_large_step_fixed_rsoc_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
+    qp_problem_t *problem = create_qp_problem(
+        objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, NULL, NULL, 0, NULL);
     if (!problem || set_cone_fixed(problem, 0, 1, 1.0) != 0 || set_cone_fixed(problem, 0, 2, 1.0) != 0)
     {
         qp_problem_free(problem);
@@ -128,7 +129,8 @@ static qp_problem_t *make_atomic_soc_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, 0, NULL, NULL);
+    return create_qp_problem(
+        objective, NULL, NULL, NULL, &A, rhs, rhs, var_lb, var_ub, NULL, 1, &cone, NULL, NULL, 0, NULL);
 }
 
 static qp_problem_t *make_exponential_problem(void)
@@ -170,7 +172,7 @@ static qp_problem_t *make_exponential_problem(void)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
     qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones, 0, NULL, NULL);
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones, NULL, NULL, 0, NULL);
     if (!problem)
         return NULL;
     for (int cone = 0; cone < 4; ++cone)
@@ -223,7 +225,8 @@ static qp_problem_t *make_power_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones, 0, NULL, NULL);
+    return create_qp_problem(
+        objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 4, cones, NULL, NULL, 0, NULL);
 }
 
 enum fixed_soc_endpoint
@@ -283,7 +286,7 @@ static qp_problem_t *make_large_soc_problem(int v_dim, int fixed_endpoint, doubl
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
     qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
+        create_qp_problem(objective, NULL, NULL, NULL, &A, rhs, rhs, NULL, NULL, NULL, 1, &cone, NULL, NULL, 0, NULL);
     if (problem && fixed_endpoint != FIX_SOC_NONE &&
         set_cone_fixed(problem, 0, v_dim + fixed_endpoint - 1, fixed_value) != 0)
     {
@@ -306,35 +309,43 @@ static qp_problem_t *make_affine_soc_problem(void)
     static const double values[] = {1.0};
     static const double objective[] = {1.0};
     static const double offset[] = {1.0, 0.0, 0.0};
-    matrix_desc_t A = {0};
-    A.m = 3;
-    A.n = 1;
-    A.fmt = matrix_csr;
-    A.data.csr.nnz = 1;
-    A.data.csr.row_ptr = row_ptr;
-    A.data.csr.col_ind = col_ind;
-    A.data.csr.vals = values;
+    matrix_desc_t F = {0};
+    F.m = 3;
+    F.n = 1;
+    F.fmt = matrix_csr;
+    F.data.csr.nnz = 1;
+    F.data.csr.row_ptr = row_ptr;
+    F.data.csr.col_ind = col_ind;
+    F.data.csr.vals = values;
     cone_spec_t cone = {.type = CONE_STANDARD_SOC, .start_idx = 0, .v_dim = 1};
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 0, NULL, 1, &cone, offset);
+    return create_qp_problem(
+        objective, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, &F, offset, 1, &cone);
 }
 
 static qp_problem_t *make_local_affine_soc_problem(void)
 {
-    static const int row_ptr[] = {0, 0, 0, 0, 0, 0, 1};
+    static const int scalar_row_ptr[] = {0, 0, 0, 0};
+    static const int affine_row_ptr[] = {0, 0, 0, 1};
     static const int col_ind[] = {0};
     static const double values[] = {1.0};
     static const double objective[] = {1.0};
-    static const double offset[] = {0.0, 0.0, 0.0, 1.0, 0.0, 0.0};
+    static const double offset[] = {1.0, 0.0, 0.0};
     matrix_desc_t A = {0};
-    A.m = 6;
+    A.m = 3;
     A.n = 1;
     A.fmt = matrix_csr;
-    A.data.csr.nnz = 1;
-    A.data.csr.row_ptr = row_ptr;
-    A.data.csr.col_ind = col_ind;
-    A.data.csr.vals = values;
-    cone_spec_t cone = {.type = CONE_STANDARD_SOC, .start_idx = 3, .v_dim = 1};
-    return create_qp_problem(objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 0, NULL, 1, &cone, offset);
+    A.data.csr.row_ptr = scalar_row_ptr;
+    matrix_desc_t F = {0};
+    F.m = 3;
+    F.n = 1;
+    F.fmt = matrix_csr;
+    F.data.csr.nnz = 1;
+    F.data.csr.row_ptr = affine_row_ptr;
+    F.data.csr.col_ind = col_ind;
+    F.data.csr.vals = values;
+    cone_spec_t cone = {.type = CONE_STANDARD_SOC, .start_idx = 0, .v_dim = 1};
+    return create_qp_problem(
+        objective, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 0, NULL, &F, offset, 1, &cone);
 }
 
 static qp_problem_t *make_qcqp_problem(void)
@@ -353,8 +364,8 @@ static qp_problem_t *make_qcqp_problem(void)
     A.data.csr.row_ptr = row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    qp_problem_t *problem =
-        create_qp_problem(objective, NULL, NULL, NULL, &A, con_lb, con_ub, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL);
+    qp_problem_t *problem = create_qp_problem(
+        objective, NULL, NULL, NULL, &A, con_lb, con_ub, NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL);
     if (!problem)
         return NULL;
 

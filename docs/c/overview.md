@@ -50,7 +50,7 @@ int main() {
     qp_problem_t *prob = create_qp_problem(
         c, NULL, NULL, NULL, &A_desc,
         con_lb, con_ub, var_lb, var_ub, NULL,
-        0, NULL, 0, NULL, NULL
+        0, NULL, NULL, NULL, 0, NULL
     );
 
     // Set parameters
@@ -106,16 +106,18 @@ qp_problem_t *create_qp_problem(
     const double *objective_constant,
     int num_var_cones,
     const cone_spec_t *var_cones,
+    const matrix_desc_t *affine_cone_matrix_desc,
+    const double *affine_cone_offset,
     int num_affine_cones,
-    const cone_spec_t *affine_cones,
-    const double *affine_cone_offset
+    const cone_spec_t *affine_cones
 );
 ```
 
 Creates a QP problem of the form
 `min 0.5 * x^T (Q + R^T D R) x + c^T x  s.t.  con_lb <= A x <= con_ub,  var_lb <= x <= var_ub`,
 with optional variable cones and native affine constraints
-`(A x + affine_cone_offset)[block] in K`. The problem is built from matrix
+`F x + affine_cone_offset in K`. Affine cone starts are relative to rows of
+`F`, and the blocks must cover `F` completely. The problem is built from matrix
 descriptors. `Q_desc` (sparse quadratic), `R_desc` (low-rank factor, shape
 `k x n`), and `D_desc` (rank-by-rank middle matrix in `R^T D R`) are all
 optional — pass `NULL` to omit any of them. `D_desc` defaults to identity,

@@ -83,7 +83,8 @@ static qp_problem_t *build_aux(void)
     double con_lb[] = {0.0, 0.0, 1.0, 1.0};
     double con_ub[] = {0.0, 0.0, 1.0, 1.0};
     cone_spec_t cones[] = {{.type = CONE_ROTATED_SOC, .start_idx = 2, .v_dim = 2, .is_fixed = NULL}};
-    return create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+    return create_qp_problem(
+        c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
 }
 
 /* B: NO aux. vars = (x, y, s, t); (x,y,s,t) in K_rsoc, s = t = 1/2 -> x^2 + y^2 <= 1.
@@ -125,7 +126,8 @@ static qp_problem_t *build_no_aux(void)
     double con_ub[] = {1.0, 0.5};
     /* cone is (v0=x, v1=y, s, t) with v_dim=2. Q lives on v1. */
     cone_spec_t cones[] = {{.type = CONE_ROTATED_SOC, .start_idx = 0, .v_dim = 2, .is_fixed = NULL}};
-    return create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+    return create_qp_problem(
+        c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
 }
 
 int main(void)

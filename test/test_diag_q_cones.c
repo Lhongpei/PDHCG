@@ -57,7 +57,7 @@ static int run_test_soc_diag_q(void)
     cone_spec_t cones[] = {{.type = CONE_STANDARD_SOC, .start_idx = 0, .v_dim = 1, .is_fixed = NULL}};
 
     qp_problem_t *prob =
-        create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+        create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
     if (!prob)
     {
         fprintf(stderr, "  create_qp_problem returned NULL\n");
@@ -143,7 +143,7 @@ static int run_test_rsoc_diag_q(void)
     cone_spec_t cones[] = {{.type = CONE_ROTATED_SOC, .start_idx = 0, .v_dim = 1, .is_fixed = NULL}};
 
     qp_problem_t *prob =
-        create_qp_problem(c, &Q, NULL, NULL, &A, NULL, NULL, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+        create_qp_problem(c, &Q, NULL, NULL, &A, NULL, NULL, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
     if (!prob)
     {
         fprintf(stderr, "  create_qp_problem returned NULL\n");
@@ -221,7 +221,7 @@ static int run_test_rsoc_diag_q_asymmetric(void)
     cone_spec_t cones[] = {{.type = CONE_ROTATED_SOC, .start_idx = 0, .v_dim = 1, .is_fixed = NULL}};
 
     qp_problem_t *prob =
-        create_qp_problem(c, &Q, NULL, NULL, &A, NULL, NULL, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+        create_qp_problem(c, &Q, NULL, NULL, &A, NULL, NULL, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
     if (!prob)
     {
         fprintf(stderr, "  create_qp_problem returned NULL\n");

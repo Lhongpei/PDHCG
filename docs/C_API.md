@@ -21,9 +21,10 @@ qp_problem_t *create_qp_problem(
     const double *objective_constant,    // scalar objective offset
     int num_var_cones,                   // number of variable cone blocks
     const cone_spec_t *var_cones,        // variable cone descriptors
+    const matrix_desc_t *affine_cone_matrix_desc, // affine matrix F (p x n)
+    const double *affine_cone_offset,    // affine offset g (length p)
     int num_affine_cones,                // number of affine cone blocks
-    const cone_spec_t *affine_cones,     // descriptors indexing rows of A
-    const double *affine_cone_offset     // affine offset aligned with rows of A
+    const cone_spec_t *affine_cones      // descriptors indexing rows of F
 );
 
 pdhcg_result_t* solve_qp_problem(
@@ -46,11 +47,13 @@ The objective minimized is `0.5 * x^T (Q + R^T D R) x + c^T x + c0`. `Q`, `R`, a
 - `var_ub`: Variable upper bounds. If `NULL`, defaults to all `+INFINITY`.
 - `objective_constant`: Scalar constant term added to the objective value. If `NULL`, defaults to `0.0`.
 - `num_var_cones`, `var_cones`: Optional conic variable blocks. Supported types are SOC, rotated SOC, exponential, and power cones. Pass `0` and `NULL` when no variable cones are present. See [Types](c/types.md) for slot layouts and `set_cone_fixed` in [Functions](c/functions.md) for pinning individual slots.
-- `num_affine_cones`, `affine_cones`: Optional native constraints `(A x + affine_cone_offset)[block] in K`. Each `start_idx` indexes the global rows of `A`; blocks must be disjoint, and their rows must not also have finite scalar bounds. Affine cone descriptors must set `is_fixed = NULL`.
-- `affine_cone_offset`: Offset vector aligned with all rows of `A`. Pass `NULL` for zero offsets. Values outside affine cone blocks are ignored.
+- `affine_cone_matrix_desc`: Matrix descriptor for `F` in the native constraint `F x + affine_cone_offset in K`. Pass `NULL` when no affine cone rows are present.
+- `affine_cone_offset`: Offset vector with one entry per row of `F`. Pass `NULL` for zero offsets.
+- `num_affine_cones`, `affine_cones`: Cone blocks covering every row of `F`. Each `start_idx` is relative to `F`; blocks must be disjoint. Affine cone descriptors must set `is_fixed = NULL`.
 
 Affine cone constraints are handled directly without introducing slack variables.
-Ordinary scalar rows and affine cone rows may appear in any order in `A`.
+Internally, PDHCG appends the affine rows after scalar rows and returns duals in
+the order `[dual_A, dual_F]`.
 
 
 `solve_qp_problem` parameters:
@@ -135,9 +138,10 @@ int main() {
         NULL,       // objective_constant
         0,          // num_var_cones
         NULL,       // var_cones
+        NULL,       // affine_cone_matrix_desc
+        NULL,       // affine_cone_offset
         0,          // num_affine_cones
-        NULL,       // affine_cones
-        NULL        // affine_cone_offset
+        NULL        // affine_cones
     );
 
     // 7. Solve (NULL → use default parameters)

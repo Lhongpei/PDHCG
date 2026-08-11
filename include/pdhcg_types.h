@@ -83,7 +83,7 @@ extern "C"
     typedef struct
     {
         cone_type_t type;
-        int start_idx; /* variable index, or global A row for affine cones */
+        int start_idx; /* variable index, or row of F for affine cones */
         int v_dim;
         double power_alpha;   /* required for CONE_POWER (in (0,1)); ignored otherwise */
         const char *is_fixed; /* variable cones only; must be NULL for affine cones */
@@ -114,8 +114,8 @@ extern "C"
         double *constraint_lower_bound;
         double *constraint_upper_bound;
 
-        /* Affine cone rows model A x + affine_cone_offset in K.
-           The offset is zero outside affine cones. */
+        /* Internal canonical rows [A; F]. affine_cone_offset is zero on the
+           scalar A rows, and affine_cones use global canonical row indices. */
         double *affine_cone_offset;
         cone_blocks_t affine_cones;
 

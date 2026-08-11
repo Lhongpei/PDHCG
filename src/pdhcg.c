@@ -168,23 +168,31 @@ static int validate_matrix_descriptor(const matrix_desc_t *desc, const char *nam
 }
 
 static int validate_problem_matrix_shapes(const matrix_desc_t *A_desc,
+                                          const matrix_desc_t *F_desc,
                                           const matrix_desc_t *Q_desc,
                                           const matrix_desc_t *R_desc,
                                           const matrix_desc_t *D_desc,
                                           int *num_variables,
-                                          int *num_constraints)
+                                          int *num_scalar_constraints,
+                                          int *num_affine_constraints)
 {
-    if (!A_desc && !Q_desc && !R_desc)
+    if (!A_desc && !F_desc && !Q_desc && !R_desc)
     {
-        fprintf(stderr, "[create_qp_problem] at least one of A, Q, or R must be provided.\n");
+        fprintf(stderr, "[create_qp_problem] at least one of A, F, Q, or R must be provided.\n");
         return -1;
     }
-    if (validate_matrix_descriptor(A_desc, "A") != 0 || validate_matrix_descriptor(Q_desc, "Q") != 0 ||
-        validate_matrix_descriptor(R_desc, "R") != 0)
+    if (validate_matrix_descriptor(A_desc, "A") != 0 || validate_matrix_descriptor(F_desc, "F") != 0 ||
+        validate_matrix_descriptor(Q_desc, "Q") != 0 || validate_matrix_descriptor(R_desc, "R") != 0)
         return -1;
 
-    int n = A_desc ? A_desc->n : (Q_desc ? Q_desc->n : R_desc->n);
+    int n = A_desc ? A_desc->n : (F_desc ? F_desc->n : (Q_desc ? Q_desc->n : R_desc->n));
     int m = A_desc ? A_desc->m : 0;
+    int p = F_desc ? F_desc->m : 0;
+    if (F_desc && F_desc->n != n)
+    {
+        fprintf(stderr, "[create_qp_problem] F matrix shape (%d, %d) must have %d columns.\n", F_desc->m, F_desc->n, n);
+        return -1;
+    }
     if (Q_desc && (Q_desc->m != n || Q_desc->n != n))
     {
         fprintf(stderr, "[create_qp_problem] Q matrix shape (%d, %d) must be (%d, %d).\n", Q_desc->m, Q_desc->n, n, n);
@@ -209,9 +217,15 @@ static int validate_problem_matrix_shapes(const matrix_desc_t *A_desc,
             return -1;
         }
     }
+    if (p > INT_MAX - m)
+    {
+        fprintf(stderr, "[create_qp_problem] combined A and F matrices have too many rows.\n");
+        return -1;
+    }
 
     *num_variables = n;
-    *num_constraints = m;
+    *num_scalar_constraints = m;
+    *num_affine_constraints = p;
     return 0;
 }
 
@@ -263,33 +277,88 @@ static void initialize_empty_csr(CsrComponent *component, int num_rows, int *num
     *num_nonzeros = 0;
 }
 
+static int append_matrix_desc_to_csr(
+    const matrix_desc_t *desc, const char *name, int current_rows, CsrComponent *destination, int *num_nonzeros)
+{
+    if (!desc)
+        return 0;
+
+    CsrComponent converted = {0};
+    const int *suffix_row_ptr = NULL;
+    const int *suffix_col_ind = NULL;
+    const double *suffix_values = NULL;
+    int suffix_nonzeros = 0;
+    if (desc->fmt == matrix_csr)
+    {
+        suffix_row_ptr = desc->data.csr.row_ptr;
+        suffix_col_ind = desc->data.csr.col_ind;
+        suffix_values = desc->data.csr.vals;
+        suffix_nonzeros = desc->data.csr.nnz;
+    }
+    else
+    {
+        if (copy_matrix_desc_to_csr(desc, name, &converted, &suffix_nonzeros) != 0)
+            return -1;
+        suffix_row_ptr = converted.row_ptr;
+        suffix_col_ind = converted.col_ind;
+        suffix_values = converted.val;
+    }
+    if (suffix_nonzeros > INT_MAX - *num_nonzeros)
+    {
+        fprintf(stderr, "[create_qp_problem] combined A and F matrices have too many nonzeros.\n");
+        csr_component_free(&converted);
+        return -1;
+    }
+
+    int initial_nonzeros = *num_nonzeros;
+    int total_nonzeros = initial_nonzeros + suffix_nonzeros;
+    size_t total_rows = (size_t)current_rows + (size_t)desc->m;
+    destination->row_ptr = (int *)safe_realloc(destination->row_ptr, (total_rows + 1) * sizeof(int));
+    for (int row = 1; row <= desc->m; ++row)
+        destination->row_ptr[current_rows + row] = initial_nonzeros + suffix_row_ptr[row];
+
+    if (suffix_nonzeros > 0)
+    {
+        destination->col_ind = (int *)safe_realloc(destination->col_ind, (size_t)total_nonzeros * sizeof(int));
+        destination->val = (double *)safe_realloc(destination->val, (size_t)total_nonzeros * sizeof(double));
+        memcpy(destination->col_ind + initial_nonzeros, suffix_col_ind, (size_t)suffix_nonzeros * sizeof(int));
+        memcpy(destination->val + initial_nonzeros, suffix_values, (size_t)suffix_nonzeros * sizeof(double));
+    }
+    *num_nonzeros = total_nonzeros;
+    csr_component_free(&converted);
+    return 0;
+}
+
 static int initialize_affine_cones(qp_problem_t *prob,
+                                   int num_scalar_constraints,
+                                   int num_affine_constraints,
                                    int num_affine_cones,
                                    const cone_spec_t *affine_cones,
                                    const double *affine_cone_offset)
 {
     if (cone_blocks_init_from_specs(
-            &prob->affine_cones, num_affine_cones, affine_cones, prob->num_constraints, false, "affine") != 0)
+            &prob->affine_cones, num_affine_cones, affine_cones, num_affine_constraints, false, "affine") != 0)
         return -1;
 
+    int covered_rows = 0;
     for (int cone = 0; cone < num_affine_cones; ++cone)
     {
-        int start = prob->affine_cones.start_idx[cone];
         int length = cone_block_length(&prob->affine_cones, cone);
-        for (int row = start; row < start + length; ++row)
-        {
-            if ((isfinite(prob->constraint_lower_bound[row]) && prob->constraint_lower_bound[row] > -1e30) ||
-                (isfinite(prob->constraint_upper_bound[row]) && prob->constraint_upper_bound[row] < 1e30))
-            {
-                fprintf(stderr, "[create_qp_problem] affine cone row %d also has a finite scalar bound.\n", row);
-                return -1;
-            }
-        }
-        if (affine_cone_offset)
-        {
-            memcpy(prob->affine_cone_offset + start, affine_cone_offset + start, (size_t)length * sizeof(double));
-        }
+        covered_rows += length;
+        prob->affine_cones.start_idx[cone] += num_scalar_constraints;
     }
+    if (covered_rows != num_affine_constraints)
+    {
+        fprintf(stderr,
+                "[create_qp_problem] affine cone blocks cover %d of %d rows of F.\n",
+                covered_rows,
+                num_affine_constraints);
+        return -1;
+    }
+    if (affine_cone_offset && num_affine_constraints > 0)
+        memcpy(prob->affine_cone_offset + num_scalar_constraints,
+               affine_cone_offset,
+               (size_t)num_affine_constraints * sizeof(double));
     return 0;
 }
 
@@ -305,19 +374,27 @@ qp_problem_t *create_qp_problem(const double *objective_c,
                                 const double *objective_constant,
                                 int num_var_cones,
                                 const cone_spec_t *var_cones,
+                                const matrix_desc_t *affine_cone_matrix_desc,
+                                const double *affine_cone_offset,
                                 int num_affine_cones,
-                                const cone_spec_t *affine_cones,
-                                const double *affine_cone_offset)
+                                const cone_spec_t *affine_cones)
 {
     qp_problem_t *prob = (qp_problem_t *)safe_calloc(1, sizeof(qp_problem_t));
     int n = 0;
     int m = 0;
-    if (validate_problem_matrix_shapes(A_desc, Q_desc, R_desc, D_desc, &n, &m) != 0)
+    int p = 0;
+    if (!affine_cone_matrix_desc && (affine_cone_offset || num_affine_cones != 0 || affine_cones))
+    {
+        fprintf(stderr, "[create_qp_problem] affine cone data requires affine_cone_matrix_desc.\n");
+        goto failure;
+    }
+    if (validate_problem_matrix_shapes(A_desc, affine_cone_matrix_desc, Q_desc, R_desc, D_desc, &n, &m, &p) != 0)
         goto failure;
 
     prob->num_variables = n;
-    prob->num_constraints = m;
-    prob->affine_cone_offset = m > 0 ? (double *)safe_calloc((size_t)m, sizeof(double)) : NULL;
+    prob->num_constraints = m + p;
+    prob->affine_cone_offset =
+        prob->num_constraints > 0 ? (double *)safe_calloc((size_t)prob->num_constraints, sizeof(double)) : NULL;
 
     prob->constraint_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
     if (A_desc)
@@ -327,6 +404,9 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     }
     else
         initialize_empty_csr(prob->constraint_matrix, m, &prob->constraint_matrix_num_nonzeros);
+    if (append_matrix_desc_to_csr(
+            affine_cone_matrix_desc, "F", m, prob->constraint_matrix, &prob->constraint_matrix_num_nonzeros) != 0)
+        goto failure;
 
     prob->objective_sparse_matrix = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
     if (Q_desc)
@@ -373,10 +453,14 @@ qp_problem_t *create_qp_problem(const double *objective_c,
     fill_or_copy(&prob->objective_vector, prob->num_variables, objective_c, 0.0);
     fill_or_copy(&prob->variable_lower_bound, prob->num_variables, var_lb, -INFINITY);
     fill_or_copy(&prob->variable_upper_bound, prob->num_variables, var_ub, INFINITY);
-    fill_or_copy(&prob->constraint_lower_bound, prob->num_constraints, con_lb, -INFINITY);
-    fill_or_copy(&prob->constraint_upper_bound, prob->num_constraints, con_ub, INFINITY);
+    fill_or_copy(&prob->constraint_lower_bound, prob->num_constraints, NULL, -INFINITY);
+    fill_or_copy(&prob->constraint_upper_bound, prob->num_constraints, NULL, INFINITY);
+    if (m > 0 && con_lb)
+        memcpy(prob->constraint_lower_bound, con_lb, (size_t)m * sizeof(double));
+    if (m > 0 && con_ub)
+        memcpy(prob->constraint_upper_bound, con_ub, (size_t)m * sizeof(double));
 
-    if (initialize_affine_cones(prob, num_affine_cones, affine_cones, affine_cone_offset) != 0)
+    if (initialize_affine_cones(prob, m, p, num_affine_cones, affine_cones, affine_cone_offset) != 0)
         goto failure;
     if (cone_blocks_init_from_specs(&prob->cones, num_var_cones, var_cones, n, true, "variable") != 0)
         goto failure;

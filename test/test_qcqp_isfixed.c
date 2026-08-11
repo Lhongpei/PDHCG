@@ -90,7 +90,8 @@ static qp_problem_t *build_linear_pin(void)
     double con_lb[] = {0.0, 0.0, 1.0, 1.0};
     double con_ub[] = {0.0, 0.0, 1.0, 1.0};
     cone_spec_t cones[] = {{.type = CONE_ROTATED_SOC, .start_idx = 2, .v_dim = 2, .is_fixed = NULL}};
-    return create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+    return create_qp_problem(
+        c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
 }
 
 /* Version B: vars (x, y, v1, v2, s, t); pin s=1, t=1 via is_fixed cone slots.
@@ -134,7 +135,7 @@ static qp_problem_t *build_isfixed_pin(void)
     static const char fix_pattern[4] = {0, 0, 1, 1};
     cone_spec_t cones[] = {{.type = CONE_ROTATED_SOC, .start_idx = 2, .v_dim = 2, .is_fixed = fix_pattern}};
     qp_problem_t *prob =
-        create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+        create_qp_problem(c, &Q, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
     if (!prob)
         return NULL;
     /* primal_start must carry the pin values: s=1 at slot 4, t=1 at slot 5. */

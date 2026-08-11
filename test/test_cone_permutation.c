@@ -18,7 +18,8 @@
 int main(void)
 {
     const int n = 16;
-    static const int row_ptr[] = {0, 0, 0, 0, 0, 0, 0, 0};
+    static const int scalar_row_ptr[] = {0, 0};
+    static const int affine_row_ptr[] = {0, 0, 0, 0, 0, 0, 0};
     static const int col_ind[] = {0};
     static const double values[] = {0.0};
     double objective[n];
@@ -26,16 +27,24 @@ int main(void)
         objective[i] = (double)i;
 
     matrix_desc_t A = {0};
-    A.m = 7;
+    A.m = 1;
     A.n = n;
     A.fmt = matrix_csr;
     A.data.csr.nnz = 0;
-    A.data.csr.row_ptr = row_ptr;
+    A.data.csr.row_ptr = scalar_row_ptr;
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
-    const double constraint_lower[] = {0.0, -INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY};
-    const double constraint_upper[] = {0.0, INFINITY, INFINITY, INFINITY, INFINITY, INFINITY, INFINITY};
-    static const double affine_offset[] = {0.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0};
+    matrix_desc_t F = {0};
+    F.m = 6;
+    F.n = n;
+    F.fmt = matrix_csr;
+    F.data.csr.nnz = 0;
+    F.data.csr.row_ptr = affine_row_ptr;
+    F.data.csr.col_ind = col_ind;
+    F.data.csr.vals = values;
+    const double constraint_lower[] = {0.0};
+    const double constraint_upper[] = {0.0};
+    static const double affine_offset[] = {10.0, 11.0, 12.0, 20.0, 21.0, 22.0};
     const char fixed0[] = {0, 0, 1};
     const char fixed1[] = {1, 0, 0};
     const char fixed2[] = {0, 1, 0};
@@ -47,8 +56,8 @@ int main(void)
         {.type = CONE_ROTATED_SOC, .start_idx = 12, .v_dim = 2, .power_alpha = 0.0, .is_fixed = fixed3},
     };
     const cone_spec_t affine_cones[] = {
-        {.type = CONE_STANDARD_SOC, .start_idx = 1, .v_dim = 1},
-        {.type = CONE_EXPONENTIAL, .start_idx = 4, .v_dim = 1},
+        {.type = CONE_STANDARD_SOC, .start_idx = 0, .v_dim = 1},
+        {.type = CONE_EXPONENTIAL, .start_idx = 3, .v_dim = 1},
     };
 
     qp_problem_t *problem = create_qp_problem(objective,
@@ -63,9 +72,10 @@ int main(void)
                                               NULL,
                                               4,
                                               cones,
+                                              &F,
+                                              affine_offset,
                                               2,
-                                              affine_cones,
-                                              affine_offset);
+                                              affine_cones);
     CHECK(problem != NULL);
 
     int permutation[n];
@@ -143,47 +153,60 @@ int main(void)
                                 NULL,
                                 2,
                                 overlapping,
-                                0,
                                 NULL,
+                                NULL,
+                                0,
                                 NULL);
     CHECK(problem == NULL);
 
     {
-        static const int combined_row_ptr[] = {0, 1, 2, 2, 2, 3, 3, 3};
-        static const int combined_col_ind[] = {0, 0, 0};
-        static const double combined_values[] = {1.0, 1.0, 1.0};
-        static const double combined_lower[] = {0.0, -INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY};
-        static const double combined_upper[] = {INFINITY, INFINITY, INFINITY, INFINITY, INFINITY, INFINITY, INFINITY};
-        static const double affine_offset[] = {0.0, 0.0, 1.0, 2.0, 0.0, 1.0, 3.0};
+        static const int scalar_row_ptr[] = {0, 1};
+        static const int affine_row_ptr[] = {0, 1, 1, 1, 2, 2, 2};
+        static const int scalar_col_ind[] = {0};
+        static const int affine_col_ind[] = {0, 0};
+        static const double scalar_values[] = {1.0};
+        static const double affine_values[] = {1.0, 1.0};
+        static const double scalar_lower[] = {0.0};
+        static const double scalar_upper[] = {INFINITY};
+        static const double affine_offset[] = {0.0, 1.0, 2.0, 0.0, 1.0, 3.0};
         static const cone_spec_t row_cones[] = {
-            {.type = CONE_EXPONENTIAL, .start_idx = 1, .v_dim = 1},
-            {.type = CONE_EXPONENTIAL, .start_idx = 4, .v_dim = 1},
+            {.type = CONE_EXPONENTIAL, .start_idx = 0, .v_dim = 1},
+            {.type = CONE_EXPONENTIAL, .start_idx = 3, .v_dim = 1},
         };
         double linear_objective = -1.0;
-        matrix_desc_t combined_matrix = {0};
-        combined_matrix.m = 7;
-        combined_matrix.n = 1;
-        combined_matrix.fmt = matrix_csr;
-        combined_matrix.data.csr.nnz = 3;
-        combined_matrix.data.csr.row_ptr = combined_row_ptr;
-        combined_matrix.data.csr.col_ind = combined_col_ind;
-        combined_matrix.data.csr.vals = combined_values;
+        matrix_desc_t scalar_matrix = {0};
+        scalar_matrix.m = 1;
+        scalar_matrix.n = 1;
+        scalar_matrix.fmt = matrix_csr;
+        scalar_matrix.data.csr.nnz = 1;
+        scalar_matrix.data.csr.row_ptr = scalar_row_ptr;
+        scalar_matrix.data.csr.col_ind = scalar_col_ind;
+        scalar_matrix.data.csr.vals = scalar_values;
+        matrix_desc_t affine_matrix = {0};
+        affine_matrix.m = 6;
+        affine_matrix.n = 1;
+        affine_matrix.fmt = matrix_csr;
+        affine_matrix.data.csr.nnz = 2;
+        affine_matrix.data.csr.row_ptr = affine_row_ptr;
+        affine_matrix.data.csr.col_ind = affine_col_ind;
+        affine_matrix.data.csr.vals = affine_values;
 
         problem = create_qp_problem(&linear_objective,
                                     NULL,
                                     NULL,
                                     NULL,
-                                    &combined_matrix,
-                                    combined_lower,
-                                    combined_upper,
+                                    &scalar_matrix,
+                                    scalar_lower,
+                                    scalar_upper,
                                     NULL,
                                     NULL,
                                     NULL,
                                     0,
                                     NULL,
+                                    &affine_matrix,
+                                    affine_offset,
                                     2,
-                                    row_cones,
-                                    affine_offset);
+                                    row_cones);
         CHECK(problem != NULL);
         int interleaved_rows[] = {1, 2, 3, 0, 4, 5, 6};
         int identity_column[] = {0};

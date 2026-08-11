@@ -6,7 +6,7 @@ callers.
 
 ## C API
 
-`create_qp_problem` has five new trailing arguments:
+`create_qp_problem` has six new trailing arguments:
 
 ```c
 qp_problem_t *create_qp_problem(
@@ -22,23 +22,25 @@ qp_problem_t *create_qp_problem(
     const double *objective_constant,
     int num_var_cones,
     const cone_spec_t *var_cones,
+    const matrix_desc_t *affine_cone_matrix_desc,
+    const double *affine_cone_offset,
     int num_affine_cones,
-    const cone_spec_t *affine_cones,
-    const double *affine_cone_offset);
+    const cone_spec_t *affine_cones);
 ```
 
-An existing QP with no cones only needs the five neutral arguments appended:
+An existing QP with no cones only needs the six neutral arguments appended:
 
 ```c
 qp_problem_t *problem = create_qp_problem(
     c, Q, R, D, A, con_lb, con_ub, var_lb, var_ub, objective_constant,
-    0, NULL, 0, NULL, NULL);
+    0, NULL, NULL, NULL, 0, NULL);
 ```
 
 For conic models, use `cone_spec_t` arrays as described in the
 [C API overview](c/overview.md). Variable-cone indices refer to variables;
-affine-cone indices refer to rows of `A`, and `affine_cone_offset` has one
-entry per row of `A`.
+affine-cone indices refer to rows of the separately supplied
+`affine_cone_matrix_desc` (`F`), and `affine_cone_offset` has one entry per row
+of `F`. Affine cone blocks must cover every row of `F`.
 
 `pdhcg_postsolve` now returns nonzero after a complete primal-dual recovery and
 zero when postsolve fails or full dual recovery is unavailable:

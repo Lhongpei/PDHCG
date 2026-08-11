@@ -244,8 +244,9 @@ int main(int argc, char **argv)
                                               &objective_constant,
                                               effective_num_cones,
                                               specs,
-                                              0,
                                               NULL,
+                                              NULL,
+                                              0,
                                               NULL);
     if (!problem)
     {

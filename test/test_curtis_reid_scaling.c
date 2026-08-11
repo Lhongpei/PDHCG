@@ -52,7 +52,7 @@ static qp_problem_t *make_plain_problem(void)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
     return create_qp_problem(
-        objective, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 0, NULL, 0, NULL, NULL);
+        objective, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 0, NULL, NULL, NULL, 0, NULL);
 }
 
 static qp_problem_t *make_cone_problem(void)
@@ -79,7 +79,7 @@ static qp_problem_t *make_cone_problem(void)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
     return create_qp_problem(
-        objective, NULL, NULL, NULL, &A, con_lb, con_ub, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
+        objective, NULL, NULL, NULL, &A, con_lb, con_ub, NULL, NULL, NULL, 1, &cone, NULL, NULL, 0, NULL);
 }
 
 static pdhg_parameters_t curtis_reid_only_parameters(void)
@@ -248,12 +248,12 @@ static qp_problem_t *make_phase_taper_problem(int length, int affine)
     if (!affine)
     {
         problem = create_qp_problem(
-            objective, NULL, NULL, NULL, &diagonal, NULL, NULL, NULL, NULL, NULL, 1, &cone, 0, NULL, NULL);
+            objective, NULL, NULL, NULL, &diagonal, NULL, NULL, NULL, NULL, NULL, 1, &cone, NULL, NULL, 0, NULL);
     }
     else
     {
         problem = create_qp_problem(
-            objective, NULL, NULL, NULL, &diagonal, NULL, NULL, NULL, NULL, NULL, 0, NULL, 1, &cone, NULL);
+            objective, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, &diagonal, NULL, 1, &cone);
     }
 
     free(row_ptr);

@@ -127,7 +127,8 @@ typedef struct {
 ```
 
 Input descriptor for a single cone block. In `var_cones`, `start_idx` indexes
-the variable vector; in `affine_cones`, it indexes the global rows of `A`. The
+the variable vector; in `affine_cones`, it indexes rows of the separately
+supplied affine matrix `F`. The
 slot count is `v_dim + 2` for SOC/RSOC and `3` for
 exponential/power cones. Power cones require `power_alpha` in `(0,1)`.
 Variable cones may provide an `is_fixed` array of `slot_count` bytes. Every
@@ -196,9 +197,12 @@ typedef struct {
 } qp_problem_t;
 ```
 
-Constraints are represented as `A x + affine_cone_offset` in a product set.
-Rows outside `affine_cones` use their scalar lower and upper bounds; cone block
-`start_idx` values are global constraint-row indices.
+`create_qp_problem` canonicalizes the public `A` and `F` inputs into one
+internal constraint matrix `[A; F]`. Scalar rows come first and retain their
+lower and upper bounds. Affine rows follow with infinite scalar bounds;
+`affine_cone_offset` is zero on scalar rows, and stored affine cone `start_idx`
+values are global internal row indices. Consequently, `dual_start` and returned
+dual solutions have length `rows(A) + rows(F)` and order `[dual_A, dual_F]`.
 
 ## Restart Parameters
 

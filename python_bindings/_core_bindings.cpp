@@ -717,30 +717,7 @@ static py::dict solve_once(py::object Q,
     const matrix_desc_t *q_desc_ptr = Q.is_none() ? nullptr : &view_q.desc;
     const matrix_desc_t *r_desc_ptr = R.is_none() ? nullptr : &view_r.desc;
     const matrix_desc_t *a_desc_ptr = A.is_none() ? nullptr : &view_a.desc;
-    PyMatrixView combined_constraint_view;
-    if (!affine_F.is_none())
-    {
-        py::object combined_constraints;
-        if (A.is_none())
-        {
-            combined_constraints = affine_F;
-        }
-        else if (py::hasattr(A, "format") || py::hasattr(affine_F, "format"))
-        {
-            py::list matrices;
-            matrices.append(A);
-            matrices.append(affine_F);
-            combined_constraints =
-                py::module_::import("scipy.sparse").attr("vstack")(matrices, py::arg("format") = "csr");
-        }
-        else
-        {
-            combined_constraints =
-                py::module_::import("numpy").attr("concatenate")(py::make_tuple(A, affine_F), py::arg("axis") = 0);
-        }
-        combined_constraint_view = get_matrix_from_python(combined_constraints, zero_tolerance);
-        a_desc_ptr = &combined_constraint_view.desc;
-    }
+    const matrix_desc_t *f_desc_ptr = affine_F.is_none() ? nullptr : &view_f.desc;
 
     PyMatrixView view_d;
     std::vector<int32_t> d_diag_rp, d_diag_ci;
@@ -823,49 +800,22 @@ static py::dict solve_once(py::object Q,
         affine_g_ptr = get_arr_ptr_f64_or_null(affine_g, "affine_g", view_f.keep);
     }
 
-    int total_constraint_rows = m + num_affine_rows;
-    std::vector<double> combined_lower;
-    std::vector<double> combined_upper;
-    std::vector<double> combined_affine_offset;
-    const double *combined_lower_ptr = l_ptr;
-    const double *combined_upper_ptr = u_ptr;
-    const double *combined_affine_offset_ptr = nullptr;
-    if (num_affine_rows > 0)
-    {
-        combined_lower.assign((size_t)total_constraint_rows, -std::numeric_limits<double>::infinity());
-        combined_upper.assign((size_t)total_constraint_rows, std::numeric_limits<double>::infinity());
-        if (l_ptr)
-            std::copy(l_ptr, l_ptr + m, combined_lower.begin());
-        if (u_ptr)
-            std::copy(u_ptr, u_ptr + m, combined_upper.begin());
-        combined_lower_ptr = combined_lower.data();
-        combined_upper_ptr = combined_upper.data();
-
-        for (cone_spec_t &spec : affine_cones_vec)
-            spec.start_idx += m;
-        if (affine_g_ptr)
-        {
-            combined_affine_offset.assign((size_t)total_constraint_rows, 0.0);
-            std::copy(affine_g_ptr, affine_g_ptr + num_affine_rows, combined_affine_offset.begin() + m);
-            combined_affine_offset_ptr = combined_affine_offset.data();
-        }
-    }
-
     qp_problem_t *prob = create_qp_problem(c_ptr,
                                            q_desc_ptr,
                                            r_desc_ptr,
                                            d_desc_ptr,
                                            a_desc_ptr,
-                                           combined_lower_ptr,
-                                           combined_upper_ptr,
+                                           l_ptr,
+                                           u_ptr,
                                            lb_ptr,
                                            ub_ptr,
                                            c0_ptr,
                                            (int)cones_vec.size(),
                                            cones_vec.empty() ? nullptr : cones_vec.data(),
+                                           f_desc_ptr,
+                                           affine_g_ptr,
                                            (int)affine_cones_vec.size(),
-                                           affine_cones_vec.empty() ? nullptr : affine_cones_vec.data(),
-                                           combined_affine_offset_ptr);
+                                           affine_cones_vec.empty() ? nullptr : affine_cones_vec.data());
     if (!prob)
     {
         throw std::runtime_error("create_qp_problem failed.");

@@ -18,8 +18,22 @@ static qp_problem_t *make_one_variable_problem(double objective,
     Q.fmt = matrix_csr;
     Q.data.csr.row_ptr = q_row_ptr;
     int num_affine_cones = affine_cone ? 1 : 0;
-    return create_qp_problem(
-        &objective, &Q, NULL, NULL, A, NULL, NULL, NULL, NULL, NULL, 0, NULL, num_affine_cones, affine_cone, offset);
+    return create_qp_problem(&objective,
+                             &Q,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             0,
+                             NULL,
+                             A,
+                             offset,
+                             num_affine_cones,
+                             affine_cone);
 }
 
 static qp_problem_t *make_one_variable_quadratic_problem(
@@ -37,8 +51,22 @@ static qp_problem_t *make_one_variable_quadratic_problem(
     Q.data.csr.col_ind = q_col_ind;
     Q.data.csr.vals = &quadratic;
     int num_affine_cones = affine_cone ? 1 : 0;
-    return create_qp_problem(
-        &objective, &Q, NULL, NULL, A, NULL, NULL, NULL, NULL, NULL, 0, NULL, num_affine_cones, affine_cone, offset);
+    return create_qp_problem(&objective,
+                             &Q,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL,
+                             0,
+                             NULL,
+                             A,
+                             offset,
+                             num_affine_cones,
+                             affine_cone);
 }
 
 static pdhcg_result_t *solve_tiny(qp_problem_t *problem, norm_type_t norm, bool use_cone_preserving_scaling)
@@ -199,7 +227,7 @@ static int run_scalar_bound_infeasible(void)
     A.data.csr.row_ptr = row_ptr;
 
     qp_problem_t *problem = create_qp_problem(
-        objective, NULL, NULL, NULL, &A, equality, equality, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL);
+        objective, NULL, NULL, NULL, &A, equality, equality, NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL);
     if (!problem)
         return 0;
 

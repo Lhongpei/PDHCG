@@ -32,7 +32,7 @@ int main(void)
 
     fprintf(stderr, "(expecting error on next line)\n");
     qp_problem_t *prob =
-        create_qp_problem(c, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, 0, NULL, NULL);
+        create_qp_problem(c, NULL, NULL, NULL, &A, con_lb, con_ub, var_lb, var_ub, NULL, 1, cones, NULL, NULL, 0, NULL);
     int pass = (prob == NULL);
     if (prob)
         qp_problem_free(prob);
