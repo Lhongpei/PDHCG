@@ -58,22 +58,9 @@ dkms.conf
 # ignored files
 build*/
 test/*
-!test/test_prefos_integration.c
-!test/test_affine_cones.c
-!test/test_cbf_affine_cones.c
-!test/test_cbf_fixed_slots.c
-!test/test_curtis_reid_scaling.c
-!test/test_cone_permutation.c
-!test/test_distributed_conic.c
-!test/test_initial_box_projection.c
-!test/test_large_rsoc_projection.cu
-!test/test_large_soc_projection.cu
-!test/test_partition_utils.c
-!test/test_problem_validation.c
-!test/test_conic_kkt_termination.c
-!test/test_power_cone.c
-!test/test_power_cone_projection.cu
-!test/test_fixed_cone_sections.cu
+!test/*.c
+!test/*.cu
+!test/*.h
 /.vscode
 /.venv
 /_b
@@ -81,4 +68,3 @@ test/*
 *.pyc
 *.tar.gz
 docs/README.md
-build_cu132/*

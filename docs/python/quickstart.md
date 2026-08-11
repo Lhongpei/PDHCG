@@ -83,6 +83,26 @@ model.optimize()
 print(model.Status, model.X)
 ```
 
+## CVXPY
+
+Install the optional integration with `pip install "pdhcg[cvxpy]"`, then
+import the backend once in each process:
+
+```python
+import cvxpy as cp
+import pdhcg.cvxpy_backend  # Registers solver="PDHCG".
+
+x = cp.Variable()
+problem = cp.Problem(cp.Minimize(x), [x >= 1])
+value = problem.solve(solver="PDHCG", eps=1e-6)
+
+print(problem.status, value, x.value)
+```
+
+The backend preserves CVXPY's primal and dual conventions. It supports
+quadratic objectives and Zero, NonNeg, SOC, ExpCone, and PowCone3D
+constraints. PSD and mixed-integer models are not supported.
+
 ## Model Creation
 
 The `Model` class is the core interface for defining quadratic conic problems. The problem formulation is:

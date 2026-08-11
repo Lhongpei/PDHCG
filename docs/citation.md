@@ -6,7 +6,7 @@ If you use PDHCG in your research, please cite the following papers:
 
 ```bibtex
 @misc{li2026pdhcgiienhancedversionpdhcg,
-      title={PDHCG: An Enhanced First-Order Solver for Large-Scale Convex QP},
+      title={PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP},
       author={Hongpei Li and Yicheng Huang and Huikang Liu and Dongdong Ge and Yinyu Ye},
       year={2026},
       eprint={2602.23967},

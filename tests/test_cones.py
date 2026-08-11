@@ -42,7 +42,7 @@ def test_cone_spec_validates_power_and_ambient_ranges() -> None:
 
 
 def test_read_problem_file_returns_columnar_cones() -> None:
-    problem = Path(__file__).parents[1] / "test" / "cbf_q3_smoke.cbf"
+    problem = Path(__file__).parent / "data" / "cbf_q3_smoke.cbf"
     raw = read_problem_file(str(problem))
     cones = ConeSpec.from_columnar(raw["cones"])
 

@@ -26,7 +26,7 @@ cmake -S . -B build
 cmake --build build --clean-first
 ```
 
-This will create the solver binary at `./build/bin/pdhcg`.
+This will create the solver binary at `./build/pdhcg`.
 
 ### Specifying CUDA Compiler
 
@@ -94,7 +94,7 @@ pip install pdhcg
 ### C++ Executable
 
 ```bash
-./build/bin/pdhcg --help
+./build/pdhcg --help
 ```
 
 ### Python Package

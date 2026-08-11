@@ -5,7 +5,7 @@
 
 **PDHCG** is a high-performance, GPU-accelerated implementation of the Primal-Dual Hybrid Gradient (PDHG) algorithm for large-scale convex quadratic and quadratic conic programming.
 
-For a detailed explanation of the methodology, please refer to our papers: [A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) and [PDHCG: An Enhanced First-Order Solver for Large-Scale Convex QP](https://arxiv.org/abs/2602.23967).
+For a detailed explanation of the methodology, please refer to our papers: [A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) and [PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP](https://arxiv.org/abs/2602.23967).
 
 
 ---
@@ -47,7 +47,7 @@ cd PDHCG
 cmake -S . -B build
 cmake --build build --clean-first
 ```
-This will create the solver binary at `./build/bin/pdhcg`.
+This will create the solver binary at `./build/pdhcg`.
 
 If your system has multiple CUDA versions or the default nvcc is outdated (e.g., in `/usr/bin/nvcc`), you should explicitly specify the path to your modern CUDA compiler using the CUDACXX environment variable.
 ```bash
@@ -74,7 +74,7 @@ This requires MPI and NCCL to be installed on your system.
 Run the solver from the command line:
 
 ```bash
-./build/bin/pdhcg <FILE_NAME> <OUTPUT_DIR> [OPTIONS]
+./build/pdhcg <FILE_NAME> <OUTPUT_DIR> [OPTIONS]
 ```
 
 ### Command Line Arguments
@@ -153,10 +153,10 @@ When built with distributed support, the same binary automatically detects wheth
 ```bash
 
 # Multi-GPU on 4 GPUs
-mpirun -n 4 ./build/bin/pdhcg problem.mps ./output
+mpirun -n 4 ./build/pdhcg problem.mps ./output
 
 # Multi-GPU with a custom 2x2 process grid
-mpirun -n 4 ./build/bin/pdhcg problem.mps ./output --grid_size 2,2
+mpirun -n 4 ./build/pdhcg problem.mps ./output --grid_size 2,2
 ```
 
 ---
@@ -225,11 +225,32 @@ if m.X is not None:
     print(f"Primal Solution: {m.X}")
 ```
 
+### CVXPY
+
+Install the optional dependency and import the backend once to register PDHCG:
+
+```bash
+pip install "pdhcg[cvxpy]"
+```
+
+```python
+import cvxpy as cp
+import pdhcg.cvxpy_backend  # Registers solver="PDHCG".
+
+x = cp.Variable()
+problem = cp.Problem(cp.Minimize(x), [x >= 1])
+problem.solve(solver="PDHCG", eps=1e-6)
+```
+
+The backend supports quadratic objectives and CVXPY Zero, NonNeg, SOC,
+ExpCone, and PowCone3D constraints. PSD and mixed-integer models are not
+supported.
+
 ## Citation
 If you use this software or method in your research, please cite our paper:
 ```
 @misc{li2026pdhcgiienhancedversionpdhcg,
-      title={PDHCG: An Enhanced First-Order Solver for Large-Scale Convex QP},
+      title={PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP},
       author={Hongpei Li and Yicheng Huang and Huikang Liu and Dongdong Ge and Yinyu Ye},
       year={2026},
       eprint={2602.23967},

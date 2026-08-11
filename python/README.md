@@ -131,6 +131,28 @@ The same object can be passed as `solve_once(..., cones=cones)`. See
 for a runnable example and [docs/python/model.md](../docs/python/model.md#cone-constraints)
 for all fields and affine-cone input.
 
+## CVXPY
+
+Install PDHCG with the optional CVXPY dependency:
+
+```bash
+pip install "pdhcg[cvxpy]"
+```
+
+Import the backend once before solving:
+
+```python
+import cvxpy as cp
+import pdhcg.cvxpy_backend  # Registers solver="PDHCG".
+
+x = cp.Variable()
+problem = cp.Problem(cp.Minimize(x), [x >= 1])
+problem.solve(solver="PDHCG", eps=1e-6)
+```
+
+Quadratic objectives and Zero, NonNeg, SOC, ExpCone, and PowCone3D
+constraints are supported. PSD and mixed-integer models are not supported.
+
 ## Modeling
 
 The `Model` class represents a quadratic conic programming problem of the form:

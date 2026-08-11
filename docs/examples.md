@@ -123,20 +123,20 @@ m.optimize()
 ### Reading from MPS File
 
 ```bash
-./build/bin/pdhcg problem.mps ./output --time_limit 3600 --eps_opt 1e-6
+./build/pdhcg problem.mps ./output --time_limit 3600 --eps_opt 1e-6
 ```
 
 ### Command Line Options
 
 ```bash
 # Silent mode, tight tolerance
-./build/bin/pdhcg problem.mps ./output -v 0 --eps_opt 1e-8 --eps_feas 1e-8
+./build/pdhcg problem.mps ./output -v 0 --eps_opt 1e-8 --eps_feas 1e-8
 
 # With iteration limit
-./build/bin/pdhcg problem.mps ./output --iter_limit 100000
+./build/pdhcg problem.mps ./output --iter_limit 100000
 
 # Disable Pock-Chambolle rescaling
-./build/bin/pdhcg problem.mps ./output --no_pock_chambolle
+./build/pdhcg problem.mps ./output --no_pock_chambolle
 ```
 
 ## Multi-GPU Distributed Examples
@@ -147,7 +147,7 @@ These examples require the solver to be built with `-DPDHCG_COMPILE_DISTRIBUTED=
 
 ```bash
 # Run on 4 GPUs
-mpirun -n 4 ./build/bin/pdhcg problem.mps ./output
+mpirun -n 4 ./build/pdhcg problem.mps ./output
 ```
 
 ### Custom Process Grid
@@ -156,20 +156,20 @@ By default, the solver attempts to infer a square-ish 2D process grid. You can e
 
 ```bash
 # Use a 2x4 grid (8 GPUs total)
-mpirun -n 8 ./build/bin/pdhcg problem.mps ./output --grid_size 2,4
+mpirun -n 8 ./build/pdhcg problem.mps ./output --grid_size 2,4
 ```
 
 ### Partition and Permutation Options
 
 ```bash
 # Uniform row partitioning with block permutation
-mpirun -n 4 ./build/bin/pdhcg problem.mps ./output \
+mpirun -n 4 ./build/pdhcg problem.mps ./output \
     --partition_method uniform \
     --permute_method block \
     --permute_block_size 512
 
 # Nonzero-balanced partitioning with random permutation
-mpirun -n 4 ./build/bin/pdhcg problem.mps ./output \
+mpirun -n 4 ./build/pdhcg problem.mps ./output \
     --partition_method nnz \
     --permute_method random
 ```

@@ -20,6 +20,7 @@ nav:
     - Functions: c/functions.md
     - Combined Reference: C_API.md
   - Examples: examples.md
+  - Migrating to 0.3: migration.md
   - Citation: citation.md
 
 theme:

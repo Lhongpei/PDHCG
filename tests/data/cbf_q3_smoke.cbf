@@ -1,0 +1,27 @@
+VER
+1
+
+OBJSENSE
+MIN
+
+VAR
+3 1
+Q 3
+
+CON
+2 1
+L= 2
+
+OBJACOORD
+1
+0 1.0
+
+ACOORD
+2
+0 1 1.0
+1 2 1.0
+
+BCOORD
+2
+0 -3.0
+1 -4.0

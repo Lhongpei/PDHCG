@@ -91,3 +91,42 @@ def test_cvxpy_constant_exp_rows_use_equalities_instead_of_fixed_slots() -> None
 
     assert problem.status == cp.OPTIMAL
     assert value == pytest.approx(1.0, abs=5e-4)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    ("constraint_kind", "expected_dual"),
+    [("nonnegative", 1.0), ("equality", -1.0)],
+)
+def test_cvxpy_linear_dual_signs(constraint_kind: str, expected_dual: float) -> None:
+    cp = pytest.importorskip("cvxpy")
+    import pdhcg.cvxpy_backend  # noqa: F401
+
+    x = cp.Variable()
+    constraint = x >= 1.0 if constraint_kind == "nonnegative" else x == 1.0
+    problem = cp.Problem(cp.Minimize(x), [constraint])
+
+    problem.solve(solver="PDHCG", eps=1e-7, verbose=False)
+
+    assert problem.status == cp.OPTIMAL
+    assert x.value == pytest.approx(1.0, abs=5e-5)
+    assert constraint.dual_value == pytest.approx(expected_dual, abs=5e-5)
+
+
+@pytest.mark.gpu
+def test_cvxpy_soc_dual_sign_and_order() -> None:
+    cp = pytest.importorskip("cvxpy")
+    import pdhcg.cvxpy_backend  # noqa: F401
+
+    u = cp.Variable(2)
+    t = cp.Variable()
+    fixed = u == np.array([3.0, 4.0])
+    cone = cp.SOC(t, u)
+    problem = cp.Problem(cp.Minimize(t), [fixed, cone])
+
+    problem.solve(solver="PDHCG", eps=1e-7, verbose=False)
+
+    assert problem.status == cp.OPTIMAL
+    np.testing.assert_allclose(fixed.dual_value, [-0.6, -0.8], atol=5e-5)
+    np.testing.assert_allclose(cone.dual_value[0], [1.0], atol=5e-5)
+    np.testing.assert_allclose(cone.dual_value[1].ravel(), [-0.6, -0.8], atol=5e-5)

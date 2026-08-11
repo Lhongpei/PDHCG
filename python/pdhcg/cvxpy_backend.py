@@ -288,11 +288,12 @@ class PDHCG(ConicSolver):
 
         # Extract primal for original x (first n entries).
         primal = x_full[:n] if x_full is not None else None
-        # Duals: cvxpy expects eq_dual for Zero-cone rows (first n_zero) and ineq_dual
-        # for the remaining (nonneg + soc + exp + pow) rows. We have y_full over all
-        # n_total_rows rows.
-        eq_dual = y_full[:n_zero] if y_full is not None else None
-        ineq_dual = y_full[n_zero:] if y_full is not None else None
+        # PDHCG's row multiplier convention is the negative of CVXPY's canonical
+        # A*x + s = b convention. Convert once before splitting Zero and inequality
+        # cone duals so equality, NonNeg, SOC, Exp, and Power duals agree with CVXPY.
+        cvxpy_dual = -y_full if y_full is not None else None
+        eq_dual = cvxpy_dual[:n_zero] if cvxpy_dual is not None else None
+        ineq_dual = cvxpy_dual[n_zero:] if cvxpy_dual is not None else None
 
         return {
             "status": status,
