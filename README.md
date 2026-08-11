@@ -1,11 +1,11 @@
 # PDHCG: A First-Order Solver for Quadratic Conic Programming with Multi-GPU Acceleration
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![PyPI version](https://badge.fury.io/py/pdhcg.svg)](https://pypi.org/project/pdhcg/) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://lhongpei.github.io/PDHCG) [![Publication](https://img.shields.io/badge/DOI-10.1287/ijoc.2024.0983-B31B1B.svg)](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) [![arXiv](https://img.shields.io/badge/arXiv-2602.23967-b31b1b.svg)](https://arxiv.org/abs/2602.23967) [![qpsolvers](https://img.shields.io/badge/qpsolvers-supported-brightgreen.svg)](https://github.com/qpsolvers/qpsolvers) [![CVXPY](https://img.shields.io/badge/CVXPY-supported-brightgreen.svg)](https://www.cvxpy.org/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![PyPI version](https://badge.fury.io/py/pdhcg.svg)](https://pypi.org/project/pdhcg/) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://lhongpei.github.io/PDHCG) [![Publication](https://img.shields.io/badge/DOI-10.1287/ijoc.2024.0983-B31B1B.svg)](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) [![arXiv](https://img.shields.io/badge/arXiv-2608.09159-b31b1b.svg)](https://arxiv.org/abs/2608.09159) [![qpsolvers](https://img.shields.io/badge/qpsolvers-supported-brightgreen.svg)](https://github.com/qpsolvers/qpsolvers) [![CVXPY](https://img.shields.io/badge/CVXPY-supported-brightgreen.svg)](https://www.cvxpy.org/)
 
 
 **PDHCG** is a high-performance, GPU-accelerated implementation of the Primal-Dual Hybrid Gradient (PDHG) algorithm for large-scale convex quadratic and quadratic conic programming.
 
-For a detailed explanation of the methodology, please refer to our papers: [A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) and [PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP](https://arxiv.org/abs/2602.23967).
+For a detailed explanation of the methodology, please refer to our papers: [A Restarted Primal-Dual Hybrid Conjugate Gradient Method for Large-Scale Quadratic Programming](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983) and [GPU-Accelerated Conic Quadratic Programming with Local Linear Convergence under Strict Complementarity](https://arxiv.org/abs/2608.09159).
 
 
 ---
@@ -249,14 +249,14 @@ supported.
 ## Citation
 If you use this software or method in your research, please cite our paper:
 ```
-@misc{li2026pdhcgiienhancedversionpdhcg,
-      title={PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP},
+@misc{li2026gpuacceleratedconicquadraticprogramming,
+      title={GPU-Accelerated Conic Quadratic Programming with Local Linear Convergence under Strict Complementarity},
       author={Hongpei Li and Yicheng Huang and Huikang Liu and Dongdong Ge and Yinyu Ye},
       year={2026},
-      eprint={2602.23967},
+      eprint={2608.09159},
       archivePrefix={arXiv},
       primaryClass={math.OC},
-      url={https://arxiv.org/abs/2602.23967},
+      url={https://arxiv.org/abs/2608.09159},
 }
 ```
 

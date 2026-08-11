@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![PyPI version](https://badge.fury.io/py/pdhcg.svg)](https://pypi.org/project/pdhcg/)
 [![Publication](https://img.shields.io/badge/DOI-10.1287/ijoc.2024.0983-B31B1B.svg)](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983)
-[![arXiv](https://img.shields.io/badge/arXiv-2405.16160-b31b1b.svg)](https://arxiv.org/abs/2405.16160)
+[![arXiv](https://img.shields.io/badge/arXiv-2608.09159-b31b1b.svg)](https://arxiv.org/abs/2608.09159)
 
 This is the Python interface to **[`PDHCG`](../README.md)**, a GPU-accelerated first-order solver for large-scale quadratic and quadratic conic programming.
 It provides a high-level, Pythonic API using NumPy and SciPy data structures.

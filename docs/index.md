@@ -50,14 +50,14 @@ Where:
 If you use this software in your research, please cite:
 
 ```bibtex
-@misc{li2026pdhcgiienhancedversionpdhcg,
-      title={PDHCG-II: An Enhanced Version of PDHCG for Large-Scale Convex QP},
+@misc{li2026gpuacceleratedconicquadraticprogramming,
+      title={GPU-Accelerated Conic Quadratic Programming with Local Linear Convergence under Strict Complementarity},
       author={Hongpei Li and Yicheng Huang and Huikang Liu and Dongdong Ge and Yinyu Ye},
       year={2026},
-      eprint={2602.23967},
+      eprint={2608.09159},
       archivePrefix={arXiv},
       primaryClass={math.OC},
-      url={https://arxiv.org/abs/2602.23967},
+      url={https://arxiv.org/abs/2608.09159},
 }
 ```
 
