@@ -119,10 +119,10 @@ With the default cone-preserving scaling,
 PDHCG first computes a positive candidate scale `d_j` for every coordinate,
 then broadcasts one scale over each cone block `B`. Define
 
-\[
+$$
 d_{\max}=\max_{j\in B}d_j,\qquad
 d_{\mathrm{rms}}=\sqrt{\frac{1}{|B|}\sum_{j\in B}d_j^2}.
-\]
+$$
 
 The block scale is
 
@@ -131,11 +131,7 @@ The block scale is
 | Ruiz | `d_max` | `d_rms` |
 | Pock-Chambolle | `d_rms` | `sqrt(d_max * d_rms)` |
 
-This preserves cone geometry while avoiding max-dominated scaling on large
-blocks. The aggregation follows the
-[`:phase_taper` strategy in HPR-SOCP](https://github.com/PolyU-IOR/HPR-SOCP/blob/0cccff309957e41225646a5e5d0bf811fe899daa/src/utils/scaling.jl#L462-L469),
-with its GPU implementation in `src/kernels.jl` at the same commit. PDHCG
-applies the rule to both variable and affine cone blocks. Setting
+PDHCG applies the rule to both variable and affine cone blocks. Setting
 `--no_cone_preserving_scaling` bypasses block aggregation.
 
 **Distributed Options** (only available when built with `-DPDHCG_COMPILE_DISTRIBUTED=ON`):
