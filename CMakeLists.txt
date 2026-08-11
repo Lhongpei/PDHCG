@@ -6,8 +6,8 @@ cmake_minimum_required(VERSION 3.20)
 project(pdhcg LANGUAGES C CXX CUDA)
 
 set(PDHCG_VERSION_MAJOR 0)
-set(PDHCG_VERSION_MINOR 2)
-set(PDHCG_VERSION_PATCH 1)
+set(PDHCG_VERSION_MINOR 3)
+set(PDHCG_VERSION_PATCH 0)
 
 set(PDHCG_VERSION "${PDHCG_VERSION_MAJOR}.${PDHCG_VERSION_MINOR}.${PDHCG_VERSION_PATCH}")
 add_compile_definitions(PDHCG_VERSION="${PDHCG_VERSION}")
@@ -49,8 +49,12 @@ include(CMakeDependentOption)
 
 option(PDHCG_BUILD_STATIC_LIB "Build the PDHCG static library" ON)
 option(PDHCG_BUILD_SHARED_LIB "Build the PDHCG shared library" ON)
-option(PDHCG_COMPILE_PSQP "Download and use PSQP for presolving" OFF)
+option(PDHCG_COMPILE_PREFOS "Download and use PreFOS for presolving" OFF)
+option(PDHCG_PREFOS_ENABLE_CUDA "Enable the PreFOS CUDA propagation backend" ON)
 option(PDHCG_COMPILE_DISTRIBUTED "Enable distributed computing with MPI" OFF)
+option(PDHCG_ABSOLUTE_ONLY_TERMINATION
+       "Use absolute residuals and objective gap for optimal termination"
+       OFF)
 
 # format: cmake_dependent_option(OPTION "docstring" DEFAULT_VALUE "DEPENDENCY_VARIABLE" FORCE_OFF_VALUE)
 cmake_dependent_option(PDHCG_BUILD_PYTHON "Build the PDHCG Python bindings" OFF
@@ -78,40 +82,42 @@ endif()
 include(FetchContent)
 
 # -----------------------------------------------------------------------------
-# PSQP (QP Presolver) Integration
+# PreFOS Presolver Integration
 # -----------------------------------------------------------------------------
-if(PDHCG_COMPILE_PSQP)
-    # Use FetchContent to automatically download PSQP from git repository
-    set(PSQP_VERSION_TAG "main" CACHE STRING "PSQP git tag/branch to use")
+if(PDHCG_COMPILE_PREFOS)
+    set(PREFOS_VERSION_TAG "v0.1.0" CACHE STRING "PreFOS git tag/branch to use")
 
     FetchContent_Declare(
-      psqp
-      GIT_REPOSITORY https://github.com/Lhongpei/PSQP.git
-      GIT_TAG        ${PSQP_VERSION_TAG}
+      prefos
+      GIT_REPOSITORY https://github.com/Lhongpei/PreFOS.git
+      GIT_TAG        ${PREFOS_VERSION_TAG}
     )
 
-    # Check if PSQP has already been populated
-    FetchContent_GetProperties(psqp)
-    if(NOT psqp_POPULATED)
-        message(STATUS "Fetching PSQP from https://github.com/Lhongpei/PSQP.git (${PSQP_VERSION_TAG})")
-        FetchContent_MakeAvailable(psqp)
-        message(STATUS "PSQP populated at: ${psqp_SOURCE_DIR}")
+    # Embed PreFOS statically so installed PDHCG binaries have no additional
+    # presolver runtime dependency. The source override
+    # FETCHCONTENT_SOURCE_DIR_PREFOS remains available for local development.
+    set(_PDHCG_BUILD_SHARED_LIBS_WAS_DEFINED FALSE)
+    if(DEFINED BUILD_SHARED_LIBS)
+        set(_PDHCG_BUILD_SHARED_LIBS_WAS_DEFINED TRUE)
+        set(_PDHCG_SAVED_BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS}")
+    endif()
+    set(BUILD_SHARED_LIBS OFF)
+    set(PREFOS_BUILD_TESTING OFF)
+    set(PREFOS_ENABLE_CUDA ${PDHCG_PREFOS_ENABLE_CUDA})
+    FetchContent_MakeAvailable(prefos)
+    if(_PDHCG_BUILD_SHARED_LIBS_WAS_DEFINED)
+        set(BUILD_SHARED_LIBS "${_PDHCG_SAVED_BUILD_SHARED_LIBS}")
+    else()
+        unset(BUILD_SHARED_LIBS)
     endif()
 
-    # Set up PSQP include directories
-    if(TARGET PSQP)
-        target_include_directories(PSQP INTERFACE
-            $<BUILD_INTERFACE:${psqp_SOURCE_DIR}/include>
-            $<BUILD_INTERFACE:${psqp_SOURCE_DIR}/include/PSQP>
-        )
-        message(STATUS "PSQP target configured successfully")
-        # Add version definition
-        add_compile_definitions(PSQP_VERSION=\"${PSQP_VERSION_TAG}\")
+    if(TARGET PreFOS::PreFOS)
+        message(STATUS "PreFOS ${PREFOS_VERSION_TAG} configured successfully")
     else()
-        message(WARNING "PSQP target not found. Presolving features will be disabled.")
+        message(FATAL_ERROR "PreFOS target was not created")
     endif()
 else()
-    message(STATUS "PSQP integration disabled by user (PDHCG_COMPILE_PSQP=OFF).")
+    message(STATUS "PreFOS integration disabled (PDHCG_COMPILE_PREFOS=OFF).")
 endif()
 
 # -----------------------------------------------------------------------------
@@ -123,6 +129,7 @@ file(GLOB C_SOURCES
 )
 file(GLOB CU_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels/*.cu"
 )
 
 # Exclude cli.c from library builds
@@ -139,6 +146,7 @@ if(PDHCG_COMPILE_DISTRIBUTED)
     file(GLOB DIST_C_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/distributed/*.c")
     file(GLOB DIST_CU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/distributed/*.cu")
     list(REMOVE_ITEM DIST_C_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/distributed/distributed_ops_stub.c")
+    list(REMOVE_ITEM DIST_C_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/distributed/distributed_conic_stub.c")
 
     list(APPEND C_SOURCES ${DIST_C_SOURCES})
     list(APPEND CU_SOURCES ${DIST_CU_SOURCES})
@@ -146,6 +154,7 @@ if(PDHCG_COMPILE_DISTRIBUTED)
     list(APPEND CORE_INCLUDE_DIRS PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/distributed)
 else()
     list(APPEND C_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/distributed/distributed_ops_stub.c")
+    list(APPEND C_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/distributed/distributed_conic_stub.c")
     list(APPEND CORE_INCLUDE_DIRS PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/distributed)
 endif()
 
@@ -157,11 +166,18 @@ set(CORE_LINK_LIBS PUBLIC
   ZLIB::ZLIB
 )
 
-if(PDHCG_COMPILE_PSQP AND TARGET PSQP)
-    list(APPEND CORE_LINK_LIBS PUBLIC PSQP)
-    set(PDHCG_OPTIONAL_DEFINES "PSQP_AVAILABLE")
+if(PDHCG_COMPILE_PREFOS AND TARGET PreFOS::PreFOS)
+    list(APPEND CORE_LINK_LIBS PUBLIC PreFOS::PreFOS)
+    set(PDHCG_OPTIONAL_DEFINES PREFOS_AVAILABLE)
+    if(PDHCG_PREFOS_ENABLE_CUDA)
+        list(APPEND PDHCG_OPTIONAL_DEFINES PDHCG_PREFOS_CUDA_ENABLED)
+    endif()
 else()
     set(PDHCG_OPTIONAL_DEFINES "")
+endif()
+
+if(PDHCG_ABSOLUTE_ONLY_TERMINATION)
+    list(APPEND PDHCG_OPTIONAL_DEFINES PDHCG_ABSOLUTE_ONLY_TERMINATION)
 endif()
 
 if(PDHCG_COMPILE_DISTRIBUTED)
@@ -201,7 +217,7 @@ if(PDHCG_BUILD_STATIC_LIB)
     target_include_directories(pdhcg_core ${CORE_INCLUDE_DIRS})
     target_link_libraries(pdhcg_core ${CORE_LINK_LIBS})
 
-    # Add PSQP compile definition
+    # Add optional dependency compile definitions.
     target_compile_definitions(pdhcg_core PUBLIC ${PDHCG_OPTIONAL_DEFINES})
 
     set_target_properties(pdhcg_core PROPERTIES
@@ -222,7 +238,7 @@ if(PDHCG_BUILD_SHARED_LIB)
     target_include_directories(PDHCG_shared ${CORE_INCLUDE_DIRS})
     target_link_libraries(PDHCG_shared ${CORE_LINK_LIBS})
 
-    # Add PSQP compile definition
+    # Add optional dependency compile definitions.
     target_compile_definitions(PDHCG_shared PUBLIC ${PDHCG_OPTIONAL_DEFINES})
 
     # Shared library must resolve device symbols as it is a final link point
@@ -257,15 +273,11 @@ if(PDHCG_BUILD_CLI)
     # Link CLI to the static core library
     target_link_libraries(PDHCG_cli PRIVATE pdhcg_core)
 
-    # CLI is a final executable, it must resolve device symbols
-    # Set RPATH so that libPSQP.so can be found without LD_LIBRARY_PATH
-    # PSQP is in _deps/psqp-build when using FetchContent
+    # CLI is a final executable, so it must resolve device symbols.
     set_target_properties(PDHCG_cli PROPERTIES
         OUTPUT_NAME "pdhcg"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
-        INSTALL_RPATH "${CMAKE_BINARY_DIR}/_deps/psqp-build"
-        BUILD_WITH_INSTALL_RPATH TRUE
     )
 endif()
 
@@ -282,6 +294,12 @@ if(PDHCG_BUILD_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/test/*.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/test/*.cu"
     )
+    set(PDHCG_TEST_TOOLS
+        export_qcqp_socp
+        inspect_qcqp_exportability
+        qcqp_probe
+        solve_exported_qcqp_pdhcg
+    )
 
     foreach(TEST_SRC ${TEST_SOURCES})
         get_filename_component(TEST_NAME ${TEST_SRC} NAME_WE)
@@ -297,23 +315,22 @@ if(PDHCG_BUILD_TESTS)
           PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/internal
         )
 
-        # Set up RPATH to find PSQP if available
-        if(TARGET PSQP)
-            set(TEST_RPATH "${CMAKE_BINARY_DIR}/_deps/psqp-build")
-        else()
-            set(TEST_RPATH "")
-        endif()
-
         # Tests are final executables, they must resolve device symbols
         set_target_properties(${TEST_NAME} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests"
             CUDA_RESOLVE_DEVICE_SYMBOLS ON
-            INSTALL_RPATH "${TEST_RPATH}"
-            BUILD_WITH_INSTALL_RPATH TRUE
         )
 
-        # Register with CTest
-        add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+        # Input-driven inspection/export tools are built but require explicit
+        # command-line data, so they are not zero-argument CTest cases.
+        if(TEST_NAME STREQUAL "test_distributed_conic" AND PDHCG_COMPILE_DISTRIBUTED)
+            add_test(NAME ${TEST_NAME}
+                     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                             $<TARGET_FILE:${TEST_NAME}> ${MPIEXEC_POSTFLAGS})
+            set_tests_properties(${TEST_NAME} PROPERTIES SKIP_RETURN_CODE 77 PROCESSORS 2 TIMEOUT 90)
+        elseif(NOT TEST_NAME IN_LIST PDHCG_TEST_TOOLS)
+            add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+        endif()
 
     endforeach()
 endif()

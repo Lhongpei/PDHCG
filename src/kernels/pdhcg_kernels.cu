@@ -41,6 +41,73 @@ element_wise_mul_kernel(const double *__restrict__ A, const double *__restrict__
         C[idx] = A[idx] * B[idx];
     }
 }
+
+__global__ void
+vector_sub_kernel(double *__restrict__ direction, const double *__restrict__ a, const double *__restrict__ b, int n)
+{
+    for (int i = blockDim.x * blockIdx.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x)
+    {
+        direction[i] = a[i] - b[i];
+    }
+}
+
+__global__ void
+vector_add_kernel(const double *__restrict__ a, const double *__restrict__ b, double *__restrict__ out, int n)
+{
+    for (int i = blockDim.x * blockIdx.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x)
+    {
+        out[i] = a[i] + b[i];
+    }
+}
+
+__global__ void project_primal_onto_bounds_kernel(double *__restrict__ primal_solution,
+                                                  const double *__restrict__ variable_lower_bound,
+                                                  const double *__restrict__ variable_upper_bound,
+                                                  int num_variables)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_variables)
+    {
+        primal_solution[i] = fmax(variable_lower_bound[i], fmin(primal_solution[i], variable_upper_bound[i]));
+    }
+}
+
+__global__ void prepare_projected_gradient_point_kernel(double *__restrict__ projected_point,
+                                                        const double *__restrict__ primal_solution,
+                                                        const double *__restrict__ effective_objective,
+                                                        const double *__restrict__ dual_product,
+                                                        const double *__restrict__ variable_lower_bound,
+                                                        const double *__restrict__ variable_upper_bound,
+                                                        double step_size,
+                                                        int num_variables)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_variables)
+    {
+        double gradient = effective_objective[i] - dual_product[i];
+        double point = primal_solution[i] - step_size * gradient;
+        projected_point[i] = fmax(variable_lower_bound[i], fmin(point, variable_upper_bound[i]));
+    }
+}
+
+__global__ void augment_projected_gradient_residual_kernel(double *__restrict__ dual_residual,
+                                                           const double *__restrict__ primal_solution,
+                                                           const double *__restrict__ projected_point,
+                                                           const double *__restrict__ variable_rescaling,
+                                                           double step_size,
+                                                           int num_variables)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_variables)
+    {
+        double residual = (primal_solution[i] - projected_point[i]) / step_size * variable_rescaling[i];
+        if (!isfinite(residual))
+            residual = copysign(INFINITY, residual);
+        if (fabs(residual) > fabs(dual_residual[i]))
+            dual_residual[i] = residual;
+    }
+}
+
 __global__ void compute_lp_next_pdhg_primal_solution_kernel(const double *current_primal,
                                                             double *reflected_primal,
                                                             const double *dual_product,
@@ -127,20 +194,30 @@ __global__ void compute_diagonal_q_next_pdhg_primal_solution_kernel(const double
     }
 }
 
+__device__ static inline double
+next_constraint_dual(double current_dual, double primal_value, double lower_bound, double upper_bound, double step_size)
+{
+    double projected_value = fmax(lower_bound, fmin(primal_value - current_dual / step_size, upper_bound));
+    return current_dual - step_size * primal_value + step_size * projected_value;
+}
+
 __global__ void compute_next_pdhg_dual_solution_kernel(const double *current_dual,
                                                        double *reflected_dual,
                                                        const double *primal_product,
-                                                       const double *const_lb,
-                                                       const double *const_ub,
+                                                       const double *affine_cone_offset,
+                                                       const double *constraint_lower_bound,
+                                                       const double *constraint_upper_bound,
                                                        int n,
                                                        double step_size)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n)
     {
-        double temp = current_dual[i] / step_size - primal_product[i];
-        double temp_proj = fmax(-const_ub[i], fmin(temp, -const_lb[i]));
-        reflected_dual[i] = 2.0 * (temp - temp_proj) * step_size - current_dual[i];
+        double current = current_dual[i];
+        double value = primal_product[i] + affine_cone_offset[i];
+        double next =
+            next_constraint_dual(current, value, constraint_lower_bound[i], constraint_upper_bound[i], step_size);
+        reflected_dual[i] = 2.0 * next - current;
     }
 }
 
@@ -148,18 +225,58 @@ __global__ void compute_next_pdhg_dual_solution_major_kernel(const double *curre
                                                              double *pdhg_dual,
                                                              double *reflected_dual,
                                                              const double *primal_product,
-                                                             const double *const_lb,
-                                                             const double *const_ub,
+                                                             const double *affine_cone_offset,
+                                                             const double *constraint_lower_bound,
+                                                             const double *constraint_upper_bound,
                                                              int n,
                                                              double step_size)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n)
     {
-        double temp = current_dual[i] / step_size - primal_product[i];
-        double temp_proj = fmax(-const_ub[i], fmin(temp, -const_lb[i]));
-        pdhg_dual[i] = (temp - temp_proj) * step_size;
-        reflected_dual[i] = 2.0 * pdhg_dual[i] - current_dual[i];
+        double current = current_dual[i];
+        double value = primal_product[i] + affine_cone_offset[i];
+        double next =
+            next_constraint_dual(current, value, constraint_lower_bound[i], constraint_upper_bound[i], step_size);
+        pdhg_dual[i] = next;
+        reflected_dual[i] = 2.0 * next - current;
+    }
+}
+
+__global__ void prepare_constraint_dual_update_kernel(const double *current_dual,
+                                                      const double *primal_product,
+                                                      const double *affine_cone_offset,
+                                                      const double *constraint_lower_bound,
+                                                      const double *constraint_upper_bound,
+                                                      double *projected_constraint_value,
+                                                      int n,
+                                                      double step_size)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        double value = primal_product[i] + affine_cone_offset[i] - current_dual[i] / step_size;
+        projected_constraint_value[i] = fmax(constraint_lower_bound[i], fmin(value, constraint_upper_bound[i]));
+    }
+}
+
+__global__ void finish_constraint_dual_update_kernel(const double *current_dual,
+                                                     const double *primal_product,
+                                                     const double *affine_cone_offset,
+                                                     const double *projected_constraint_value,
+                                                     double *pdhg_dual,
+                                                     double *reflected_dual,
+                                                     int n,
+                                                     double step_size)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        double value = primal_product[i] + affine_cone_offset[i];
+        double next_dual = current_dual[i] - step_size * value + step_size * projected_constraint_value[i];
+        if (pdhg_dual)
+            pdhg_dual[i] = next_dual;
+        reflected_dual[i] = 2.0 * next_dual - current_dual[i];
     }
 }
 
@@ -520,6 +637,7 @@ __global__ void primal_bb_update_direction_kernel_precond(double *pdhg_primal_so
 
 __global__ void compute_lp_residual_kernel(double *primal_residual,
                                            const double *primal_product,
+                                           const double *affine_cone_offset,
                                            const double *constraint_lower_bound,
                                            const double *constraint_upper_bound,
                                            const double *dual_solution,
@@ -529,9 +647,11 @@ __global__ void compute_lp_residual_kernel(double *primal_residual,
                                            const double *objective_vector,
                                            const double *constraint_rescaling,
                                            const double *variable_rescaling,
+                                           double *affine_dual_membership,
                                            double *dual_obj_contribution,
                                            const double *const_lb_finite,
                                            const double *const_ub_finite,
+                                           bool defer_constraint_projection,
                                            int num_constraints,
                                            int num_variables)
 {
@@ -539,11 +659,20 @@ __global__ void compute_lp_residual_kernel(double *primal_residual,
 
     if (i < num_constraints)
     {
-        double clamped_val = fmax(constraint_lower_bound[i], fmin(primal_product[i], constraint_upper_bound[i]));
-        primal_residual[i] = (primal_product[i] - clamped_val) * constraint_rescaling[i];
+        double value = primal_product[i] + affine_cone_offset[i];
+        double projected_value = fmax(constraint_lower_bound[i], fmin(value, constraint_upper_bound[i]));
+        if (defer_constraint_projection)
+        {
+            primal_residual[i] = projected_value;
+            affine_dual_membership[i] = 0.0;
+        }
+        else
+        {
+            primal_residual[i] = (value - projected_value) * constraint_rescaling[i];
+        }
 
-        dual_obj_contribution[i] =
-            fmax(dual_solution[i], 0.0) * const_lb_finite[i] + fmin(dual_solution[i], 0.0) * const_ub_finite[i];
+        dual_obj_contribution[i] = fmax(dual_solution[i], 0.0) * const_lb_finite[i] +
+            fmin(dual_solution[i], 0.0) * const_ub_finite[i] - affine_cone_offset[i] * dual_solution[i];
     }
     else if (i < num_constraints + num_variables)
     {
@@ -554,6 +683,7 @@ __global__ void compute_lp_residual_kernel(double *primal_residual,
 
 __global__ void compute_qp_residual_kernel(double *primal_residual,
                                            const double *primal_product,
+                                           const double *affine_cone_offset,
                                            const double *primal_obj_product,
                                            const double *primal_solution,
                                            const double *constraint_lower_bound,
@@ -567,10 +697,12 @@ __global__ void compute_qp_residual_kernel(double *primal_residual,
                                            const double *objective_vector,
                                            const double *constraint_rescaling,
                                            const double *variable_rescaling,
+                                           double *affine_dual_membership,
                                            double *dual_obj_contribution,
                                            const double *const_lb_finite,
                                            const double *const_ub_finite,
                                            const double step_size,
+                                           bool defer_constraint_projection,
                                            int num_constraints,
                                            int num_variables)
 {
@@ -578,11 +710,20 @@ __global__ void compute_qp_residual_kernel(double *primal_residual,
 
     if (i < num_constraints)
     {
-        double clamped_val = fmax(constraint_lower_bound[i], fmin(primal_product[i], constraint_upper_bound[i]));
-        primal_residual[i] = (primal_product[i] - clamped_val) * constraint_rescaling[i];
+        double value = primal_product[i] + affine_cone_offset[i];
+        double projected_value = fmax(constraint_lower_bound[i], fmin(value, constraint_upper_bound[i]));
+        if (defer_constraint_projection)
+        {
+            primal_residual[i] = projected_value;
+            affine_dual_membership[i] = 0.0;
+        }
+        else
+        {
+            primal_residual[i] = (value - projected_value) * constraint_rescaling[i];
+        }
 
-        dual_obj_contribution[i] =
-            fmax(dual_solution[i], 0.0) * const_lb_finite[i] + fmin(dual_solution[i], 0.0) * const_ub_finite[i];
+        dual_obj_contribution[i] = fmax(dual_solution[i], 0.0) * const_lb_finite[i] +
+            fmin(dual_solution[i], 0.0) * const_ub_finite[i] - affine_cone_offset[i] * dual_solution[i];
     }
     else if (i < num_constraints + num_variables)
     {
@@ -594,6 +735,107 @@ __global__ void compute_qp_residual_kernel(double *primal_residual,
         dual_residual[idx] = (gradient - dual_slack_idx) * variable_rescaling[idx];
         dual_slack[idx] = dual_slack_idx;
     }
+}
+
+__global__ void finish_affine_cone_residuals_kernel(double *primal_residual,
+                                                    const double *primal_product,
+                                                    const double *affine_cone_offset,
+                                                    const double *constraint_rescaling,
+                                                    double *dual_membership,
+                                                    const double *dual_membership_rescaling,
+                                                    int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        double value = primal_product[i] + affine_cone_offset[i];
+        primal_residual[i] = (value - primal_residual[i]) * constraint_rescaling[i];
+        dual_membership[i] *= dual_membership_rescaling[i];
+    }
+}
+
+__global__ void prepare_affine_cone_residuals_kernel(double *projection_point,
+                                                     double *complementarity_residual,
+                                                     const double *primal_product,
+                                                     const double *affine_cone_offset,
+                                                     const double *dual_solution,
+                                                     const int *start_idx,
+                                                     const int *v_dim,
+                                                     double constraint_bound_rescaling,
+                                                     int num_cones)
+{
+    int cone = blockIdx.x;
+    if (cone >= num_cones)
+        return;
+    int start = start_idx[cone];
+    int length = v_dim[cone] + 2;
+    double dot = 0.0;
+    for (int slot = threadIdx.x; slot < length; slot += blockDim.x)
+    {
+        int i = start + slot;
+        double dual = dual_solution[i];
+        projection_point[i] = -dual;
+        dot += dual * (primal_product[i] + affine_cone_offset[i]);
+    }
+
+    extern __shared__ double partial_sum[];
+    partial_sum[threadIdx.x] = dot;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (threadIdx.x < stride)
+            partial_sum[threadIdx.x] += partial_sum[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        complementarity_residual[cone] = fabs(partial_sum[0]) / constraint_bound_rescaling;
+}
+
+__global__ void prepare_affine_cone_residuals_grid_kernel(double *projection_point,
+                                                          double *complementarity_accumulator,
+                                                          const double *primal_product,
+                                                          const double *affine_cone_offset,
+                                                          const double *dual_solution,
+                                                          const int *start_idx,
+                                                          const int *v_dim,
+                                                          int num_cones,
+                                                          int blocks_per_cone)
+{
+    int cone = blockIdx.x / blocks_per_cone;
+    if (cone >= num_cones)
+        return;
+    int part = blockIdx.x - cone * blocks_per_cone;
+    int start = start_idx[cone];
+    int length = v_dim[cone] + 2;
+    double dot = 0.0;
+    for (int slot = part * blockDim.x + threadIdx.x; slot < length; slot += blocks_per_cone * blockDim.x)
+    {
+        int index = start + slot;
+        double dual = dual_solution[index];
+        projection_point[index] = -dual;
+        dot += dual * (primal_product[index] + affine_cone_offset[index]);
+    }
+
+    extern __shared__ double partial_sum[];
+    partial_sum[threadIdx.x] = dot;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (threadIdx.x < stride)
+            partial_sum[threadIdx.x] += partial_sum[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        atomicAdd(complementarity_accumulator + cone, partial_sum[0]);
+}
+
+__global__ void finish_affine_cone_complementarity_kernel(double *complementarity_residual,
+                                                          double constraint_bound_rescaling,
+                                                          int num_cones)
+{
+    int cone = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cone < num_cones)
+        complementarity_residual[cone] = fabs(complementarity_residual[cone]) / constraint_bound_rescaling;
 }
 
 __global__ void recover_primal_obj_dual_product(double *dual_product,
@@ -684,6 +926,7 @@ __global__ void compute_dual_infeasibility_kernel(const double *dual_product,
 __global__ void
 dual_solution_dual_objective_contribution_kernel(const double *constraint_lower_bound_finite_val,
                                                  const double *constraint_upper_bound_finite_val,
+                                                 const double *affine_cone_offset,
                                                  const double *dual_solution,
                                                  int num_constraints,
                                                  double *dual_objective_dual_solution_contribution_array)
@@ -694,7 +937,8 @@ dual_solution_dual_objective_contribution_kernel(const double *constraint_lower_
     {
         dual_objective_dual_solution_contribution_array[i] =
             fmax(dual_solution[i], 0.0) * constraint_lower_bound_finite_val[i] +
-            fmin(dual_solution[i], 0.0) * constraint_upper_bound_finite_val[i];
+            fmin(dual_solution[i], 0.0) * constraint_upper_bound_finite_val[i] -
+            affine_cone_offset[i] * dual_solution[i];
     }
 }
 

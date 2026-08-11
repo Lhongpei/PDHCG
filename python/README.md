@@ -3,10 +3,10 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![PyPI version](https://badge.fury.io/py/pdhcg.svg)](https://pypi.org/project/pdhcg/)
 [![Publication](https://img.shields.io/badge/DOI-10.1287/ijoc.2024.0983-B31B1B.svg)](https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0983)
-[![arXiv](https://img.shields.io/badge/arXiv-2405.16160-b31b1b.svg)](https://arxiv.org/abs/2405.16160)
+[![arXiv](https://img.shields.io/badge/arXiv-2608.09159-b31b1b.svg)](https://arxiv.org/abs/2608.09159)
 
-This is the Python interface to **[`PDHCG`](../README.md)**, a GPU-accelerated first-order solver for large-scale Quadratic Programming (QP).
-It provides a high-level, Pythonic API for constructing, modifying, and solving QPs using NumPy and SciPy data structures.
+This is the Python interface to **[`PDHCG`](../README.md)**, a GPU-accelerated first-order solver for large-scale quadratic and quadratic conic programming.
+It provides a high-level, Pythonic API using NumPy and SciPy data structures.
 
 ## Installation
 
@@ -37,8 +37,8 @@ pip install pdhcg
 Or build from source:
 
 ```bash
-git clone https://github.com/Lhongpei/PDHCG-II.git
-cd PDHCG-II
+git clone https://github.com/Lhongpei/PDHCG.git
+cd PDHCG
 pip install .
 ```
 
@@ -113,14 +113,58 @@ print("Primal solution:", m.X)
 print("Dual solution:", m.Pi)
 ```
 
+## Cone Constraints
+
+Second-order, rotated second-order, exponential, and power cone constraints use
+the columnar `ConeSpec` API:
+
+```python
+import numpy as np
+from pdhcg import ConeSpec, ConeType, Model
+
+cones = ConeSpec(ConeType.EXP, 3 * np.arange(num_cones, dtype=np.int32))
+model = Model(objective_vector=c, constraint_matrix=A, variable_cones=cones)
+```
+
+The same object can be passed as `solve_once(..., cones=cones)`. See
+[docs/python/quickstart.md](../docs/python/quickstart.md#quick-start-with-cone-constraints)
+for a runnable example and [docs/python/model.md](../docs/python/model.md#cone-constraints)
+for all fields and affine-cone input.
+
+## CVXPY
+
+Install PDHCG with the optional CVXPY dependency:
+
+```bash
+pip install "pdhcg[cvxpy]"
+```
+
+Import the backend once before solving:
+
+```python
+import cvxpy as cp
+import pdhcg.cvxpy_backend  # Registers solver="PDHCG".
+
+x = cp.Variable()
+problem = cp.Problem(cp.Minimize(x), [x >= 1])
+problem.solve(solver="PDHCG", eps=1e-6)
+```
+
+Quadratic objectives and Zero, NonNeg, SOC, ExpCone, and PowCone3D
+constraints are supported. PSD and mixed-integer models are not supported.
+
 ## Modeling
 
-The `Model` class represents a quadratic programming problem of the form:
+The `Model` class represents a quadratic conic programming problem of the form:
 
 $$
-\min \frac{1}{2} x^\top (Q + R^\top D R) x + c^\top x + c_0 \quad
-\text{s.t.} \; \ell \le A x \le u, \quad
-\text{lb} \le x \le \text{ub}.
+\begin{aligned}
+\min_x \quad & \frac{1}{2} x^\top (Q + R^\top D R) x + c^\top x + c_0 \\
+\text{s.t.} \quad & \ell \le A x \le u, \\
+                    & Fx + g \in \mathcal{K}_a, \\
+                    & x_J \in \mathcal{K}_v \quad \text{for variable-cone blocks } J, \\
+                    & \text{lb} \le x \le \text{ub}.
+\end{aligned}
 $$
 
 ### Arguments
@@ -132,6 +176,10 @@ $$
 - **constraint_matrix** (`A`): Coefficient matrix for the constraints. Both dense (`numpy.ndarray`) and sparse (`scipy.sparse.csr_matrix`) inputs are supported.
 - **constraint_lower_bound** (`l`): Lower bounds for each constraint. Use `-np.inf` or `None` for no lower bound.
 - **constraint_upper_bound** (`u`): Upper bounds for each constraint. Use `+np.inf` or `None` for no upper bound.
+- **affine_cone_matrix** (`F`, optional): Matrix in the native affine-cone constraint $Fx + g \in \mathcal{K}_a$.
+- **affine_cone_offset** (`g`, optional): Affine-cone offset. Defaults to zero.
+- **affine_cones** (optional): `ConeSpec` covering every row of `F`.
+- **variable_cones** (optional): `ConeSpec` describing cone blocks embedded in `x`.
 - **variable_lower_bound** (`lb`, optional): Lower bounds for the decision variables. Defaults to `0` for all variables if not provided.
 - **variable_upper_bound** (`ub`, optional): Upper bounds for the decision variables. Defaults to `+np.inf` for all variables if not provided.
 - **objective_constant** (`c0`, optional): Constant offset in the objective function. Defaults to `0.0`.
@@ -182,16 +230,18 @@ Below is a list of commonly used parameters, their internal keys, and descriptio
 | `IterationLimit` | `iteration_limit` | int | `2147483647` | Maximum number of iterations. |
 | `LogLevel`, `Verbosity` | `verbose` | int | `1` | Verbosity level: `0` (Silent), `1` (Summary), or `2` (Detailed iteration info). |
 | `TermCheckFreq` | `termination_evaluation_frequency` | int | `200` | Frequency (in iterations) at which termination conditions are evaluated. |
-| `OptimalityNorm` | `optimality_norm` | string | `"l2"` | Norm for optimality criteria. Use `"l2"` for L2 norm or `"linf"` for infinity norm. |
+| `OptimalityNorm` | `optimality_norm` | string | `"linf"` | Norm for optimality criteria. Use `"l2"` for L2 norm or `"linf"` for infinity norm. |
 | `OptimalityTol` | `eps_optimal_relative` | float | `1e-4` | Relative tolerance for optimality gap. Solver stops if the relative primal-dual gap ≤ this value. |
 | `FeasibilityTol` | `eps_feasible_relative` | float | `1e-4` | Relative feasibility tolerance for primal/dual residuals. |
+| `CurtisReidIters` | `curtis_reid_iterations` | int | `0` | Number of Curtis-Reid log-domain scaling iterations. Set to `0` to disable. |
 | `RuizIters` | `l_inf_ruiz_iterations` | int | `10` | Number of iterations for L∞ Ruiz scaling. Improves numerical conditioning. |
 | `UsePCAlpha` | `has_pock_chambolle_alpha` | bool | `True` | Whether to use the Pock–Chambolle α step size adjustment. |
 | `PCAlpha` | `pock_chambolle_alpha` | float | `1.0` | Value of the Pock–Chambolle α parameter. |
 | `BoundObjRescaling` | `bound_objective_rescaling` | bool | `True` | Whether to rescale the objective vector during preprocessing. |
+| `UseConePreservingScaling` | `use_cone_preserving_scaling` | bool | `True` | Whether to broadcast one scaling value over every cone block. |
 | `RestartArtificialThresh` | `artificial_restart_threshold` | float | `0.36` | Threshold for artificial restart. |
 | `RestartSufficientReduction` | `sufficient_reduction_for_restart` | float | `0.2` | Sufficient reduction factor to justify a restart. |
-| `RestartNecessaryReduction` | `necessary_reduction_for_restart` | float | `0.5` | Necessary reduction factor required for a restart. |
+| `RestartNecessaryReduction` | `necessary_reduction_for_restart` | float | `0.8` | Necessary reduction factor required for a restart. |
 | `RestartKp` | `k_p` | float | `0.99` | Proportional coefficient for PID-controlled primal weight updates. |
 | `ReflectionCoeff` | `reflection_coefficient` | float | `1.0` | Reflection coefficient. |
 | `SVMaxIter` | `sv_max_iter` | int | `5000` | Maximum number of iterations for the power method. |

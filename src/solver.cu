@@ -20,29 +20,57 @@ limitations under the License.
 #include "pdhg_core_op.h"
 #include "preconditioner.h"
 #include "presolve_wrapper.h"
+#include "qcqp_transform.h"
 #include "solver.h"
 #include "solver_state.h"
 #include "utils.h"
+#include <chrono>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusparse.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <time.h>
 
 pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem_t *original_problem)
 {
     pdhg_parameters_t copyed_params = *input_params;
     pdhg_parameters_t *params = &copyed_params;
+    const qp_problem_t *input_problem = original_problem;
 
     print_initial_info(input_params, original_problem);
+
+    qp_problem_t *transformed = NULL;
+    if (original_problem->num_quadratic_constraints > 0)
+    {
+        transformed = qcqp_to_socp_qp(original_problem, params->default_cone_type);
+        if (!transformed)
+        {
+            fprintf(stderr, "Error: QCQP -> SOCP transformation failed; cannot solve.\n");
+            return NULL;
+        }
+        if (params->verbose >= 1)
+        {
+            const char *form_name = (params->default_cone_type == CONE_STANDARD_SOC) ? "standard" : "rotated";
+            fprintf(stderr,
+                    "[QCQP] %d quadratic constraint(s) reformulated as %d "
+                    "%s SOC block(s); extended problem: %d vars, "
+                    "%d rows, %d nnz.\n",
+                    original_problem->num_quadratic_constraints,
+                    transformed->cones.num_cones,
+                    form_name,
+                    transformed->num_variables,
+                    transformed->num_constraints,
+                    transformed->constraint_matrix_num_nonzeros);
+        }
+        original_problem = transformed;
+    }
 
     pdhcg_presolve_info_t *presolve_info = NULL;
     const qp_problem_t *working_problem = original_problem;
     bool working_problem_needs_free = false;
 
-    if (params->presolve && pdhcg_presolve_available())
+    if (params->presolve && original_problem->affine_cones.num_cones == 0 && pdhcg_presolve_available())
     {
         presolve_info = pdhcg_presolve(original_problem, params);
         if (presolve_info)
@@ -50,11 +78,16 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
             if (presolve_info->problem_solved_during_presolve)
             {
                 pdhcg_result_t *result = pdhcg_create_result_from_presolve(presolve_info, original_problem);
+                restore_qcqp_result_dimensions(result, transformed ? input_problem : NULL);
                 if (result)
                 {
                     pdhg_final_log(result, params);
                 }
                 pdhcg_presolve_info_free(presolve_info);
+                if (transformed)
+                {
+                    qp_problem_free(transformed);
+                }
                 return result;
             }
 
@@ -67,7 +100,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
 
     if (working_problem->num_constraints == 0 || working_problem->constraint_matrix == NULL)
     {
-        working_problem = create_problem_with_dummy_constraint(original_problem);
+        working_problem = create_problem_with_dummy_constraint(working_problem);
         working_problem_needs_free = true;
     }
 
@@ -82,7 +115,7 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
 
     rescale_info_free(rescale_info);
     initialize_step_size_and_primal_weight(state, params);
-    clock_t start_time = clock();
+    const auto start_time = std::chrono::steady_clock::now();
     bool do_restart = false;
 
     while (state->total_count < params->termination_criteria.iteration_limit)
@@ -91,12 +124,14 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
             (state->total_count % get_print_frequency(state->total_count) == 0))
         {
             compute_residual(state, params->optimality_norm);
-            if (state->is_this_major_iteration && state->total_count < 3 * params->termination_evaluation_frequency)
+            if (!state->has_variable_cones && state->affine_cones.num_blocks == 0 && state->is_this_major_iteration &&
+                state->total_count < 3 * params->termination_evaluation_frequency)
             {
                 compute_infeasibility_information(state);
             }
 
-            state->cumulative_time_sec = (double)(clock() - start_time) / CLOCKS_PER_SEC;
+            state->cumulative_time_sec =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
 
             check_termination_criteria(state, &params->termination_criteria);
             display_iteration_stats(state, params->verbose);
@@ -150,15 +185,26 @@ pdhcg_result_t *optimize(const pdhg_parameters_t *input_params, const qp_problem
 
     if (presolve_info && presolve_info->reduced_problem)
     {
-        pdhcg_postsolve(presolve_info, result, original_problem);
+        if (!pdhcg_postsolve(presolve_info, result, original_problem))
+        {
+            fprintf(stderr, "Error: PreFOS primal-dual postsolve failed.\n");
+            result->termination_reason = TERMINATION_REASON_UNSPECIFIED;
+        }
     }
     if (working_problem_needs_free)
     {
         qp_problem_free((qp_problem_t *)working_problem);
     }
+
+    restore_qcqp_result_dimensions(result, transformed ? input_problem : NULL);
+
     pdhg_final_log(result, params);
     pdhg_solver_state_free(state);
     pdhcg_presolve_info_free(presolve_info);
+    if (transformed)
+    {
+        qp_problem_free(transformed);
+    }
     CUDA_CHECK(cudaGetLastError());
     return result;
 }

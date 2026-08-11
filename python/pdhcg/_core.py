@@ -13,4 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._pdhcg_core import solve_once, get_default_params
+from ._pdhcg_core import get_default_params, read_problem_file, solve_once
+
+__all__ = ["get_default_params", "read_problem_file", "solve_once"]

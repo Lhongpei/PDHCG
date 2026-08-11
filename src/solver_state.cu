@@ -15,6 +15,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "cone_dispatch.h"
+#include "distributed_conic.h"
 #include "internal_types.h"
 #include "pdhcg.h"
 #include "pdhcg_kernels.cuh"
@@ -30,37 +32,18 @@ limitations under the License.
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
-
-#ifdef PDHCG_COMPILE_DISTRIBUTED
-#include "distributed_types.h"
-#endif
 
 int get_global_n(pdhg_solver_state_t *state)
 {
-    int n = state->num_variables;
-#ifdef PDHCG_COMPILE_DISTRIBUTED
-    if (state->grid_context != NULL && state->grid_context->global_num_variables > 0)
-    {
-        n = state->grid_context->global_num_variables;
-    }
-#endif
-    (void)state;
-    return n;
+    int global_n = pdhcg_get_global_num_variables(state->grid_context);
+    return global_n > 0 ? global_n : state->num_variables;
 }
 
 int get_n_start(grid_context_t *ctx)
 {
-    int start = 0;
-#ifdef PDHCG_COMPILE_DISTRIBUTED
-    if (ctx != NULL)
-    {
-        start = ctx->n_start;
-    }
-#else
-    (void)ctx;
-#endif
-    return start;
+    return pdhcg_get_variable_start(ctx);
 }
 
 static void initialize_sparse_component_obj(pdhg_solver_state_t *state, const processed_qp_problem_t *problem)
@@ -458,6 +441,254 @@ void initialize_quadratic_term_information(pdhg_solver_state_t *state, const pdh
     }
 }
 
+static cone_proj_method_t
+pick_cone_proj_method(const cone_blocks_t *cones, int cone, const double *coordinate_rescaling)
+{
+    cone_type_t type = cones->type[cone];
+    int v_dim = cones->v_dim[cone];
+    if (type == CONE_EXPONENTIAL || type == CONE_POWER)
+        return PROJ_METHOD_THREAD;
+    if (v_dim < 32)
+        return PROJ_METHOD_THREAD;
+    if (type != CONE_STANDARD_SOC && type != CONE_ROTATED_SOC)
+        return PROJ_METHOD_WARP;
+
+    int start = cones->start_idx[cone];
+    if (cones->is_fixed)
+    {
+        for (int slot = 0; slot < v_dim + 2; ++slot)
+            if (cones->is_fixed[start + slot])
+                return v_dim >= PDHCG_LARGE_CONE_MIN_VDIM ? PROJ_METHOD_GRID_WEIGHTED : PROJ_METHOD_BLOCK;
+    }
+    if (v_dim < PDHCG_LARGE_CONE_MIN_VDIM || !coordinate_rescaling)
+        return PROJ_METHOD_WARP;
+
+    int endpoint0 = start + v_dim;
+    int endpoint1 = endpoint0 + 1;
+
+    double d0 = coordinate_rescaling[endpoint0];
+    double d1 = coordinate_rescaling[endpoint1];
+    if (!(d0 > 0.0) || !(d1 > 0.0) || !isfinite(d0) || !isfinite(d1))
+        return PROJ_METHOD_WARP;
+
+    double d_vector = d1;
+    if (type == CONE_STANDARD_SOC)
+    {
+        if (d0 != d1)
+            return PROJ_METHOD_GRID_WEIGHTED;
+    }
+    else
+    {
+        double d_ref = coordinate_rescaling[start];
+        bool scalar_uniform = d0 == d_ref && d1 == d_ref;
+        for (int i = 1; i < v_dim && scalar_uniform; ++i)
+            scalar_uniform = coordinate_rescaling[start + i] == d_ref;
+        if (scalar_uniform)
+            return PROJ_METHOD_GRID;
+        d_vector = sqrt(d0) * sqrt(d1);
+    }
+
+    for (int i = 0; i < v_dim; ++i)
+    {
+        if (coordinate_rescaling[start + i] != d_vector)
+            return PROJ_METHOD_GRID_WEIGHTED;
+    }
+    return PROJ_METHOD_GRID;
+}
+
+static void
+initialize_cone_layout(cone_runtime_t *runtime, const cone_blocks_t *cones, const double *coordinate_rescaling)
+{
+    runtime->num_blocks = cones->num_cones;
+    if (runtime->num_blocks == 0)
+        return;
+
+    int K = runtime->num_blocks;
+
+    cone_proj_method_t *methods = (cone_proj_method_t *)safe_malloc(K * sizeof(cone_proj_method_t));
+    for (int i = 0; i < K; ++i)
+        methods[i] = pick_cone_proj_method(cones, i, coordinate_rescaling);
+
+    int bucket_count[NUM_CONE_TYPES][NUM_PROJ_METHODS] = {{0}};
+    for (int i = 0; i < K; ++i)
+        bucket_count[cones->type[i]][methods[i]]++;
+    for (int method = 0; method < NUM_PROJ_METHODS; ++method)
+        runtime->has_power_cones |= bucket_count[CONE_POWER][method] > 0;
+
+    cone_bucket_t buckets_tmp[NUM_CONE_TYPES * NUM_PROJ_METHODS];
+    int num_buckets = 0;
+    int offset = 0;
+    int bucket_offset[NUM_CONE_TYPES][NUM_PROJ_METHODS];
+    for (int t = 0; t < NUM_CONE_TYPES; ++t)
+    {
+        for (int m = 0; m < NUM_PROJ_METHODS; ++m)
+        {
+            bucket_offset[t][m] = offset;
+            if (bucket_count[t][m] > 0)
+            {
+                buckets_tmp[num_buckets].type = (cone_type_t)t;
+                buckets_tmp[num_buckets].method = (cone_proj_method_t)m;
+                buckets_tmp[num_buckets].offset = offset;
+                buckets_tmp[num_buckets].count = bucket_count[t][m];
+                num_buckets++;
+            }
+            offset += bucket_count[t][m];
+        }
+    }
+
+    runtime->num_buckets = num_buckets;
+    runtime->buckets = (cone_bucket_t *)safe_malloc((size_t)num_buckets * sizeof(cone_bucket_t));
+    memcpy(runtime->buckets, buckets_tmp, (size_t)num_buckets * sizeof(cone_bucket_t));
+
+    size_t cb = (size_t)K * sizeof(int);
+    int *start_perm = (int *)safe_malloc(cb);
+    int *vdim_perm = (int *)safe_malloc(cb);
+    double *alpha_perm = NULL;
+    if (cones->power_alpha)
+        alpha_perm = (double *)safe_malloc((size_t)K * sizeof(double));
+    int write_pos[NUM_CONE_TYPES][NUM_PROJ_METHODS];
+    memcpy(write_pos, bucket_offset, sizeof(write_pos));
+    for (int i = 0; i < K; ++i)
+    {
+        int t = cones->type[i];
+        int m = methods[i];
+        int p = write_pos[t][m]++;
+        start_perm[p] = cones->start_idx[i];
+        vdim_perm[p] = cones->v_dim[i];
+        if (alpha_perm)
+            alpha_perm[p] = cones->power_alpha[i];
+    }
+
+    CUDA_CHECK(cudaMalloc(&runtime->start_idx, cb));
+    CUDA_CHECK(cudaMemcpy(runtime->start_idx, start_perm, cb, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&runtime->v_dim, cb));
+    CUDA_CHECK(cudaMemcpy(runtime->v_dim, vdim_perm, cb, cudaMemcpyHostToDevice));
+    if (alpha_perm)
+    {
+        size_t ab = (size_t)K * sizeof(double);
+        CUDA_CHECK(cudaMalloc(&runtime->power_alpha, ab));
+        CUDA_CHECK(cudaMemcpy(runtime->power_alpha, alpha_perm, ab, cudaMemcpyHostToDevice));
+        free(alpha_perm);
+    }
+    free(start_perm);
+    free(vdim_perm);
+    free(methods);
+
+    size_t scalar_bytes = (size_t)K * sizeof(double);
+    size_t workspace_bytes = PDHCG_CONE_WORKSPACE_STRIDE * scalar_bytes;
+    CUDA_CHECK(cudaMalloc(&runtime->projection_warm_start, workspace_bytes));
+    CUDA_CHECK(cudaMemset(runtime->projection_warm_start, 0, workspace_bytes));
+    CUDA_CHECK(cudaMalloc(&runtime->residual_warm_start, workspace_bytes));
+    CUDA_CHECK(cudaMemset(runtime->residual_warm_start, 0, workspace_bytes));
+    CUDA_CHECK(cudaMalloc(&runtime->complementarity_residual, scalar_bytes));
+    CUDA_CHECK(cudaMemset(runtime->complementarity_residual, 0, scalar_bytes));
+    if (runtime->axis == CONE_AXIS_VARIABLE && runtime->has_power_cones)
+        CUDA_CHECK(cudaMalloc(&runtime->power_violation_workspace, 2 * scalar_bytes));
+}
+
+static void initialize_cone_runtime(pdhg_solver_state_t *state,
+                                    const qp_problem_t *working_problem,
+                                    const rescale_info_t *rescale_info)
+{
+    memset(&state->cones, 0, sizeof(state->cones));
+    memset(&state->affine_cones, 0, sizeof(state->affine_cones));
+    state->cones.axis = CONE_AXIS_VARIABLE;
+    state->affine_cones.axis = CONE_AXIS_CONSTRAINT;
+
+    initialize_split_cones(state, rescale_info);
+
+    bool has_global_cones = working_problem->cones.num_cones > 0 || state->cones.split != NULL ||
+        pdhcg_get_global_num_cones(state->grid_context) > 0;
+    state->has_variable_cones = has_global_cones;
+
+    if (working_problem->cones.is_fixed)
+    {
+        size_t fb = (size_t)state->num_variables * sizeof(char);
+        CUDA_CHECK(cudaMalloc(&state->cones.is_fixed, fb));
+        CUDA_CHECK(cudaMemcpy(state->cones.is_fixed, working_problem->cones.is_fixed, fb, cudaMemcpyHostToDevice));
+    }
+
+    if (state->has_variable_cones)
+    {
+        quad_obj_type_t qt = rescale_info->processed_problem ? rescale_info->processed_problem->quad_type : PDHCG_NON_Q;
+        size_t vb = (size_t)state->num_variables * sizeof(double);
+        if (qt != PDHCG_NON_Q)
+            CUDA_CHECK(cudaMalloc(&state->cones.effective_objective_gradient, vb));
+        if (qt == PDHCG_SPARSE_Q || qt == PDHCG_LOW_RANK_Q || qt == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+            CUDA_CHECK(cudaMalloc(&state->cones.bb_primal_snapshot, vb));
+    }
+
+    initialize_cone_layout(&state->cones, &working_problem->cones, rescale_info->var_rescale);
+    double global_has_power_cones = state->cones.has_power_cones ? 1.0 : 0.0;
+    pdhcg_all_reduce_scalar(state->grid_context, &global_has_power_cones, PDHCG_OP_MAX, PDHCG_SCOPE_ROW, false);
+    state->cones.has_power_cones = global_has_power_cones != 0.0;
+
+    bool has_affine_cones = working_problem->affine_cones.num_cones > 0 || state->affine_cones.split != NULL ||
+        pdhcg_get_global_num_affine_cones(state->grid_context) > 0;
+
+    int constraint_rows = state->num_constraints;
+    if (has_affine_cones && constraint_rows > 0)
+    {
+        double *inverse_constraint_rescaling = (double *)safe_malloc((size_t)constraint_rows * sizeof(double));
+        for (int i = 0; i < constraint_rows; ++i)
+            inverse_constraint_rescaling[i] = 1.0 / rescale_info->con_rescale[i];
+        size_t constraint_bytes = (size_t)constraint_rows * sizeof(double);
+        CUDA_CHECK(cudaMalloc(&state->affine_cones.coordinate_rescaling, constraint_bytes));
+        CUDA_CHECK(cudaMemcpy(state->affine_cones.coordinate_rescaling,
+                              inverse_constraint_rescaling,
+                              constraint_bytes,
+                              cudaMemcpyHostToDevice));
+        initialize_cone_layout(&state->affine_cones, &working_problem->affine_cones, inverse_constraint_rescaling);
+        free(inverse_constraint_rescaling);
+    }
+
+    const double INV_SQRT2 = 0.7071067811865475;
+    for (int i = 0; i < working_problem->cones.num_cones; ++i)
+    {
+        const cone_blocks_t *cones = &working_problem->cones;
+        int aux0 = cones->start_idx[i] + cones->v_dim[i];
+        if (cones->type[i] == CONE_STANDARD_SOC)
+        {
+            int w_idx = aux0;
+            int z_idx = aux0 + 1;
+            bool w_pinned = (cones->is_fixed && cones->is_fixed[w_idx]);
+            bool z_pinned = (cones->is_fixed && cones->is_fixed[z_idx]);
+            double w_val = -INV_SQRT2 * rescale_info->con_bound_rescale * rescale_info->var_rescale[w_idx];
+            double z_val = INV_SQRT2 * rescale_info->con_bound_rescale * rescale_info->var_rescale[z_idx];
+            for (int which = 0; which < 4; ++which)
+            {
+                double *dst = (which == 0       ? state->initial_primal_solution
+                                   : which == 1 ? state->current_primal_solution
+                                   : which == 2 ? state->pdhg_primal_solution
+                                                : state->reflected_primal_solution);
+                if (!w_pinned)
+                    CUDA_CHECK(cudaMemcpy(dst + w_idx, &w_val, sizeof(double), cudaMemcpyHostToDevice));
+                if (!z_pinned)
+                    CUDA_CHECK(cudaMemcpy(dst + z_idx, &z_val, sizeof(double), cudaMemcpyHostToDevice));
+            }
+        }
+        else if (cones->type[i] == CONE_EXPONENTIAL || cones->type[i] == CONE_POWER)
+        {
+            /* Rely on the ALLOC_ZERO default (0, 0, 0), which is in-cone for both. */
+        }
+        else
+        {
+            int t_idx = aux0 + 1;
+            bool t_pinned = (cones->is_fixed && cones->is_fixed[t_idx]);
+            double t_val = rescale_info->con_bound_rescale * rescale_info->var_rescale[t_idx];
+            for (int which = 0; which < 4; ++which)
+            {
+                double *dst = (which == 0       ? state->initial_primal_solution
+                                   : which == 1 ? state->current_primal_solution
+                                   : which == 2 ? state->pdhg_primal_solution
+                                                : state->reflected_primal_solution);
+                if (!t_pinned)
+                    CUDA_CHECK(cudaMemcpy(dst + t_idx, &t_val, sizeof(double), cudaMemcpyHostToDevice));
+            }
+        }
+    }
+}
+
 pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
                                              const qp_problem_t *working_problem,
                                              const rescale_info_t *rescale_info,
@@ -554,6 +785,7 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
     ALLOC_AND_COPY(state->objective_vector, rescale_info->scaled_problem->objective_vector, var_bytes);
     ALLOC_AND_COPY(state->constraint_lower_bound, rescale_info->scaled_problem->constraint_lower_bound, con_bytes);
     ALLOC_AND_COPY(state->constraint_upper_bound, rescale_info->scaled_problem->constraint_upper_bound, con_bytes);
+    ALLOC_AND_COPY(state->affine_cone_offset, rescale_info->scaled_problem->affine_cone_offset, con_bytes);
     ALLOC_AND_COPY(state->constraint_rescaling, rescale_info->con_rescale, con_bytes);
     ALLOC_AND_COPY(state->variable_rescaling, rescale_info->var_rescale, var_bytes);
 
@@ -687,6 +919,15 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
         }
     }
 
+    for (int i = 0; i < working_problem->num_constraints; ++i)
+    {
+        double constant = working_problem->affine_cone_offset[i];
+        if (params->optimality_norm == NORM_TYPE_L_INF)
+            max_val = fmax(max_val, fabs(constant));
+        else
+            sum_of_squares += constant * constant;
+    }
+
     if (params->optimality_norm == NORM_TYPE_L_INF)
     {
         state->constraint_bound_norm = max_val;
@@ -734,25 +975,48 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
                                                state->vec_dual_sol,
                                                state->vec_dual_prod);
 
+    state->num_original_variables = working_problem->num_original_variables;
+    initialize_cone_runtime(state, working_problem, rescale_info);
+    if (state->has_variable_cones)
+    {
+        project_cone_runtime(state, &state->cones, state->initial_primal_solution, state->cones.projection_warm_start);
+        CUDA_CHECK(cudaGetLastError());
+    }
+    if (state->num_variables > 0)
+    {
+        project_primal_onto_bounds_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+            state->initial_primal_solution,
+            state->variable_lower_bound,
+            state->variable_upper_bound,
+            state->num_variables);
+        CUDA_CHECK(cudaGetLastError());
+    }
+    CUDA_CHECK(cudaMemcpy(
+        state->current_primal_solution, state->initial_primal_solution, var_bytes, cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(
+        cudaMemcpy(state->pdhg_primal_solution, state->initial_primal_solution, var_bytes, cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(
+        state->reflected_primal_solution, state->initial_primal_solution, var_bytes, cudaMemcpyDeviceToDevice));
+
     initialize_quadratic_obj_term(state, rescale_info->processed_problem);
     initialize_quadratic_term_information(state, params);
     initialize_inner_solver(state, params);
 
-    CUDA_CHECK(cudaMalloc(&state->ones_primal_d, state->num_variables * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&state->ones_dual_d, state->num_constraints * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&state->ones_primal, state->num_variables * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&state->ones_dual, state->num_constraints * sizeof(double)));
 
     double *ones_primal_h = (double *)safe_malloc(state->num_variables * sizeof(double));
     for (int i = 0; i < state->num_variables; ++i)
         ones_primal_h[i] = 1.0;
     CUDA_CHECK(
-        cudaMemcpy(state->ones_primal_d, ones_primal_h, state->num_variables * sizeof(double), cudaMemcpyHostToDevice));
+        cudaMemcpy(state->ones_primal, ones_primal_h, state->num_variables * sizeof(double), cudaMemcpyHostToDevice));
     free(ones_primal_h);
 
     double *ones_dual_h = (double *)safe_malloc(state->num_constraints * sizeof(double));
     for (int i = 0; i < state->num_constraints; ++i)
         ones_dual_h[i] = 1.0;
     CUDA_CHECK(
-        cudaMemcpy(state->ones_dual_d, ones_dual_h, state->num_constraints * sizeof(double), cudaMemcpyHostToDevice));
+        cudaMemcpy(state->ones_dual, ones_dual_h, state->num_constraints * sizeof(double), cudaMemcpyHostToDevice));
     decide_problem_type(state);
     free(ones_dual_h);
     if (params->verbose >= 2)
@@ -826,6 +1090,8 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
         CUDA_CHECK(cudaFree(state->constraint_lower_bound));
     if (state->constraint_upper_bound)
         CUDA_CHECK(cudaFree(state->constraint_upper_bound));
+    if (state->affine_cone_offset)
+        CUDA_CHECK(cudaFree(state->affine_cone_offset));
     if (state->constraint_lower_bound_finite_val)
         CUDA_CHECK(cudaFree(state->constraint_lower_bound_finite_val));
     if (state->constraint_upper_bound_finite_val)
@@ -870,10 +1136,10 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
         CUDA_CHECK(cudaFree(state->delta_primal_solution));
     if (state->delta_dual_solution)
         CUDA_CHECK(cudaFree(state->delta_dual_solution));
-    if (state->ones_primal_d)
-        CUDA_CHECK(cudaFree(state->ones_primal_d));
-    if (state->ones_dual_d)
-        CUDA_CHECK(cudaFree(state->ones_dual_d));
+    if (state->ones_primal)
+        CUDA_CHECK(cudaFree(state->ones_primal));
+    if (state->ones_dual)
+        CUDA_CHECK(cudaFree(state->ones_dual));
 
     if (state->quadratic_objective_term)
     {
@@ -959,6 +1225,37 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
             CUDA_CHECK(cudaFree(state->inner_solver->dual_buffer));
         free(state->inner_solver);
     }
+
+    cone_runtime_t *runtimes[] = {&state->cones, &state->affine_cones};
+    for (int runtime_idx = 0; runtime_idx < 2; ++runtime_idx)
+    {
+        cone_runtime_t *runtime = runtimes[runtime_idx];
+        if (runtime->start_idx)
+            CUDA_CHECK(cudaFree(runtime->start_idx));
+        if (runtime->v_dim)
+            CUDA_CHECK(cudaFree(runtime->v_dim));
+        if (runtime->power_alpha)
+            CUDA_CHECK(cudaFree(runtime->power_alpha));
+        if (runtime->is_fixed)
+            CUDA_CHECK(cudaFree(runtime->is_fixed));
+        if (runtime->buckets)
+            free(runtime->buckets);
+        if (runtime->projection_warm_start)
+            CUDA_CHECK(cudaFree(runtime->projection_warm_start));
+        if (runtime->residual_warm_start)
+            CUDA_CHECK(cudaFree(runtime->residual_warm_start));
+        if (runtime->complementarity_residual)
+            CUDA_CHECK(cudaFree(runtime->complementarity_residual));
+        if (runtime->power_violation_workspace)
+            CUDA_CHECK(cudaFree(runtime->power_violation_workspace));
+        if (runtime->coordinate_rescaling)
+            CUDA_CHECK(cudaFree(runtime->coordinate_rescaling));
+        if (runtime->effective_objective_gradient)
+            CUDA_CHECK(cudaFree(runtime->effective_objective_gradient));
+        if (runtime->bb_primal_snapshot)
+            CUDA_CHECK(cudaFree(runtime->bb_primal_snapshot));
+    }
+    free_split_cones(state);
 
     free(state);
 }

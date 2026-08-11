@@ -49,7 +49,8 @@ int main() {
     // Create problem (NULL for Q, R, and D -> linear problem)
     qp_problem_t *prob = create_qp_problem(
         c, NULL, NULL, NULL, &A_desc,
-        con_lb, con_ub, var_lb, var_ub, NULL
+        con_lb, con_ub, var_lb, var_ub, NULL,
+        0, NULL, NULL, NULL, 0, NULL
     );
 
     // Set parameters
@@ -75,14 +76,17 @@ int main() {
 
 ## Distributed / Multi-GPU Solving
 
-PDHCG supports distributed solving across multiple GPUs via MPI and NCCL. When compiled with `-DPDHCG_COMPILE_DISTRIBUTED=ON`, the public header `pdhcg.h` conditionally declares:
+PDHCG supports distributed solving across multiple GPUs via MPI and NCCL. The public header declares:
 
 ```c
 pdhcg_result_t *solve_qp_problem_distributed(const pdhg_parameters_t *params,
                                              const qp_problem_t *original_problem);
 ```
 
-Use `solve_qp_problem_distributed()` in place of `solve_qp_problem()`, and launch your program with `mpirun` (or `mpiexec`).
+Use `solve_qp_problem_distributed()` in place of `solve_qp_problem()`, compile with
+`-DPDHCG_COMPILE_DISTRIBUTED=ON`, and launch your program with `mpirun` (or
+`mpiexec`). A non-distributed build keeps the symbol for API compatibility and
+returns `NULL` with an explanatory error.
 
 See the [C API Functions](functions.md) reference for details, and the [Examples](../examples.md) page for usage examples.
 
@@ -99,13 +103,26 @@ qp_problem_t *create_qp_problem(
     const matrix_desc_t *A_desc,
     const double *con_lb, const double *con_ub,
     const double *var_lb, const double *var_ub,
-    const double *objective_constant
+    const double *objective_constant,
+    int num_var_cones,
+    const cone_spec_t *var_cones,
+    const matrix_desc_t *affine_cone_matrix_desc,
+    const double *affine_cone_offset,
+    int num_affine_cones,
+    const cone_spec_t *affine_cones
 );
 ```
 
 Creates a QP problem of the form
-`min 0.5 * x^T (Q + R^T D R) x + c^T x  s.t.  con_lb <= A x <= con_ub,  var_lb <= x <= var_ub`
-from matrix descriptors. `Q_desc` (sparse quadratic), `R_desc` (low-rank factor, shape `k x n`), and `D_desc` (rank-by-rank middle matrix in `R^T D R`) are all optional — pass `NULL` to omit any of them. `D_desc` defaults to identity, recovering the standard `Q + R^T R` formulation; it may be diagonal, sparse, dense, or indefinite, and the runtime auto-detects the cheapest representation.
+`min 0.5 * x^T (Q + R^T D R) x + c^T x  s.t.  con_lb <= A x <= con_ub,  var_lb <= x <= var_ub`,
+with optional variable cones and native affine constraints
+`F x + affine_cone_offset in K`. Affine cone starts are relative to rows of
+`F`, and the blocks must cover `F` completely. The problem is built from matrix
+descriptors. `Q_desc` (sparse quadratic), `R_desc` (low-rank factor, shape
+`k x n`), and `D_desc` (rank-by-rank middle matrix in `R^T D R`) are all
+optional — pass `NULL` to omit any of them. `D_desc` defaults to identity,
+recovering the standard `Q + R^T R` formulation; it may be diagonal, sparse,
+dense, or indefinite, and the runtime auto-detects the cheapest representation.
 
 ### Setting Start Values
 
@@ -117,7 +134,8 @@ void set_start_values(
 );
 ```
 
-Sets initial primal and dual solutions for warm starting.
+Sets initial primal and dual solutions for warm starting. A `NULL` primal clears
+free-coordinate warm starts but preserves values pinned by `set_cone_fixed`.
 
 ### Solving
 

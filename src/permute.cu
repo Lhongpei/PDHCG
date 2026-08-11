@@ -13,22 +13,33 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "pdhcg_types.h"
+#include "cone_utils.h"
+#include "pdhcg.h"
 #include "permute.h"
 #include "utils.h"
 #include <math.h>
 #include <random>
+#include <vector>
 
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
 
-int cmp_tuples(const void *a, const void *b)
+typedef struct
+{
+    int new_col;
+    double val;
+} permute_tuple_t;
+
+static void generate_random_permutation(int n, int *perm);
+static void generate_block_permutation(int n, int block_size, int *perm);
+
+static int cmp_tuples(const void *a, const void *b)
 {
     return ((permute_tuple_t *)a)->new_col - ((permute_tuple_t *)b)->new_col;
 }
 
-void col_permute_in_place(int m, int *Ap, int *Aj, double *Ax, const int *old_col_to_new)
+static void col_permute_in_place(int m, int *Ap, int *Aj, double *Ax, const int *old_col_to_new)
 {
     int max_row_nnz = 0;
     for (int i = 0; i < m; i++)
@@ -74,7 +85,7 @@ void col_permute_in_place(int m, int *Ap, int *Aj, double *Ax, const int *old_co
     free(buffer);
 }
 
-void permute_csr_rows_structural(CsrComponent *csr, int num_rows, int nnz, const int *row_perm)
+static void permute_csr_rows_structural(CsrComponent *csr, int num_rows, int nnz, const int *row_perm)
 {
     if (!csr || nnz == 0)
         return;
@@ -112,7 +123,7 @@ void permute_csr_rows_structural(CsrComponent *csr, int num_rows, int nnz, const
     csr->val = new_Ax;
 }
 
-void permute_double_array(double *arr, int n, const int *perm)
+static void permute_double_array(double *arr, int n, const int *perm)
 {
     if (!arr)
         return;
@@ -123,16 +134,29 @@ void permute_double_array(double *arr, int n, const int *perm)
     free(tmp);
 }
 
-void compute_inv_perm(int n, const int *perm, int *inv_perm)
+static void compute_inv_perm(int n, const int *perm, int *inv_perm)
 {
     for (int i = 0; i < n; i++)
         inv_perm[perm[i]] = i;
 }
 
-void permute_problem(qp_problem_t *qp, int *row_perm, int *col_perm)
+bool permute_problem(qp_problem_t *qp, int *row_perm, int *col_perm)
 {
+    if (!qp || (qp->num_constraints > 0 && !row_perm) || (qp->num_variables > 0 && !col_perm))
+        return false;
     int m = qp->num_constraints;
     int n = qp->num_variables;
+
+    if (!validate_cone_permutation(qp, col_perm))
+    {
+        fprintf(stderr, "Error: column permutation splits or reorders a cone block.\n");
+        return false;
+    }
+    if (!validate_affine_cone_row_permutation(qp, row_perm))
+    {
+        fprintf(stderr, "Error: row permutation splits or reorders an affine cone block.\n");
+        return false;
+    }
 
     permute_double_array(qp->objective_vector, n, col_perm);
     permute_double_array(qp->variable_lower_bound, n, col_perm);
@@ -142,8 +166,17 @@ void permute_problem(qp_problem_t *qp, int *row_perm, int *col_perm)
 
     permute_double_array(qp->constraint_lower_bound, m, row_perm);
     permute_double_array(qp->constraint_upper_bound, m, row_perm);
+    permute_double_array(qp->affine_cone_offset, m, row_perm);
     if (qp->dual_start)
         permute_double_array(qp->dual_start, m, row_perm);
+
+    int *inv_row_perm = (int *)malloc((size_t)m * sizeof(int));
+    compute_inv_perm(m, row_perm, inv_row_perm);
+    for (int cone = 0; cone < qp->affine_cones.num_cones; ++cone)
+    {
+        int old_start = qp->affine_cones.start_idx[cone];
+        qp->affine_cones.start_idx[cone] = inv_row_perm[old_start];
+    }
 
     int *inv_col_perm = (int *)malloc(n * sizeof(int));
     compute_inv_perm(n, col_perm, inv_col_perm);
@@ -177,7 +210,205 @@ void permute_problem(qp_problem_t *qp, int *row_perm, int *col_perm)
                              inv_col_perm);
     }
 
+    if (qp->cones.num_cones > 0)
+    {
+        for (int cone = 0; cone < qp->cones.num_cones; ++cone)
+            qp->cones.start_idx[cone] = inv_col_perm[qp->cones.start_idx[cone]];
+
+        if (qp->cones.is_fixed)
+        {
+            char *tmp = (char *)malloc((size_t)n * sizeof(char));
+            for (int i = 0; i < n; ++i)
+                tmp[i] = qp->cones.is_fixed[col_perm[i]];
+            memcpy(qp->cones.is_fixed, tmp, (size_t)n * sizeof(char));
+            free(tmp);
+        }
+    }
+
+    free(inv_row_perm);
     free(inv_col_perm);
+    return true;
+}
+
+typedef struct
+{
+    int start;
+    int length;
+} permutation_unit_t;
+
+static int compare_units_by_start(const void *a, const void *b)
+{
+    const permutation_unit_t *ua = (const permutation_unit_t *)a;
+    const permutation_unit_t *ub = (const permutation_unit_t *)b;
+    return (ua->start > ub->start) - (ua->start < ub->start);
+}
+
+static bool build_checked_inverse_permutation(int size, const int *permutation, int **inverse_out)
+{
+    *inverse_out = NULL;
+    if (size <= 0)
+        return true;
+    if (!permutation)
+        return false;
+
+    int *inverse = (int *)malloc((size_t)size * sizeof(int));
+    if (!inverse)
+        return false;
+    for (int index = 0; index < size; ++index)
+        inverse[index] = -1;
+    for (int index = 0; index < size; ++index)
+    {
+        int value = permutation[index];
+        if (value < 0 || value >= size || inverse[value] >= 0)
+        {
+            free(inverse);
+            return false;
+        }
+        inverse[value] = index;
+    }
+    *inverse_out = inverse;
+    return true;
+}
+
+bool validate_cone_permutation(const qp_problem_t *qp, const int *col_perm)
+{
+    if (!qp)
+        return false;
+    int *inverse = NULL;
+    if (!build_checked_inverse_permutation(qp->num_variables, col_perm, &inverse))
+        return false;
+    if (qp->cones.num_cones <= 0)
+    {
+        free(inverse);
+        return true;
+    }
+
+    bool valid = true;
+    for (int cone = 0; cone < qp->cones.num_cones && valid; ++cone)
+    {
+        int old_start = qp->cones.start_idx[cone];
+        int length = cone_block_length(&qp->cones, cone);
+        int new_start = inverse[old_start];
+        for (int slot = 1; slot < length; ++slot)
+        {
+            if (inverse[old_start + slot] != new_start + slot)
+            {
+                valid = false;
+                break;
+            }
+        }
+    }
+    free(inverse);
+    return valid;
+}
+
+bool validate_affine_cone_row_permutation(const qp_problem_t *qp, const int *row_perm)
+{
+    if (!qp)
+        return false;
+    int *inverse = NULL;
+    if (!build_checked_inverse_permutation(qp->num_constraints, row_perm, &inverse))
+        return false;
+    if (qp->affine_cones.num_cones <= 0)
+    {
+        free(inverse);
+        return true;
+    }
+    bool valid = true;
+    for (int cone = 0; cone < qp->affine_cones.num_cones && valid; ++cone)
+    {
+        int old_start = qp->affine_cones.start_idx[cone];
+        int length = cone_block_length(&qp->affine_cones, cone);
+        int new_start = inverse[old_start];
+        for (int slot = 1; slot < length; ++slot)
+        {
+            if (inverse[old_start + slot] != new_start + slot)
+            {
+                valid = false;
+                break;
+            }
+        }
+    }
+    free(inverse);
+    return valid;
+}
+
+static void generate_cone_aware_vector_permutation(
+    int n, const cone_blocks_t *cones, permute_method_t method, int block_size, int *perm)
+{
+    if (method == NO_PERMUTATION || n <= 1)
+    {
+        for (int i = 0; i < n; ++i)
+            perm[i] = i;
+        return;
+    }
+
+    if (cones->num_cones <= 0)
+    {
+        if (method == FULL_RANDOM_PERMUTATION)
+            generate_random_permutation(n, perm);
+        else
+            generate_block_permutation(n, block_size, perm);
+        return;
+    }
+
+    int K = cones->num_cones;
+    permutation_unit_t *cone_units = (permutation_unit_t *)malloc((size_t)K * sizeof(permutation_unit_t));
+    for (int cone = 0; cone < K; ++cone)
+    {
+        cone_units[cone].start = cones->start_idx[cone];
+        cone_units[cone].length = cone_block_length(cones, cone);
+    }
+    qsort(cone_units, (size_t)K, sizeof(permutation_unit_t), compare_units_by_start);
+
+    std::vector<permutation_unit_t> units;
+    int cursor = 0;
+    int free_block = (method == FULL_RANDOM_PERMUTATION) ? 1 : ((block_size > 0) ? block_size : 1);
+    for (int cone = 0; cone < K; ++cone)
+    {
+        int cone_start = cone_units[cone].start;
+        while (cursor < cone_start)
+        {
+            int length = MIN(free_block, cone_start - cursor);
+            units.push_back({cursor, length});
+            cursor += length;
+        }
+        units.push_back(cone_units[cone]);
+        cursor = cone_start + cone_units[cone].length;
+    }
+    while (cursor < n)
+    {
+        int length = MIN(free_block, n - cursor);
+        units.push_back({cursor, length});
+        cursor += length;
+    }
+    free(cone_units);
+
+    for (int i = (int)units.size() - 1; i > 0; --i)
+    {
+        int j = rand() % (i + 1);
+        permutation_unit_t tmp = units[i];
+        units[i] = units[j];
+        units[j] = tmp;
+    }
+
+    int out = 0;
+    for (const permutation_unit_t &unit : units)
+        for (int slot = 0; slot < unit.length; ++slot)
+            perm[out++] = unit.start + slot;
+}
+
+void generate_cone_aware_permutation(const qp_problem_t *qp, permute_method_t method, int block_size, int *perm)
+{
+    generate_cone_aware_vector_permutation(qp->num_variables, &qp->cones, method, block_size, perm);
+}
+
+void generate_affine_cone_aware_row_permutation(const qp_problem_t *qp,
+                                                permute_method_t method,
+                                                int block_size,
+                                                int *perm)
+{
+    generate_cone_aware_vector_permutation(qp->num_constraints, &qp->affine_cones, method, block_size, perm);
 }
 
 qp_problem_t *permute_problem_return_new(const qp_problem_t *qp, int *row_perm, int *col_perm)
@@ -187,12 +418,16 @@ qp_problem_t *permute_problem_return_new(const qp_problem_t *qp, int *row_perm, 
 
     qp_problem_t *new_qp = deepcopy_problem(qp);
 
-    permute_problem(new_qp, row_perm, col_perm);
+    if (!permute_problem(new_qp, row_perm, col_perm))
+    {
+        qp_problem_free(new_qp);
+        return NULL;
+    }
 
     return new_qp;
 }
 
-void generate_random_permutation(int n, int *perm)
+static void generate_random_permutation(int n, int *perm)
 {
     for (int i = 0; i < n; i++)
         perm[i] = i;
@@ -205,24 +440,7 @@ void generate_random_permutation(int n, int *perm)
     }
 }
 
-void randomly_permute_problem(qp_problem_t *qp, int **out_row_perm, int **out_col_perm)
-{
-    int m = qp->num_constraints;
-    int n = qp->num_variables;
-
-    int *row_perm = (int *)malloc(m * sizeof(int));
-    int *col_perm = (int *)malloc(n * sizeof(int));
-
-    generate_random_permutation(m, row_perm);
-    generate_random_permutation(n, col_perm);
-
-    permute_problem(qp, row_perm, col_perm);
-
-    *out_row_perm = row_perm;
-    *out_col_perm = col_perm;
-}
-
-void generate_block_permutation(int n, int block_size, int *perm)
+static void generate_block_permutation(int n, int block_size, int *perm)
 {
     if (block_size <= 0)
         block_size = 1;
@@ -260,24 +478,6 @@ void generate_block_permutation(int n, int block_size, int *perm)
         }
     }
     free(block_indices);
-}
-
-void randomly_block_permute_problem(
-    qp_problem_t *qp, int row_block_size, int col_block_size, int **out_row_perm, int **out_col_perm)
-{
-    int m = qp->num_constraints;
-    int n = qp->num_variables;
-
-    int *row_perm = (int *)malloc(m * sizeof(int));
-    int *col_perm = (int *)malloc(n * sizeof(int));
-
-    generate_block_permutation(m, row_block_size, row_perm);
-    generate_block_permutation(n, col_block_size, col_perm);
-
-    permute_problem(qp, row_perm, col_perm);
-
-    *out_row_perm = row_perm;
-    *out_col_perm = col_perm;
 }
 
 void repermute_solution(pdhcg_result_t *result, int *row_perm, int *col_perm)

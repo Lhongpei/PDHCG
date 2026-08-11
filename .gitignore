@@ -56,8 +56,11 @@ dkms.conf
 *.dwo
 
 # ignored files
-build/*
+build*/
 test/*
+!test/*.c
+!test/*.cu
+!test/*.h
 /.vscode
 /.venv
 /_b

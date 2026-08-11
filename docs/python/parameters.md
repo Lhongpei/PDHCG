@@ -21,16 +21,18 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 | `IterationLimit` | int | 2147483647 | Maximum number of iterations |
 | `OptTol` | float | 1e-4 | Relative optimality tolerance |
 | `FeasTol` | float | 1e-4 | Relative feasibility tolerance |
-| `InfeasTol` | float | 1e-10 | Infeasibility detection tolerance |
+| `InfeasTol` | float | 1e-12 | Infeasibility detection tolerance |
 
 ### Algorithm Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `CurtisReidIters` | int | 0 | Iterations for Curtis-Reid log-domain matrix scaling; 0 disables it |
 | `RuizIterations` | int | 10 | Iterations for L-inf Ruiz rescaling |
 | `PockChambolleAlpha` | float | 1.0 | Pock-Chambolle step size parameter |
 | `UsePockChambolle` | bool | True | Enable Pock-Chambolle rescaling |
 | `UseBoundObjectiveRescaling` | bool | True | Enable bound objective rescaling |
+| `UseConePreservingScaling` | bool | True | Broadcast one scaling value over every cone block |
 | `EvalFrequency` | int | 200 | Frequency of termination criteria evaluation |
 
 ### Inner Solver Parameters
@@ -60,3 +62,8 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `OptNorm` | str | "linf" | Norm for optimality: "l2" or "linf" |
+
+!!! note "Cone constraints"
+    Cone specs are not solver parameters; they are part of the problem and are
+    passed as a columnar `ConeSpec` to `Model(variable_cones=...)` or the
+    `cones=` kwarg of `solve_once`. See [model.md](model.md#cone-constraints).

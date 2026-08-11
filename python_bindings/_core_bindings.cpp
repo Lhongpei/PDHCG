@@ -15,7 +15,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "cbf_parser.h"
+#include "cone_utils.h"
+#include "mps_parser.h"
 #include "pdhcg.h"
+#include <algorithm>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
@@ -264,10 +269,12 @@ static py::dict get_default_params_py()
     d["iteration_limit"] = p.termination_criteria.iteration_limit;
 
     // rescaling
+    d["curtis_reid_iterations"] = p.curtis_reid_iterations;
     d["l_inf_ruiz_iterations"] = p.l_inf_ruiz_iterations;
     d["has_pock_chambolle_alpha"] = p.has_pock_chambolle_alpha;
     d["pock_chambolle_alpha"] = p.pock_chambolle_alpha;
     d["bound_objective_rescaling"] = p.bound_objective_rescaling;
+    d["use_cone_preserving_scaling"] = p.use_cone_preserving_scaling;
 
     // restart
     d["artificial_restart_threshold"] = p.restart_params.artificial_restart_threshold;
@@ -353,10 +360,12 @@ static void parse_params_from_python(py::object params_obj, pdhg_parameters_t *p
     geti("iteration_limit", p->termination_criteria.iteration_limit);
 
     // rescaling
+    geti("curtis_reid_iterations", p->curtis_reid_iterations);
     geti("l_inf_ruiz_iterations", p->l_inf_ruiz_iterations);
     getb("has_pock_chambolle_alpha", p->has_pock_chambolle_alpha);
     getf("pock_chambolle_alpha", p->pock_chambolle_alpha);
     getb("bound_objective_rescaling", p->bound_objective_rescaling);
+    getb("use_cone_preserving_scaling", p->use_cone_preserving_scaling);
 
     // restart
     getf("artificial_restart_threshold", p->restart_params.artificial_restart_threshold);
@@ -480,26 +489,168 @@ static PyMatrixView get_matrix_from_python(py::object A, double zero_tol)
     throw std::invalid_argument("Unsupported matrix A: expected numpy.ndarray or "
                                 "scipy.sparse (csr/csc/coo)");
 }
-// solve function
+static py::dict
+cone_blocks_to_columnar(const cone_blocks_t *blocks, int ambient_dimension, const std::vector<int> *starts = nullptr)
+{
+    int count = blocks ? blocks->num_cones : 0;
+    if (starts && (int)starts->size() != count)
+        throw std::logic_error("compact cone starts have the wrong length");
+
+    py::array_t<int32_t> types({count});
+    py::array_t<int32_t> start_indices({count});
+    py::array_t<int32_t> v_dims({count});
+    py::array_t<double> power_alphas({count});
+    int32_t *type_data = types.mutable_data();
+    int32_t *start_data = start_indices.mutable_data();
+    int32_t *v_dim_data = v_dims.mutable_data();
+    double *alpha_data = power_alphas.mutable_data();
+    for (int cone = 0; cone < count; ++cone)
+    {
+        type_data[cone] = static_cast<int32_t>(blocks->type[cone]);
+        start_data[cone] = starts ? (*starts)[cone] : blocks->start_idx[cone];
+        v_dim_data[cone] = blocks->v_dim[cone];
+        alpha_data[cone] = blocks->type[cone] == CONE_POWER && blocks->power_alpha ? blocks->power_alpha[cone] : 0.0;
+    }
+
+    py::dict result;
+    result["types"] = types;
+    result["starts"] = start_indices;
+    result["v_dims"] = v_dims;
+    result["power_alphas"] = power_alphas;
+    if (blocks && blocks->is_fixed)
+    {
+        if (blocks->fixed_mask_size != ambient_dimension)
+            throw std::logic_error("cone fixed mask has the wrong ambient dimension");
+        py::array_t<uint8_t> fixed_mask({ambient_dimension});
+        uint8_t *fixed_data = fixed_mask.mutable_data();
+        for (int index = 0; index < ambient_dimension; ++index)
+            fixed_data[index] = blocks->is_fixed[index] ? 1 : 0;
+        result["fixed_mask"] = fixed_mask;
+    }
+    else
+    {
+        result["fixed_mask"] = py::none();
+    }
+    return result;
+}
+
+struct ParsedConeSpecs
+{
+    std::vector<cone_spec_t> specs;
+    std::vector<py::object> owners;
+};
+
+static bool has_columnar_cone_fields(const py::object &cones)
+{
+    return py::hasattr(cones, "types") && py::hasattr(cones, "starts") && py::hasattr(cones, "v_dims") &&
+        py::hasattr(cones, "power_alphas");
+}
+
+static py::object cone_field(const py::object &cones, const char *name, bool required = true)
+{
+    if (py::hasattr(cones, name))
+        return cones.attr(name);
+    if (required)
+        throw std::invalid_argument(std::string("columnar cone metadata requires '") + name + "'");
+    return py::none();
+}
+
+static ParsedConeSpecs parse_columnar_cone_specs(py::object cones, bool affine, int ambient_dimension)
+{
+    using IntArray = py::array_t<int32_t, py::array::c_style>;
+    using DoubleArray = py::array_t<double, py::array::c_style>;
+
+    IntArray types(cone_field(cones, "types"));
+    IntArray starts(cone_field(cones, "starts"));
+    IntArray v_dims(cone_field(cones, "v_dims"));
+    DoubleArray power_alphas(cone_field(cones, "power_alphas"));
+    if (types.ndim() != 1 || starts.ndim() != 1 || v_dims.ndim() != 1 || power_alphas.ndim() != 1)
+        throw std::invalid_argument("columnar cone fields must be one-dimensional arrays");
+    py::ssize_t count = starts.size();
+    if (types.size() != count || v_dims.size() != count || power_alphas.size() != count)
+        throw std::invalid_argument("columnar cone fields must have the same length");
+    if (count > std::numeric_limits<int>::max())
+        throw std::invalid_argument("too many cone blocks");
+
+    ParsedConeSpecs out;
+    out.specs.resize((size_t)count);
+
+    const uint8_t *fixed_data = nullptr;
+    py::object fixed_field = cone_field(cones, "fixed_mask", false);
+    if (!fixed_field.is_none())
+    {
+        if (affine)
+            throw std::invalid_argument("affine cones do not support fixed slots");
+        py::array_t<uint8_t, py::array::c_style> fixed_mask(fixed_field);
+        if (fixed_mask.ndim() != 1 || fixed_mask.size() != ambient_dimension)
+            throw std::invalid_argument("fixed_mask length must equal the variable dimension");
+        fixed_data = fixed_mask.data();
+        out.owners.push_back(std::move(fixed_mask));
+    }
+
+    const char *kind = affine ? "affine cone" : "cone";
+    const int32_t *type_data = types.data();
+    const int32_t *start_data = starts.data();
+    const int32_t *v_dim_data = v_dims.data();
+    const double *alpha_data = power_alphas.data();
+    for (py::ssize_t cone = 0; cone < count; ++cone)
+    {
+        int type_code = type_data[cone];
+        if (type_code < CONE_ROTATED_SOC || type_code > CONE_POWER)
+            throw std::invalid_argument(std::string(kind) + " has an invalid type code");
+        cone_spec_t &spec = out.specs[(size_t)cone];
+        spec.type = static_cast<cone_type_t>(type_code);
+        spec.start_idx = start_data[cone];
+        spec.v_dim = v_dim_data[cone];
+        spec.power_alpha = alpha_data[cone];
+        if (spec.v_dim <= 0)
+            throw std::invalid_argument(std::string(kind) + " v_dim must be positive");
+        if ((spec.type == CONE_EXPONENTIAL || spec.type == CONE_POWER) && spec.v_dim != 1)
+            throw std::invalid_argument(std::string(kind) + " EXP and POWER blocks require v_dim == 1");
+        if (spec.type == CONE_POWER &&
+            !(spec.power_alpha > 0.0 && spec.power_alpha < 1.0 && std::isfinite(spec.power_alpha)))
+            throw std::invalid_argument(std::string(kind) + " power alpha must be in (0,1)");
+        int length = cone_length(spec.type, spec.v_dim);
+        if (spec.start_idx < 0 || length <= 0 || (long long)spec.start_idx + length > (long long)ambient_dimension)
+            throw std::invalid_argument(std::string(kind) + " range exceeds the ambient dimension");
+        spec.is_fixed = fixed_data ? reinterpret_cast<const char *>(fixed_data + spec.start_idx) : nullptr;
+    }
+    return out;
+}
+
+static ParsedConeSpecs parse_cone_specs(py::object cones, bool affine, int ambient_dimension)
+{
+    ParsedConeSpecs out;
+    if (cones.is_none())
+        return out;
+    if (!has_columnar_cone_fields(cones))
+        throw std::invalid_argument("cones must be a pdhcg.ConeSpec");
+    return parse_columnar_cone_specs(cones, affine, ambient_dimension);
+}
+
 static py::dict solve_once(py::object Q,
                            py::object R,
                            py::object A,
-                           py::object objective_vector,       // c
-                           py::object objective_constant,     // c0
-                           py::object variable_lower_bound,   // lb
-                           py::object variable_upper_bound,   // ub
-                           py::object constraint_lower_bound, // l
-                           py::object constraint_upper_bound, // u
+                           py::object objective_vector,
+                           py::object objective_constant,
+                           py::object variable_lower_bound,
+                           py::object variable_upper_bound,
+                           py::object constraint_lower_bound,
+                           py::object constraint_upper_bound,
                            double zero_tolerance = 0.0,
                            py::object params = py::none(),
                            py::object primal_start = py::none(),
                            py::object dual_start = py::none(),
-                           py::object D = py::none())
+                           py::object D = py::none(),
+                           py::object cones = py::none(),
+                           py::object affine_F = py::none(),
+                           py::object affine_g = py::none(),
+                           py::object affine_cones = py::none())
 {
     static std::once_flag cuda_init_flag;
     std::call_once(cuda_init_flag, []() { cudaFree(0); });
 
-    PyMatrixView view_a, view_q, view_r;
+    PyMatrixView view_a, view_q, view_r, view_f;
     if (!A.is_none())
     {
         view_a = get_matrix_from_python(A, zero_tolerance);
@@ -515,6 +666,11 @@ static py::dict solve_once(py::object Q,
         view_r = get_matrix_from_python(R, zero_tolerance);
     }
 
+    if (!affine_F.is_none())
+    {
+        view_f = get_matrix_from_python(affine_F, zero_tolerance);
+    }
+
     int n = 0;
     int m = 0;
 
@@ -524,9 +680,16 @@ static py::dict solve_once(py::object Q,
         n = view_q.desc.n;
     else if (view_r.desc.n > 0)
         n = view_r.desc.n;
+    else if (view_f.desc.n > 0)
+        n = view_f.desc.n;
 
     if (view_a.desc.m > 0)
         m = view_a.desc.m;
+
+    if (!affine_F.is_none() && view_f.desc.n != n)
+        throw std::invalid_argument("affine_F column count must match the number of variables");
+    if (affine_F.is_none() && (!affine_g.is_none() || !affine_cones.is_none()))
+        throw std::invalid_argument("affine_F is required when affine_g or affine_cones is provided");
 
     view_a.keep.owners.insert(view_a.keep.owners.end(), view_q.keep.owners.begin(), view_q.keep.owners.end());
     view_a.keep.owners.insert(view_a.keep.owners.end(), view_r.keep.owners.begin(), view_r.keep.owners.end());
@@ -554,6 +717,7 @@ static py::dict solve_once(py::object Q,
     const matrix_desc_t *q_desc_ptr = Q.is_none() ? nullptr : &view_q.desc;
     const matrix_desc_t *r_desc_ptr = R.is_none() ? nullptr : &view_r.desc;
     const matrix_desc_t *a_desc_ptr = A.is_none() ? nullptr : &view_a.desc;
+    const matrix_desc_t *f_desc_ptr = affine_F.is_none() ? nullptr : &view_f.desc;
 
     PyMatrixView view_d;
     std::vector<int32_t> d_diag_rp, d_diag_ci;
@@ -622,19 +786,46 @@ static py::dict solve_once(py::object Q,
         }
     }
 
-    qp_problem_t *prob =
-        create_qp_problem(c_ptr, q_desc_ptr, r_desc_ptr, d_desc_ptr, a_desc_ptr, l_ptr, u_ptr, lb_ptr, ub_ptr, c0_ptr);
+    int num_affine_rows = affine_F.is_none() ? 0 : view_f.desc.m;
+    ParsedConeSpecs parsed_cones = parse_cone_specs(cones, false, n);
+    ParsedConeSpecs parsed_affine_cones = parse_cone_specs(affine_cones, true, num_affine_rows);
+    std::vector<cone_spec_t> &cones_vec = parsed_cones.specs;
+    std::vector<cone_spec_t> &affine_cones_vec = parsed_affine_cones.specs;
+    const double *affine_g_ptr = nullptr;
+    if (!affine_F.is_none())
+    {
+        if (affine_cones_vec.empty())
+            throw std::invalid_argument("affine_cones must describe every row of affine_F");
+        ensure_len_or_null(affine_g, "affine_g", num_affine_rows);
+        affine_g_ptr = get_arr_ptr_f64_or_null(affine_g, "affine_g", view_f.keep);
+    }
+
+    qp_problem_t *prob = create_qp_problem(c_ptr,
+                                           q_desc_ptr,
+                                           r_desc_ptr,
+                                           d_desc_ptr,
+                                           a_desc_ptr,
+                                           l_ptr,
+                                           u_ptr,
+                                           lb_ptr,
+                                           ub_ptr,
+                                           c0_ptr,
+                                           (int)cones_vec.size(),
+                                           cones_vec.empty() ? nullptr : cones_vec.data(),
+                                           f_desc_ptr,
+                                           affine_g_ptr,
+                                           (int)affine_cones_vec.size(),
+                                           affine_cones_vec.empty() ? nullptr : affine_cones_vec.data());
     if (!prob)
     {
         throw std::runtime_error("create_qp_problem failed.");
     }
-
     // set warm start values if provided
     if ((primal_start && !primal_start.is_none()) || (dual_start && !dual_start.is_none()))
     {
         // validate dimensions and get pointers
         ensure_len_or_null(primal_start, "primal_start", n);
-        ensure_len_or_null(dual_start, "dual_start", m);
+        ensure_len_or_null(dual_start, "dual_start", m + num_affine_rows);
         const double *primal_ptr = get_arr_ptr_f64_or_null(primal_start, "primal_start", view_a.keep);
         const double *dual_ptr = get_arr_ptr_f64_or_null(dual_start, "dual_start", view_a.keep);
 
@@ -714,13 +905,198 @@ static py::dict solve_once(py::object Q,
     return info;
 }
 
-// module
+/* Convert a CsrComponent + shape (m, n, nnz) into a Python dict suitable for
+   passing to scipy.sparse.csr_matrix(...). Returns None if the matrix is empty. */
+static py::object csr_to_py(const CsrComponent *csr, int rows, int cols, int nnz)
+{
+    if (!csr || nnz <= 0 || !csr->row_ptr)
+        return py::none();
+    py::array_t<int32_t> indptr({rows + 1});
+    py::array_t<int32_t> indices({nnz});
+    py::array_t<double> vals({nnz});
+    std::memcpy(indptr.request().ptr, csr->row_ptr, sizeof(int) * (rows + 1));
+    std::memcpy(indices.request().ptr, csr->col_ind, sizeof(int) * nnz);
+    std::memcpy(vals.request().ptr, csr->val, sizeof(double) * nnz);
+    py::dict d;
+    d["indptr"] = indptr;
+    d["indices"] = indices;
+    d["data"] = vals;
+    d["shape"] = py::make_tuple(rows, cols);
+    return d;
+}
+
+static py::object csr_selected_rows_to_py(const CsrComponent *csr, const std::vector<int> &selected_rows, int cols)
+{
+    if (!csr || !csr->row_ptr || selected_rows.empty())
+        return py::none();
+    int nnz = 0;
+    for (int row : selected_rows)
+        nnz += csr->row_ptr[row + 1] - csr->row_ptr[row];
+    py::array_t<int32_t> indptr({(int)selected_rows.size() + 1});
+    py::array_t<int32_t> indices({nnz});
+    py::array_t<double> vals({nnz});
+    int32_t *indptr_data = indptr.mutable_data();
+    int32_t *indices_data = indices.mutable_data();
+    double *values_data = vals.mutable_data();
+    indptr_data[0] = 0;
+    int cursor = 0;
+    for (size_t out_row = 0; out_row < selected_rows.size(); ++out_row)
+    {
+        int row = selected_rows[out_row];
+        int begin = csr->row_ptr[row];
+        int count = csr->row_ptr[row + 1] - begin;
+        if (count > 0)
+        {
+            std::memcpy(indices_data + cursor, csr->col_ind + begin, sizeof(int) * count);
+            std::memcpy(values_data + cursor, csr->val + begin, sizeof(double) * count);
+        }
+        cursor += count;
+        indptr_data[out_row + 1] = cursor;
+    }
+    py::dict d;
+    d["indptr"] = indptr;
+    d["indices"] = indices;
+    d["data"] = vals;
+    d["shape"] = py::make_tuple((int)selected_rows.size(), cols);
+    return d;
+}
+
+/* Read an MPS or CBF problem file. Dispatches on file extension (.cbf/.cbf.gz -> CBF,
+   otherwise MPS). Affine cone rows are returned separately as affine_F, affine_g,
+   and affine_cones. Sparse matrices use {indptr, indices, data, shape} payloads. */
+static py::dict read_problem_file_py(const std::string &path)
+{
+    qp_problem_t *prob = nullptr;
+    size_t n = path.size();
+    bool is_cbf = false;
+    size_t stem_end = n;
+    if (n > 3 && path.compare(n - 3, 3, ".gz") == 0)
+        stem_end = n - 3;
+    if (stem_end >= 4 && path.compare(stem_end - 4, 4, ".cbf") == 0)
+        is_cbf = true;
+
+    prob = is_cbf ? read_cbf_file(path.c_str()) : read_mps_file(path.c_str());
+    if (!prob)
+        throw std::runtime_error("failed to read problem file: " + path);
+
+    /* QCQP files: transform quadratic constraints to SOCP cones so the extracted
+       problem is directly solvable via solve_once. Default to rotated SOC form. */
+    if (prob->num_quadratic_constraints > 0)
+    {
+        qp_problem_t *lifted = qcqp_to_socp_qp(prob, CONE_ROTATED_SOC);
+        qp_problem_free(prob);
+        if (!lifted)
+            throw std::runtime_error("QCQP -> SOCP transform failed for: " + path);
+        prob = lifted;
+    }
+
+    py::dict out;
+    int n_var = prob->num_variables;
+    int m_con = prob->num_constraints;
+    std::vector<char> is_cone_row((size_t)m_con, 0);
+    std::vector<int> affine_rows;
+    for (int cone = 0; cone < prob->affine_cones.num_cones; ++cone)
+    {
+        int length = cone_block_length(&prob->affine_cones, cone);
+        int start = prob->affine_cones.start_idx[cone];
+        for (int slot = 0; slot < length; ++slot)
+        {
+            is_cone_row[start + slot] = 1;
+            affine_rows.push_back(start + slot);
+        }
+    }
+    std::vector<int> scalar_rows;
+    for (int row = 0; row < m_con; ++row)
+        if (!is_cone_row[row])
+            scalar_rows.push_back(row);
+    int m_scalar = (int)scalar_rows.size();
+    int m_affine = (int)affine_rows.size();
+
+    py::array_t<double> c({n_var});
+    std::memcpy(c.request().ptr, prob->objective_vector, sizeof(double) * n_var);
+    out["c"] = c;
+    out["obj_const"] = prob->objective_constant;
+
+    out["Q"] = csr_to_py(prob->objective_sparse_matrix, n_var, n_var, prob->objective_sparse_matrix_num_nonzeros);
+    out["A"] = csr_selected_rows_to_py(prob->constraint_matrix, scalar_rows, n_var);
+
+    py::array_t<double> constr_lb({m_scalar});
+    py::array_t<double> constr_ub({m_scalar});
+    py::array_t<double> var_lb({n_var});
+    py::array_t<double> var_ub({n_var});
+    if (m_scalar > 0)
+    {
+        double *lower = constr_lb.mutable_data();
+        double *upper = constr_ub.mutable_data();
+        for (int i = 0; i < m_scalar; ++i)
+        {
+            int row = scalar_rows[i];
+            double constant = prob->affine_cone_offset[row];
+            lower[i] = prob->constraint_lower_bound[row] - constant;
+            upper[i] = prob->constraint_upper_bound[row] - constant;
+        }
+    }
+    std::memcpy(var_lb.request().ptr, prob->variable_lower_bound, sizeof(double) * n_var);
+    std::memcpy(var_ub.request().ptr, prob->variable_upper_bound, sizeof(double) * n_var);
+    out["constr_lb"] = constr_lb;
+    out["constr_ub"] = constr_ub;
+    out["var_lb"] = var_lb;
+    out["var_ub"] = var_ub;
+
+    if (prob->cones.num_cones > 0)
+        out["cones"] = cone_blocks_to_columnar(&prob->cones, n_var);
+    else
+        out["cones"] = py::none();
+
+    if (m_affine > 0)
+    {
+        out["affine_F"] = csr_selected_rows_to_py(prob->constraint_matrix, affine_rows, n_var);
+        py::array_t<double> affine_g({m_affine});
+        double *affine_g_data = affine_g.mutable_data();
+        for (int row = 0; row < m_affine; ++row)
+            affine_g_data[row] = prob->affine_cone_offset[affine_rows[row]];
+        out["affine_g"] = affine_g;
+        int compact_start = 0;
+        std::vector<int> compact_starts;
+        compact_starts.reserve((size_t)prob->affine_cones.num_cones);
+        for (int i = 0; i < prob->affine_cones.num_cones; ++i)
+        {
+            compact_starts.push_back(compact_start);
+            compact_start += cone_block_length(&prob->affine_cones, i);
+        }
+        out["affine_cones"] = cone_blocks_to_columnar(&prob->affine_cones, m_affine, &compact_starts);
+    }
+    else
+    {
+        out["affine_F"] = py::none();
+        out["affine_g"] = py::none();
+        out["affine_cones"] = py::none();
+    }
+
+    if (prob->primal_start)
+    {
+        py::array_t<double> ps({n_var});
+        std::memcpy(ps.request().ptr, prob->primal_start, sizeof(double) * n_var);
+        out["primal_start"] = ps;
+    }
+
+    qp_problem_free(prob);
+    return out;
+}
+
 PYBIND11_MODULE(_pdhcg_core, m)
 {
     m.doc() = "pdhcg core bindings (auto-detect dense/CSR/CSC/COO; initialize "
               "default params here)";
 
     m.def("get_default_params", &get_default_params_py, "Return default PDHG parameters as a dict");
+
+    m.def("read_problem_file",
+          &read_problem_file_py,
+          py::arg("path"),
+          "Read an MPS or CBF file (.mps/.mps.gz/.cbf/.cbf.gz) and return a dict with "
+          "c, obj_const, Q, A, constr_lb, constr_ub, var_lb, var_ub, cones, affine_F, "
+          "affine_g, affine_cones, and primal_start.");
 
     m.def("solve_once",
           &solve_once,
@@ -737,5 +1113,9 @@ PYBIND11_MODULE(_pdhcg_core, m)
           py::arg("params") = py::none(),
           py::arg("primal_start") = py::none(),
           py::arg("dual_start") = py::none(),
-          py::arg("D") = py::none());
+          py::arg("D") = py::none(),
+          py::arg("cones") = py::none(),
+          py::arg("affine_F") = py::none(),
+          py::arg("affine_g") = py::none(),
+          py::arg("affine_cones") = py::none());
 }

@@ -20,13 +20,13 @@
 Clone the repository and compile the project using CMake:
 
 ```bash
-git clone https://github.com/Lhongpei/PDHCG-II.git
-cd PDHCG-II
+git clone https://github.com/Lhongpei/PDHCG.git
+cd PDHCG
 cmake -S . -B build
 cmake --build build --clean-first
 ```
 
-This will create the solver binary at `./build/bin/pdhcg`.
+This will create the solver binary at `./build/pdhcg`.
 
 ### Specifying CUDA Compiler
 
@@ -63,8 +63,8 @@ pip install pdhcg
 ### From Source
 
 ```bash
-git clone https://github.com/Lhongpei/PDHCG-II.git
-cd PDHCG-II
+git clone https://github.com/Lhongpei/PDHCG.git
+cd PDHCG
 pip install .
 ```
 
@@ -73,8 +73,8 @@ pip install .
 For development with editable install:
 
 ```bash
-git clone https://github.com/Lhongpei/PDHCG-II.git
-cd PDHCG-II
+git clone https://github.com/Lhongpei/PDHCG.git
+cd PDHCG
 pip install -e ".[test]"
 ```
 
@@ -94,7 +94,7 @@ pip install pdhcg
 ### C++ Executable
 
 ```bash
-./build/bin/pdhcg --help
+./build/pdhcg --help
 ```
 
 ### Python Package

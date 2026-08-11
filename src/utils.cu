@@ -93,6 +93,12 @@ qp_problem_t *create_problem_with_dummy_constraint(const qp_problem_t *prob)
     {
         new_prob->constraint_matrix = (CsrComponent *)malloc(sizeof(CsrComponent));
     }
+    else
+    {
+        free(new_prob->constraint_matrix->row_ptr);
+        free(new_prob->constraint_matrix->col_ind);
+        free(new_prob->constraint_matrix->val);
+    }
 
     new_prob->constraint_matrix->row_ptr = (int *)malloc(2 * sizeof(int));
     new_prob->constraint_matrix->row_ptr[0] = 0;
@@ -114,6 +120,9 @@ qp_problem_t *create_problem_with_dummy_constraint(const qp_problem_t *prob)
 
     new_prob->constraint_upper_bound = (double *)malloc(1 * sizeof(double));
     new_prob->constraint_upper_bound[0] = INFINITY;
+
+    free(new_prob->affine_cone_offset);
+    new_prob->affine_cone_offset = (double *)calloc(1, sizeof(double));
 
     if (new_prob->dual_start != NULL)
     {
@@ -209,8 +218,13 @@ const char *quad_obj_type_to_string(quad_obj_type_t type)
 
 bool optimality_criteria_met(const pdhg_solver_state_t *state, double rel_opt_tol, double rel_feas_tol)
 {
+#ifdef PDHCG_ABSOLUTE_ONLY_TERMINATION
+    return state->absolute_dual_residual < rel_feas_tol && state->absolute_primal_residual < rel_feas_tol &&
+        state->objective_gap < rel_opt_tol;
+#else
     return state->relative_dual_residual < rel_feas_tol && state->relative_primal_residual < rel_feas_tol &&
         state->relative_objective_gap < rel_opt_tol;
+#endif
 }
 
 bool primal_infeasibility_criteria_met(const pdhg_solver_state_t *state, double eps)
@@ -246,15 +260,21 @@ void check_termination_criteria(pdhg_solver_state_t *solver_state, const termina
         solver_state->termination_reason = TERMINATION_REASON_OPTIMAL;
         return;
     }
-    if (primal_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
+    /* The current ray projection handles box recession directions only. Direct
+       cones require cone/dual-cone membership checks before either certificate
+       is valid. */
+    if (!solver_state->has_variable_cones)
     {
-        solver_state->termination_reason = TERMINATION_REASON_PRIMAL_INFEASIBLE;
-        return;
-    }
-    if (dual_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
-    {
-        solver_state->termination_reason = TERMINATION_REASON_DUAL_INFEASIBLE;
-        return;
+        if (primal_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
+        {
+            solver_state->termination_reason = TERMINATION_REASON_PRIMAL_INFEASIBLE;
+            return;
+        }
+        if (dual_infeasibility_criteria_met(solver_state, criteria->eps_infeasible))
+        {
+            solver_state->termination_reason = TERMINATION_REASON_DUAL_INFEASIBLE;
+            return;
+        }
     }
     if (solver_state->total_count >= criteria->iteration_limit)
     {
@@ -303,10 +323,12 @@ bool should_do_adaptive_restart(pdhg_solver_state_t *solver_state,
 
 void set_default_parameters(pdhg_parameters_t *params)
 {
+    params->curtis_reid_iterations = 0;
     params->l_inf_ruiz_iterations = 10;
     params->has_pock_chambolle_alpha = true;
     params->pock_chambolle_alpha = 1.0;
     params->bound_objective_rescaling = true;
+    params->use_cone_preserving_scaling = true;
     params->verbose = 1;
     params->termination_evaluation_frequency = 200;
     params->feasibility_polishing = false;
@@ -318,7 +340,7 @@ void set_default_parameters(pdhg_parameters_t *params)
 
     params->termination_criteria.eps_optimal_relative = 1e-4;
     params->termination_criteria.eps_feasible_relative = 1e-4;
-    params->termination_criteria.eps_infeasible = 1e-10;
+    params->termination_criteria.eps_infeasible = 1e-12;
     params->termination_criteria.time_sec_limit = 3600.0;
     params->termination_criteria.iteration_limit = INT32_MAX;
     params->termination_criteria.eps_feas_polish_relative = 1e-6;
@@ -342,6 +364,7 @@ void set_default_parameters(pdhg_parameters_t *params)
     params->permute_method = BLOCK_RANDOM_PERMUTATION;
 
     params->diag_jacobi_precond = true;
+    params->default_cone_type = CONE_ROTATED_SOC;
 }
 
 #define PRINT_DIFF_INT(name, current, default_val)                                                                     \
@@ -393,7 +416,7 @@ void print_initial_info(const pdhg_parameters_t *params, const qp_problem_t *pro
         printf("%*s\n", padding, text);
     };
 
-    print_centered("PDHCG-II");
+    print_centered("PDHCG");
     print_centered("A GPU-Accelerated First-Order Solver for Convex QPs");
     print_centered("(c) Hongpei Li, 2026");
     print_centered("Contact: ishongpeili@gmail.com");
@@ -405,6 +428,27 @@ void print_initial_info(const pdhg_parameters_t *params, const qp_problem_t *pro
            problem->num_constraints,
            problem->num_variables,
            problem->constraint_matrix_num_nonzeros);
+    if (problem->cones.num_cones > 0)
+    {
+        int fixed_slots = 0;
+        if (problem->cones.is_fixed)
+        {
+            for (int i = 0; i < problem->num_variables; ++i)
+                fixed_slots += problem->cones.is_fixed[i] != 0;
+        }
+        printf("         + %d cone block(s), %d fixed slot(s)\n", problem->cones.num_cones, fixed_slots);
+    }
+    if (problem->num_quadratic_constraints > 0)
+    {
+        long total_q_nnz = 0;
+        for (int i = 0; i < problem->num_quadratic_constraints; ++i)
+        {
+            total_q_nnz += problem->quadratic_constraint_matrix_num_nonzeros[i];
+        }
+        printf("         + %d quadratic constraint(s), %ld Q-nnz total\n",
+               problem->num_quadratic_constraints,
+               total_q_nnz);
+    }
 
     printf("settings:\n");
     printf("  iter_limit         : %d\n", params->termination_criteria.iteration_limit);
@@ -418,11 +462,14 @@ void print_initial_info(const pdhg_parameters_t *params, const qp_problem_t *pro
         printf("  optimality_norm    : %s\n", params->optimality_norm == NORM_TYPE_L_INF ? "L_inf" : "L2");
     }
 
+    PRINT_DIFF_INT("curtis_reid_iter", params->curtis_reid_iterations, default_params.curtis_reid_iterations);
     PRINT_DIFF_INT("l_inf_ruiz_iter", params->l_inf_ruiz_iterations, default_params.l_inf_ruiz_iterations);
     PRINT_DIFF_DBL("pock_chambolle_alpha", params->pock_chambolle_alpha, default_params.pock_chambolle_alpha);
     PRINT_DIFF_BOOL(
         "has_pock_chambolle_alpha", params->has_pock_chambolle_alpha, default_params.has_pock_chambolle_alpha);
     PRINT_DIFF_BOOL("bound_obj_rescaling", params->bound_objective_rescaling, default_params.bound_objective_rescaling);
+    PRINT_DIFF_BOOL(
+        "use_cone_preserving_scaling", params->use_cone_preserving_scaling, default_params.use_cone_preserving_scaling);
     PRINT_DIFF_INT("sv_max_iter", params->sv_max_iter, default_params.sv_max_iter);
     PRINT_DIFF_DBL("sv_tol", params->sv_tol, default_params.sv_tol);
     PRINT_DIFF_INT(

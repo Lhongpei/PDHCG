@@ -1,4 +1,4 @@
-# Pre-commit hooks for PDHCG-II
+# Pre-commit hooks for PDHCG
 # Install: pip install pre-commit
 # Setup: pre-commit install
 # Run manually: pre-commit run --all-files

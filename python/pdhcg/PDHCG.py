@@ -41,10 +41,12 @@ _PARAM_ALIAS = {
     "OptimalityTol": "eps_optimal_relative",
     "FeasibilityTol": "eps_feasible_relative",
     # scaling / step size
+    "CurtisReidIters": "curtis_reid_iterations",
     "RuizIters": "l_inf_ruiz_iterations",
     "UsePCAlpha": "has_pock_chambolle_alpha",
     "PCAlpha": "pock_chambolle_alpha",
     "BoundObjRescaling": "bound_objective_rescaling",
+    "UseConePreservingScaling": "use_cone_preserving_scaling",
     # restarts
     "RestartArtificialThresh": "artificial_restart_threshold",
     "RestartSufficientReduction": "sufficient_reduction_for_restart",

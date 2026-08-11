@@ -60,6 +60,35 @@ extern "C"
         PDHCG_NON_Q
     } quad_obj_type_t;
 
+    typedef enum
+    {
+        CONE_ROTATED_SOC = 0,
+        CONE_STANDARD_SOC = 1,
+        CONE_EXPONENTIAL = 2,
+        CONE_POWER = 3, /* 3-dim: x^alpha * y^(1-alpha) >= |z|, x,y >= 0 */
+        NUM_CONE_TYPES = 4
+    } cone_type_t;
+
+    typedef struct
+    {
+        int num_cones;
+        int *start_idx;      /* [num_cones] */
+        int *v_dim;          /* [num_cones] */
+        cone_type_t *type;   /* [num_cones] */
+        double *power_alpha; /* [num_cones]; alpha in (0,1) for CONE_POWER, else unused */
+        int fixed_mask_size; /* number of entries in is_fixed; zero when no mask is stored */
+        char *is_fixed;
+    } cone_blocks_t;
+
+    typedef struct
+    {
+        cone_type_t type;
+        int start_idx; /* variable index, or row of F for affine cones */
+        int v_dim;
+        double power_alpha;   /* required for CONE_POWER (in (0,1)); ignored otherwise */
+        const char *is_fixed; /* variable cones only; must be NULL for affine cones */
+    } cone_spec_t;
+
     typedef struct
     {
         int num_variables;
@@ -84,6 +113,19 @@ extern "C"
 
         double *constraint_lower_bound;
         double *constraint_upper_bound;
+
+        /* Internal canonical rows [A; F]. affine_cone_offset is zero on the
+           scalar A rows, and affine_cones use global canonical row indices. */
+        double *affine_cone_offset;
+        cone_blocks_t affine_cones;
+
+        int num_quadratic_constraints;
+        int *quadratic_constraint_row_indices;
+        CsrComponent **quadratic_constraint_matrices;
+        int *quadratic_constraint_matrix_num_nonzeros;
+
+        cone_blocks_t cones;
+        int num_original_variables;
 
         double *primal_start;
         double *dual_start;
@@ -139,10 +181,12 @@ extern "C"
 
     typedef struct
     {
+        int curtis_reid_iterations;
         int l_inf_ruiz_iterations;
         bool has_pock_chambolle_alpha;
         double pock_chambolle_alpha;
         bool bound_objective_rescaling;
+        bool use_cone_preserving_scaling;
         int verbose;
         int termination_evaluation_frequency;
         int sv_max_iter;
@@ -155,6 +199,7 @@ extern "C"
         inner_solver_parameters_t inner_solver_parameters;
         bool presolve;
         bool diag_jacobi_precond;
+        cone_type_t default_cone_type;
         partition_method_t partition_method;
         permute_method_t permute_method;
         grid_size_t grid_size;

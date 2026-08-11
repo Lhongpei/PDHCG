@@ -48,7 +48,6 @@ typedef struct
 
     cusparseDnVecDescr_t vec_primal_obj_prod;
 
-    // Low rank Component
     cu_sparse_matrix_csr_t *objective_lowrank_matrix;
     cu_sparse_matrix_csr_t *objective_lowrank_matrix_t;
     pdhcg_spmv_ctx_t *spmv_ctx_R;
@@ -65,7 +64,6 @@ typedef struct
     double *d_middle_dense;
     double *Rx_buffer;
 
-    // Buffer for Distributed Version
     double *global_primal_obj_product;
     cusparseDnVecDescr_t vec_global_primal_obj_prod;
 } quadratic_objective_term_t;
@@ -96,6 +94,36 @@ typedef struct
     int has_inner_loop;
 } inner_solver_t;
 
+typedef struct distributed_cone_split_s distributed_cone_split_t;
+struct cone_bucket_s;
+
+typedef enum
+{
+    CONE_AXIS_VARIABLE = 0,
+    CONE_AXIS_CONSTRAINT = 1
+} cone_axis_t;
+
+typedef struct
+{
+    cone_axis_t axis;
+    int num_blocks;
+    int *start_idx;                       /* permuted by bucket */
+    int *v_dim;                           /* permuted by bucket */
+    double *power_alpha;                  /* permuted by bucket; NULL if no power cones */
+    char *is_fixed;                       /* NULL if no fixes */
+    double *projection_warm_start;        /* device [PDHCG_CONE_WORKSPACE_STRIDE * num_blocks] */
+    double *residual_warm_start;          /* device [PDHCG_CONE_WORKSPACE_STRIDE * num_blocks] */
+    double *complementarity_residual;     /* device [num_blocks] */
+    double *power_violation_workspace;    /* device [2 * num_blocks], variable side only */
+    double *coordinate_rescaling;         /* device [num_constraints], affine side only */
+    double *effective_objective_gradient; /* device [num_variables] */
+    double *bb_primal_snapshot;           /* device [num_variables] */
+    struct cone_bucket_s *buckets;
+    int num_buckets;
+    bool has_power_cones;
+    distributed_cone_split_t *split;
+} cone_runtime_t;
+
 typedef enum
 {
     LP,
@@ -117,6 +145,7 @@ typedef struct
     cu_sparse_matrix_csr_t *constraint_matrix_t;
     double *constraint_lower_bound;
     double *constraint_upper_bound;
+    double *affine_cone_offset;
     int num_blocks_primal;
     int num_blocks_dual;
     int num_blocks_primal_dual;
@@ -188,8 +217,8 @@ typedef struct
     cusparseDnVecDescr_t vec_primal_prod;
     cusparseDnVecDescr_t vec_dual_prod;
 
-    double *ones_primal_d;
-    double *ones_dual_d;
+    double *ones_primal;
+    double *ones_dual;
 
     double feasibility_polishing_time;
     int feasibility_iteration;
@@ -197,7 +226,35 @@ typedef struct
     problem_type_t problem_type;
     inner_solver_t *inner_solver;
     grid_context_t *grid_context;
+
+    bool has_variable_cones;
+    cone_runtime_t cones;
+    cone_runtime_t affine_cones;
+    int num_original_variables;
 } pdhg_solver_state_t;
+
+typedef enum
+{
+    PROJ_METHOD_THREAD = 0,
+    PROJ_METHOD_WARP = 1,
+    PROJ_METHOD_BLOCK = 2,
+    PROJ_METHOD_GRID = 3,
+    PROJ_METHOD_GRID_WEIGHTED = 4,
+    NUM_PROJ_METHODS = 5
+} cone_proj_method_t;
+
+#define PDHCG_LARGE_CONE_MIN_VDIM 32768
+#define PDHCG_LARGE_CONE_BLOCKS_PER_CONE 128
+#define PDHCG_CONE_WORKSPACE_STRIDE 8
+#define PDHCG_CONE_GRID_ROOT_ITERATIONS 40
+
+typedef struct cone_bucket_s
+{
+    cone_type_t type;
+    cone_proj_method_t method;
+    int offset; /* start within permuted cone arrays */
+    int count;
+} cone_bucket_t;
 
 typedef enum
 {

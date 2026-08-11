@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "pdhcg"
-version = "0.2.1"
+version = "0.3.0"
 description = "Python bindings for PDHCG, GPU accelerated first order solver for Quadratic Programming"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -23,7 +23,7 @@ build-dir = "build/{wheel_tag}"
 cmake.version = ">=3.20"
 cmake.build-type = "Release"
 wheel.packages = ["python/pdhcg"]
-sdist.include = ["tests/**", "pyproject.toml", "README.md", "LICENSE"]
+sdist.include = ["tests/**", "CHANGELOG.md", "pyproject.toml", "README.md", "LICENSE"]
 
 [tool.scikit-build.cmake.define]
 CMAKE_CUDA_ARCHITECTURES = "all"
@@ -38,8 +38,12 @@ PDHCG_BUILD_TESTS = "OFF"
 test = [
   "pytest>=8",
   "pytest-cov>=4",
+  "cvxpy>=1.6; python_version >= '3.9'",
   "numpy",
   "scipy"
+]
+cvxpy = [
+  "cvxpy>=1.6; python_version >= '3.9'",
 ]
 dev = [
   "ruff>=0.9.0",

@@ -54,8 +54,8 @@ jobs:
 
       - name: Check executable
         run: |
-          test -f build/bin/pdhcg
-          ./build/bin/pdhcg --help || true
+          test -f build/pdhcg
+          ./build/pdhcg --help || true
 
   build-python:
     name: Build Python Package

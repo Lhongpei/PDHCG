@@ -15,6 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "cbf_parser.h"
 #include "mps_parser.h"
 #include "pdhcg.h"
 #include "presolve_wrapper.h"
@@ -40,6 +41,18 @@ char *get_output_path(const char *output_dir, const char *instance_name, const c
     char *full_path = safe_malloc(path_len * sizeof(char));
     snprintf(full_path, path_len, "%s/%s%s", output_dir, instance_name, suffix);
     return full_path;
+}
+
+/* Dispatch on file extension: .cbf(.gz) -> CBF parser, else MPS parser. */
+static qp_problem_t *read_problem_file(const char *filename)
+{
+    size_t n = strlen(filename);
+    const char *tail = filename;
+    if (n > 3 && strcmp(filename + n - 3, ".gz") == 0)
+        n -= 3;
+    if (n > 4 && strncmp(tail + n - 4, ".cbf", 4) == 0)
+        return read_cbf_file(filename);
+    return read_mps_file(filename);
 }
 
 char *extract_instance_name(const char *filename)
@@ -112,6 +125,8 @@ void save_solver_summary(const pdhcg_result_t *result, const char *output_dir, c
     }
     fprintf(outfile, "Primal Objective Value: %e\n", result->primal_objective_value);
     fprintf(outfile, "Dual Objective Value: %e\n", result->dual_objective_value);
+    fprintf(outfile, "Absolute Primal Residual: %e\n", result->absolute_primal_residual);
+    fprintf(outfile, "Absolute Dual Residual: %e\n", result->absolute_dual_residual);
     fprintf(outfile, "Relative Primal Residual: %e\n", result->relative_primal_residual);
     fprintf(outfile, "Relative Dual Residual: %e\n", result->relative_dual_residual);
     fprintf(outfile, "Absolute Objective Gap: %e\n", result->objective_gap);
@@ -140,10 +155,10 @@ void save_solver_summary(const pdhcg_result_t *result, const char *output_dir, c
 
 void print_usage(const char *prog_name)
 {
-    fprintf(stderr, "Usage: %s [OPTIONS] <mps_file> <output_dir>\n\n", prog_name);
+    fprintf(stderr, "Usage: %s [OPTIONS] <problem_file> <output_dir>\n\n", prog_name);
 
     fprintf(stderr, "Arguments:\n");
-    fprintf(stderr, "  <mps_file>               Path to the input problem in MPS format (.mps .QPS or .mps.gz).\n");
+    fprintf(stderr, "  <problem_file>           Input problem: .mps, .qps, .cbf, and gzip-compressed variants.\n");
     fprintf(stderr, "  <output_dir>             Directory where output files will be saved. It will contain:\n");
     fprintf(stderr, "                             - <basename>_summary.txt\n");
     fprintf(stderr, "                             - <basename>_primal_solution.txt\n");
@@ -156,22 +171,28 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --iter_limit <int>   Iteration limit (default: %d).\n", INT32_MAX);
     fprintf(stderr, "      --eps_opt <float>    Relative optimality tolerance (default: 1e-4).\n");
     fprintf(stderr, "      --eps_feas <float>   Relative feasibility tolerance (default: 1e-4).\n");
-    fprintf(stderr, "      --eps_infeas_detect  Infeasibility detection tolerance (default: 1e-10).\n");
+    fprintf(stderr, "      --eps_infeas_detect  Infeasibility detection tolerance (default: 1e-12).\n");
+    fprintf(stderr, "      --curtis_reid_iter   Iterations for Curtis-Reid scaling (default: 0, disabled).\n");
     fprintf(stderr, "      --l_inf_ruiz_iter    Iterations for L-inf Ruiz rescaling (default: 10).\n");
     fprintf(stderr, "      --no_pock_chambolle  Disable Pock-Chambolle rescaling (default: enabled).\n");
     fprintf(stderr, "      --pock_chambolle_alpha Value for Pock-Chambolle alpha (default: 1.0).\n");
     fprintf(stderr, "      --no_bound_obj_rescaling Disable bound objective rescaling.\n");
+    fprintf(stderr, "      --no_cone_preserving_scaling Keep coordinate-wise cone scaling.\n");
     fprintf(stderr, "      --eval_freq <int>    Termination evaluation frequency (default: 200).\n");
+    fprintf(stderr, "      --artificial_restart_threshold Artificial restart threshold (default: 0.36).\n");
+    fprintf(stderr,
+            "      --sufficient_reduction_for_restart Sufficient reduction factor for restart (default: 0.2).\n");
+    fprintf(stderr, "      --necessary_reduction_for_restart Necessary reduction factor for restart (default: 0.8).\n");
     fprintf(stderr, "      --sv_max_iter <int>  Max iterations for singular value estimation (default: 5000).\n");
     fprintf(stderr, "      --sv_tol <float>     Tolerance for singular value estimation (default: 1e-4).\n");
     fprintf(stderr, "      --opt_norm <type>    Norm for optimality criteria: l2 or linf (default: linf).\n");
     fprintf(stderr, "      --inner_iter_limit   Max iterations for the inner solver (default: 1000).\n");
     fprintf(stderr, "      --inner_init_tol     Initial tolerance for the inner solver (default: 1e-3).\n");
     fprintf(stderr, "      --inner_min_tol      Minimum tolerance for the inner solver (default: 1e-9).\n");
-    fprintf(stderr, "      --presolve <int>     Enable (1) or disable (0) presolve (default: 1).\n");
     fprintf(
         stderr,
         "      --no_diag_precond    Disable Jacobi diagonal preconditioner for inner subproblem (default: enabled).\n");
+    fprintf(stderr, "      --soc_form <form>    QCQP cone formulation: 'rotated' or 'standard' (default: rotated).\n");
 
 #ifdef PDHCG_COMPILE_DISTRIBUTED
     fprintf(stderr, "\nDistributed Options (MPI & NCCL):\n");
@@ -210,6 +231,12 @@ int run_pdhcg(int argc, char *argv[])
                                            {"inner_min_tol", required_argument, 0, 1017},
                                            {"presolve", required_argument, 0, 1018},
                                            {"no_diag_precond", no_argument, 0, 1019},
+                                           {"soc_form", required_argument, 0, 1020},
+                                           {"no_cone_preserving_scaling", no_argument, 0, 1021},
+                                           {"artificial_restart_threshold", required_argument, 0, 1022},
+                                           {"sufficient_reduction_for_restart", required_argument, 0, 1023},
+                                           {"necessary_reduction_for_restart", required_argument, 0, 1024},
+                                           {"curtis_reid_iter", required_argument, 0, 1025},
                                            {0, 0, 0, 0}};
 
     int opt;
@@ -292,6 +319,32 @@ int run_pdhcg(int argc, char *argv[])
             case 1019:
                 params.diag_jacobi_precond = false;
                 break;
+            case 1020:
+                if (strcmp(optarg, "rotated") == 0)
+                    params.default_cone_type = CONE_ROTATED_SOC;
+                else if (strcmp(optarg, "standard") == 0)
+                    params.default_cone_type = CONE_STANDARD_SOC;
+                else
+                {
+                    fprintf(stderr, "Error: soc_form must be 'rotated' or 'standard'\n");
+                    return 1;
+                }
+                break;
+            case 1021:
+                params.use_cone_preserving_scaling = false;
+                break;
+            case 1022:
+                params.restart_params.artificial_restart_threshold = atof(optarg);
+                break;
+            case 1023:
+                params.restart_params.sufficient_reduction_for_restart = atof(optarg);
+                break;
+            case 1024:
+                params.restart_params.necessary_reduction_for_restart = atof(optarg);
+                break;
+            case 1025:
+                params.curtis_reid_iterations = atoi(optarg);
+                break;
             case '?':
                 return 1;
         }
@@ -311,7 +364,7 @@ int run_pdhcg(int argc, char *argv[])
     if (instance_name == NULL)
         return 1;
 
-    qp_problem_t *problem = read_mps_file(filename);
+    qp_problem_t *problem = read_problem_file(filename);
     if (problem == NULL)
     {
         fprintf(stderr, "Failed to read or parse the file.\n");
@@ -384,6 +437,11 @@ int run_d_pdhcg(int argc, char *argv[])
                                            {"inner_min_tol", required_argument, 0, 1017},
                                            {"presolve", required_argument, 0, 1018},
                                            {"no_diag_precond", no_argument, 0, 1019},
+                                           {"no_cone_preserving_scaling", no_argument, 0, 1021},
+                                           {"artificial_restart_threshold", required_argument, 0, 1022},
+                                           {"sufficient_reduction_for_restart", required_argument, 0, 1023},
+                                           {"necessary_reduction_for_restart", required_argument, 0, 1024},
+                                           {"curtis_reid_iter", required_argument, 0, 1025},
                                            {"grid_size", required_argument, 0, 2001},
                                            {"partition_method", required_argument, 0, 2002},
                                            {"permute_method", required_argument, 0, 2003},
@@ -472,6 +530,21 @@ int run_d_pdhcg(int argc, char *argv[])
                 break;
             case 1019:
                 params.diag_jacobi_precond = false;
+                break;
+            case 1021:
+                params.use_cone_preserving_scaling = false;
+                break;
+            case 1022:
+                params.restart_params.artificial_restart_threshold = atof(optarg);
+                break;
+            case 1023:
+                params.restart_params.sufficient_reduction_for_restart = atof(optarg);
+                break;
+            case 1024:
+                params.restart_params.necessary_reduction_for_restart = atof(optarg);
+                break;
+            case 1025:
+                params.curtis_reid_iterations = atoi(optarg);
                 break;
             case 2001: // --grid_size r,c
             {
@@ -575,8 +648,8 @@ int run_d_pdhcg(int argc, char *argv[])
     if (rank_global == 0)
     {
         if (params.verbose)
-            printf("Rank 0: Loading MPS file '%s'...\n", filename);
-        problem = read_mps_file(filename);
+            printf("Rank 0: Loading problem file '%s'...\n", filename);
+        problem = read_problem_file(filename);
 
         if (problem == NULL)
         {

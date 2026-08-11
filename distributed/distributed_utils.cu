@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "cone_utils.h"
 #include "distributed_types.h"
 #include "distributed_utils.h"
 #include "internal_types.h"
+#include "partition_utils.h"
 #include "solver_state.h"
 #include "utils.h"
 #include <cuda_runtime.h>
@@ -51,6 +53,7 @@ extern "C"
     grid_context_t initialize_parallel_context(int P_row, int P_col)
     {
         grid_context_t grid;
+        memset(&grid, 0, sizeof(grid));
         int initialized;
         int world_size;
 
@@ -139,6 +142,40 @@ extern "C"
         return grid;
     }
 }
+
+static void free_distributed_cone_partition(distributed_cone_partition_t *partition)
+{
+    if (!partition)
+        return;
+    free(partition->v_dim);
+    free(partition->type);
+    free(partition->fixed_mask);
+    free(partition->local_start);
+    free(partition->local_first);
+    free(partition->local_count);
+    memset(partition, 0, sizeof(*partition));
+}
+
+void destroy_parallel_context(grid_context_t *grid)
+{
+    if (!grid)
+        return;
+
+    free(grid->variable_cuts);
+    free(grid->constraint_cuts);
+    free_distributed_cone_partition(&grid->split_cones);
+    free_distributed_cone_partition(&grid->split_affine_cones);
+
+    NCCL_CHECK(ncclCommDestroy(grid->nccl_row));
+    NCCL_CHECK(ncclCommDestroy(grid->nccl_col));
+    NCCL_CHECK(ncclCommDestroy(grid->nccl_global));
+    if (grid->comm_row != MPI_COMM_NULL)
+        MPI_Comm_free(&grid->comm_row);
+    if (grid->comm_col != MPI_COMM_NULL)
+        MPI_Comm_free(&grid->comm_col);
+    memset(grid, 0, sizeof(*grid));
+}
+
 int *get_balanced_cuts(const int *weights, int total_dim, int num_partitions)
 {
     int *cuts = (int *)malloc((num_partitions + 1) * sizeof(int));
@@ -176,6 +213,291 @@ int *get_balanced_cuts(const int *weights, int total_dim, int num_partitions)
     }
 
     return cuts;
+}
+
+static unsigned char distributed_cone_fixed_mask(const qp_problem_t *problem, int cone)
+{
+    if (!problem->cones.is_fixed)
+        return 0;
+
+    int start = problem->cones.start_idx[cone];
+    int k = problem->cones.v_dim[cone];
+    int length = cone_block_length(&problem->cones, cone);
+    unsigned char mask = 0;
+    for (int slot = 0; slot < length - 2; ++slot)
+        if (problem->cones.is_fixed[start + slot])
+            mask |= PDHCG_DIST_CONE_FIXED_VECTOR;
+    if (problem->cones.is_fixed[start + k])
+        mask |= PDHCG_DIST_CONE_FIXED_AUX0;
+    if (problem->cones.is_fixed[start + k + 1])
+        mask |= PDHCG_DIST_CONE_FIXED_AUX1;
+    return mask;
+}
+
+static bool objective_is_pure_diagonal(const qp_problem_t *problem)
+{
+    if (problem->num_rank_lowrank_obj > 0 || !problem->objective_sparse_matrix)
+        return problem->num_rank_lowrank_obj == 0;
+    for (int row = 0; row < problem->num_variables; ++row)
+    {
+        for (int nz = problem->objective_sparse_matrix->row_ptr[row];
+             nz < problem->objective_sparse_matrix->row_ptr[row + 1];
+             ++nz)
+        {
+            if (problem->objective_sparse_matrix->col_ind[nz] != row &&
+                problem->objective_sparse_matrix->val[nz] != 0.0)
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool cone_has_diagonal_objective(const qp_problem_t *problem, int cone)
+{
+    if (!problem->objective_sparse_matrix || !objective_is_pure_diagonal(problem))
+        return false;
+    int start = problem->cones.start_idx[cone];
+    int end = start + cone_block_length(&problem->cones, cone);
+    for (int row = start; row < end; ++row)
+    {
+        for (int nz = problem->objective_sparse_matrix->row_ptr[row];
+             nz < problem->objective_sparse_matrix->row_ptr[row + 1];
+             ++nz)
+        {
+            if (problem->objective_sparse_matrix->col_ind[nz] == row &&
+                problem->objective_sparse_matrix->val[nz] != 0.0)
+                return true;
+        }
+    }
+    return false;
+}
+
+static bool cone_can_span_gpus(const qp_problem_t *problem, int cone, const pdhg_parameters_t *params)
+{
+    cone_type_t type = problem->cones.type[cone];
+    if (type != CONE_STANDARD_SOC && type != CONE_ROTATED_SOC)
+        return false;
+    if (!params->use_cone_preserving_scaling || cone_has_diagonal_objective(problem, cone))
+        return false;
+
+    unsigned char fixed = distributed_cone_fixed_mask(problem, cone);
+    if (fixed & PDHCG_DIST_CONE_FIXED_VECTOR)
+        return false;
+    if (type == CONE_STANDARD_SOC)
+        return fixed == 0 || fixed == PDHCG_DIST_CONE_FIXED_AUX0 || fixed == PDHCG_DIST_CONE_FIXED_AUX1 ||
+            fixed == (PDHCG_DIST_CONE_FIXED_AUX0 | PDHCG_DIST_CONE_FIXED_AUX1);
+    return fixed == 0 || fixed == (PDHCG_DIST_CONE_FIXED_AUX0 | PDHCG_DIST_CONE_FIXED_AUX1);
+}
+
+static bool affine_cone_can_span_gpus(const qp_problem_t *problem, int cone, const pdhg_parameters_t *params)
+{
+    cone_type_t type = problem->affine_cones.type[cone];
+    return (type == CONE_STANDARD_SOC || type == CONE_ROTATED_SOC) && params->use_cone_preserving_scaling;
+}
+
+static int *get_uniform_cuts(int total_dim, int num_partitions)
+{
+    int *cuts = (int *)malloc((size_t)(num_partitions + 1) * sizeof(int));
+    cuts[0] = 0;
+    cuts[num_partitions] = total_dim;
+    int chunk = total_dim / num_partitions;
+    for (int part = 1; part < num_partitions; ++part)
+        cuts[part] = part * chunk;
+    return cuts;
+}
+
+static int find_partition(const int *cuts, int num_partitions, int index)
+{
+    for (int part = 0; part < num_partitions; ++part)
+        if (index >= cuts[part] && index < cuts[part + 1])
+            return part;
+    return num_partitions - 1;
+}
+
+static bool cone_can_span_partition(const qp_problem_t *problem, int cone, bool affine, const pdhg_parameters_t *params)
+{
+    return affine ? affine_cone_can_span_gpus(problem, cone, params) : cone_can_span_gpus(problem, cone, params);
+}
+
+static bool adjust_cuts_for_cones(const qp_problem_t *problem,
+                                  const cone_blocks_t *cones,
+                                  int total_dim,
+                                  int num_partitions,
+                                  bool affine,
+                                  const pdhg_parameters_t *params,
+                                  int *cuts)
+{
+    int target_size = (total_dim + num_partitions - 1) / num_partitions;
+    int *forbidden_starts = cones->num_cones > 0 ? (int *)safe_malloc((size_t)cones->num_cones * sizeof(int)) : NULL;
+    int *forbidden_ends = cones->num_cones > 0 ? (int *)safe_malloc((size_t)cones->num_cones * sizeof(int)) : NULL;
+    int num_intervals = 0;
+    for (int cone = 0; cone < cones->num_cones; ++cone)
+    {
+        int start = cones->start_idx[cone];
+        int end = start + cone_block_length(cones, cone);
+        bool may_split = cone_can_span_partition(problem, cone, affine, params) && end - start > target_size;
+        if (!may_split && end - start > 1)
+        {
+            forbidden_starts[num_intervals] = start + 1;
+            forbidden_ends[num_intervals] = end - 1;
+            ++num_intervals;
+        }
+    }
+    bool success =
+        optimize_partition_cuts(total_dim, num_partitions, forbidden_starts, forbidden_ends, num_intervals, cuts);
+    free(forbidden_starts);
+    free(forbidden_ends);
+    return success;
+}
+
+static void build_split_partition(const qp_problem_t *problem,
+                                  const cone_blocks_t *cones,
+                                  const int *cuts,
+                                  int num_partitions,
+                                  int local_partition,
+                                  bool affine,
+                                  const pdhg_parameters_t *params,
+                                  grid_context_t *grid,
+                                  distributed_cone_partition_t *partition)
+{
+    free_distributed_cone_partition(partition);
+    for (int cone = 0; cone < cones->num_cones; ++cone)
+    {
+        int start = cones->start_idx[cone];
+        int end = start + cone_block_length(cones, cone);
+        if (find_partition(cuts, num_partitions, start) != find_partition(cuts, num_partitions, end - 1))
+            ++partition->num_cones;
+    }
+
+    int count = partition->num_cones;
+    if (count == 0)
+        return;
+    partition->v_dim = (int *)safe_malloc((size_t)count * sizeof(int));
+    partition->type = (cone_type_t *)safe_malloc((size_t)count * sizeof(cone_type_t));
+    partition->fixed_mask = (unsigned char *)safe_calloc((size_t)count, sizeof(unsigned char));
+    partition->local_start = (int *)safe_malloc((size_t)count * sizeof(int));
+    partition->local_first = (int *)safe_malloc((size_t)count * sizeof(int));
+    partition->local_count = (int *)safe_malloc((size_t)count * sizeof(int));
+
+    int local_begin = cuts[local_partition];
+    int local_end = cuts[local_partition + 1];
+    int out = 0;
+    for (int cone = 0; cone < cones->num_cones; ++cone)
+    {
+        int start = cones->start_idx[cone];
+        int end = start + cone_block_length(cones, cone);
+        if (find_partition(cuts, num_partitions, start) == find_partition(cuts, num_partitions, end - 1))
+            continue;
+        if (!cone_can_span_partition(problem, cone, affine, params))
+        {
+            fprintf(stderr,
+                    "Error: unsupported %scone %d crossed a GPU %s partition boundary.\n",
+                    affine ? "affine " : "",
+                    cone,
+                    affine ? "row" : "column");
+            MPI_Abort(grid->comm_global, EXIT_FAILURE);
+        }
+
+        int intersection_start = start > local_begin ? start : local_begin;
+        int intersection_end = end < local_end ? end : local_end;
+        int local_count = intersection_end > intersection_start ? intersection_end - intersection_start : 0;
+        partition->v_dim[out] = cones->v_dim[cone];
+        partition->type[out] = cones->type[cone];
+        if (!affine)
+            partition->fixed_mask[out] = distributed_cone_fixed_mask(problem, cone);
+        partition->local_start[out] = local_count > 0 ? intersection_start - local_begin : 0;
+        partition->local_first[out] = local_count > 0 ? intersection_start - start : 0;
+        partition->local_count[out] = local_count;
+        ++out;
+    }
+}
+
+void configure_partition_metadata(const qp_problem_t *problem, grid_context_t *grid, const pdhg_parameters_t *params)
+{
+    int n = problem->num_variables;
+    int m = problem->num_constraints;
+    int P_cols = grid->dims[1];
+    int P_rows = grid->dims[0];
+    grid->global_num_cones = problem->cones.num_cones;
+    grid->global_num_affine_cones = problem->affine_cones.num_cones;
+
+    free(grid->variable_cuts);
+    free(grid->constraint_cuts);
+    grid->variable_cuts = NULL;
+    grid->constraint_cuts = NULL;
+
+    if (params->partition_method == NNZ_BALANCE_PARTITION)
+    {
+        int *col_weights = (int *)calloc((size_t)n, sizeof(int));
+        int *row_weights = (int *)calloc((size_t)m, sizeof(int));
+        if (problem->constraint_matrix)
+        {
+            for (int row = 0; row < m; ++row)
+            {
+                row_weights[row] =
+                    problem->constraint_matrix->row_ptr[row + 1] - problem->constraint_matrix->row_ptr[row];
+                for (int nz = problem->constraint_matrix->row_ptr[row];
+                     nz < problem->constraint_matrix->row_ptr[row + 1];
+                     ++nz)
+                    ++col_weights[problem->constraint_matrix->col_ind[nz]];
+            }
+        }
+        grid->variable_cuts = get_balanced_cuts(col_weights, n, P_cols);
+        grid->constraint_cuts = get_balanced_cuts(row_weights, m, P_rows);
+        free(col_weights);
+        free(row_weights);
+    }
+    else
+    {
+        grid->variable_cuts = get_uniform_cuts(n, P_cols);
+        grid->constraint_cuts = get_uniform_cuts(m, P_rows);
+    }
+
+    bool variable_cuts_valid =
+        adjust_cuts_for_cones(problem, &problem->cones, n, P_cols, false, params, grid->variable_cuts);
+    bool constraint_cuts_valid =
+        adjust_cuts_for_cones(problem, &problem->affine_cones, m, P_rows, true, params, grid->constraint_cuts);
+
+    int empty_variable_partition = 0;
+    int empty_constraint_partition = 0;
+    for (int part = 0; part < P_cols; ++part)
+        empty_variable_partition |= grid->variable_cuts[part] == grid->variable_cuts[part + 1];
+    for (int part = 0; part < P_rows; ++part)
+        empty_constraint_partition |= grid->constraint_cuts[part] == grid->constraint_cuts[part + 1];
+    int invalid_variable_partition = !variable_cuts_valid || empty_variable_partition;
+    int invalid_constraint_partition = !constraint_cuts_valid || empty_constraint_partition;
+    if (invalid_variable_partition || invalid_constraint_partition)
+    {
+        if (grid->rank_global == 0)
+        {
+            fprintf(stderr,
+                    "Error: the requested %d x %d process grid creates an empty %s partition "
+                    "(problem dimensions %d x %d). Use fewer row/column tiles; zero-width local "
+                    "partitions are not supported.\n",
+                    P_rows,
+                    P_cols,
+                    invalid_variable_partition ? "variable" : "constraint",
+                    m,
+                    n);
+        }
+        MPI_Abort(grid->comm_global, EXIT_FAILURE);
+    }
+
+    int my_col = grid->coords[1];
+    grid->n_start = grid->variable_cuts[my_col];
+    grid->n_end = grid->variable_cuts[my_col + 1];
+    int my_row = grid->coords[0];
+    build_split_partition(
+        problem, &problem->cones, grid->variable_cuts, P_cols, my_col, false, params, grid, &grid->split_cones);
+    build_split_partition(problem,
+                          &problem->affine_cones,
+                          grid->constraint_cuts,
+                          P_rows,
+                          my_row,
+                          true,
+                          params,
+                          grid,
+                          &grid->split_affine_cones);
 }
 
 CsrComponent *
@@ -245,13 +567,48 @@ double *copy_slice(const double *src, int start, int count)
     return dst;
 }
 
+static void extract_local_cone_blocks(cone_blocks_t *local, const cone_blocks_t *global, int range_start, int range_end)
+{
+    for (int cone = 0; cone < global->num_cones; ++cone)
+    {
+        int start = global->start_idx[cone];
+        int end = start + cone_block_length(global, cone);
+        if (start >= range_start && end <= range_end)
+            ++local->num_cones;
+    }
+
+    int count = local->num_cones;
+    if (count == 0)
+        return;
+    local->start_idx = (int *)safe_malloc((size_t)count * sizeof(int));
+    local->v_dim = (int *)safe_malloc((size_t)count * sizeof(int));
+    local->type = (cone_type_t *)safe_malloc((size_t)count * sizeof(cone_type_t));
+    if (global->power_alpha)
+        local->power_alpha = (double *)safe_malloc((size_t)count * sizeof(double));
+
+    int out = 0;
+    for (int cone = 0; cone < global->num_cones; ++cone)
+    {
+        int start = global->start_idx[cone];
+        int end = start + cone_block_length(global, cone);
+        if (start < range_start || end > range_end)
+            continue;
+        local->start_idx[out] = start - range_start;
+        local->v_dim[out] = global->v_dim[cone];
+        local->type[out] = global->type[cone];
+        if (local->power_alpha)
+            local->power_alpha[out] = global->power_alpha[cone];
+        ++out;
+    }
+}
+
 qp_problem_t *partition_qp_problem(const qp_problem_t *global_qp,
                                    const grid_context_t *grid,
                                    partition_method_t method,
                                    int *out_n_start,
                                    int *out_m_start)
 {
-    qp_problem_t *loc = (qp_problem_t *)calloc(1, sizeof(qp_problem_t));
+    qp_problem_t *loc = (qp_problem_t *)safe_calloc(1, sizeof(qp_problem_t));
 
     int my_row_idx = grid->coords[0];
     int my_col_idx = grid->coords[1];
@@ -262,48 +619,47 @@ qp_problem_t *partition_qp_problem(const qp_problem_t *global_qp,
     int m_total = global_qp->num_constraints;
     int n_start, n_end, m_start, m_end;
 
-    if (method == NNZ_BALANCE_PARTITION)
-    {
-        int *col_weights = (int *)calloc(n_total, sizeof(int));
-        if (global_qp->constraint_matrix)
-        {
-            for (int i = 0; i < global_qp->constraint_matrix_num_nonzeros; i++)
-            {
-                int c = global_qp->constraint_matrix->col_ind[i];
-                if (c < n_total)
-                    col_weights[c]++;
-            }
-        }
-        int *col_cuts = get_balanced_cuts(col_weights, n_total, P_cols);
-        n_start = col_cuts[my_col_idx];
-        n_end = col_cuts[my_col_idx + 1];
-        free(col_weights);
-        free(col_cuts);
+    int *owned_col_cuts = NULL;
+    int *owned_row_cuts = NULL;
+    const int *col_cuts = grid->variable_cuts;
+    const int *row_cuts = grid->constraint_cuts;
 
-        int *row_weights = (int *)malloc(m_total * sizeof(int));
-        if (global_qp->constraint_matrix)
-        {
-            for (int i = 0; i < m_total; i++)
-            {
-                row_weights[i] =
-                    global_qp->constraint_matrix->row_ptr[i + 1] - global_qp->constraint_matrix->row_ptr[i];
-            }
-        }
-        int *row_cuts = get_balanced_cuts(row_weights, m_total, P_rows);
-        m_start = row_cuts[my_row_idx];
-        m_end = row_cuts[my_row_idx + 1];
-        free(row_weights);
-        free(row_cuts);
-    }
-    else
+    if (!col_cuts || !row_cuts)
     {
-        int n_chunk = n_total / P_cols;
-        n_start = my_col_idx * n_chunk;
-        n_end = (my_col_idx == P_cols - 1) ? n_total : (my_col_idx + 1) * n_chunk;
-        int m_chunk = m_total / P_rows;
-        m_start = my_row_idx * m_chunk;
-        m_end = (my_row_idx == P_rows - 1) ? m_total : (my_row_idx + 1) * m_chunk;
+        if (method == NNZ_BALANCE_PARTITION)
+        {
+            int *col_weights = (int *)calloc((size_t)n_total, sizeof(int));
+            int *row_weights = (int *)calloc((size_t)m_total, sizeof(int));
+            if (global_qp->constraint_matrix)
+            {
+                for (int i = 0; i < m_total; ++i)
+                {
+                    row_weights[i] =
+                        global_qp->constraint_matrix->row_ptr[i + 1] - global_qp->constraint_matrix->row_ptr[i];
+                    for (int nz = global_qp->constraint_matrix->row_ptr[i];
+                         nz < global_qp->constraint_matrix->row_ptr[i + 1];
+                         ++nz)
+                        ++col_weights[global_qp->constraint_matrix->col_ind[nz]];
+                }
+            }
+            owned_col_cuts = get_balanced_cuts(col_weights, n_total, P_cols);
+            owned_row_cuts = get_balanced_cuts(row_weights, m_total, P_rows);
+            free(col_weights);
+            free(row_weights);
+        }
+        else
+        {
+            owned_col_cuts = get_uniform_cuts(n_total, P_cols);
+            owned_row_cuts = get_uniform_cuts(m_total, P_rows);
+        }
+        col_cuts = owned_col_cuts;
+        row_cuts = owned_row_cuts;
     }
+
+    n_start = col_cuts[my_col_idx];
+    n_end = col_cuts[my_col_idx + 1];
+    m_start = row_cuts[my_row_idx];
+    m_end = row_cuts[my_row_idx + 1];
 
     if (out_n_start)
         *out_n_start = n_start;
@@ -356,11 +712,32 @@ qp_problem_t *partition_qp_problem(const qp_problem_t *global_qp,
     loc->variable_upper_bound = copy_slice(global_qp->variable_upper_bound, n_start, loc->num_variables);
     loc->constraint_lower_bound = copy_slice(global_qp->constraint_lower_bound, m_start, loc->num_constraints);
     loc->constraint_upper_bound = copy_slice(global_qp->constraint_upper_bound, m_start, loc->num_constraints);
+    loc->affine_cone_offset = copy_slice(global_qp->affine_cone_offset, m_start, loc->num_constraints);
 
     if (global_qp->primal_start)
         loc->primal_start = copy_slice(global_qp->primal_start, n_start, loc->num_variables);
     if (global_qp->dual_start)
         loc->dual_start = copy_slice(global_qp->dual_start, m_start, loc->num_constraints);
+
+    loc->num_original_variables = 0;
+    if (global_qp->num_original_variables > n_start)
+    {
+        int original_end = global_qp->num_original_variables < n_end ? global_qp->num_original_variables : n_end;
+        loc->num_original_variables = original_end - n_start;
+    }
+
+    extract_local_cone_blocks(&loc->cones, &global_qp->cones, n_start, n_end);
+    if (global_qp->cones.is_fixed)
+    {
+        loc->cones.fixed_mask_size = loc->num_variables;
+        loc->cones.is_fixed = (char *)malloc((size_t)loc->num_variables * sizeof(char));
+        memcpy(loc->cones.is_fixed, global_qp->cones.is_fixed + n_start, (size_t)loc->num_variables * sizeof(char));
+    }
+
+    extract_local_cone_blocks(&loc->affine_cones, &global_qp->affine_cones, m_start, m_end);
+
+    free(owned_col_cuts);
+    free(owned_row_cuts);
 
     return loc;
 }
@@ -447,222 +824,275 @@ rescale_info_t *partition_rescale_info(rescale_info_t *global_info,
     return loc_info;
 }
 
+typedef struct
+{
+    char *cursor;
+    size_t size;
+} buffer_writer_t;
+
+typedef struct
+{
+    const char *cursor;
+} buffer_reader_t;
+
+static void buffer_writer_write(buffer_writer_t *writer, const void *source, size_t bytes)
+{
+    if (bytes == 0)
+        return;
+    if (writer->cursor)
+    {
+        memcpy(writer->cursor, source, bytes);
+        writer->cursor += bytes;
+    }
+    writer->size += bytes;
+}
+
+static void buffer_reader_read(buffer_reader_t *reader, void *destination, size_t bytes)
+{
+    if (bytes == 0)
+        return;
+    memcpy(destination, reader->cursor, bytes);
+    reader->cursor += bytes;
+}
+
+static void *buffer_reader_alloc(buffer_reader_t *reader, size_t count, size_t element_size)
+{
+    size_t bytes = count * element_size;
+    if (bytes == 0)
+        return NULL;
+    void *destination = safe_malloc(bytes);
+    buffer_reader_read(reader, destination, bytes);
+    return destination;
+}
+
+static void write_cone_blocks(buffer_writer_t *writer, const cone_blocks_t *blocks)
+{
+    buffer_writer_write(writer, &blocks->num_cones, sizeof(int));
+    if (blocks->num_cones > 0)
+    {
+        size_t count = (size_t)blocks->num_cones;
+        buffer_writer_write(writer, blocks->start_idx, count * sizeof(int));
+        buffer_writer_write(writer, blocks->v_dim, count * sizeof(int));
+        buffer_writer_write(writer, blocks->type, count * sizeof(cone_type_t));
+    }
+
+    int has_power_alpha = blocks->power_alpha != NULL;
+    buffer_writer_write(writer, &has_power_alpha, sizeof(int));
+    if (has_power_alpha)
+        buffer_writer_write(writer, blocks->power_alpha, (size_t)blocks->num_cones * sizeof(double));
+
+    buffer_writer_write(writer, &blocks->fixed_mask_size, sizeof(int));
+    if (blocks->fixed_mask_size > 0)
+        buffer_writer_write(writer, blocks->is_fixed, (size_t)blocks->fixed_mask_size * sizeof(char));
+}
+
+static void read_cone_blocks(buffer_reader_t *reader, cone_blocks_t *blocks)
+{
+    buffer_reader_read(reader, &blocks->num_cones, sizeof(int));
+    if (blocks->num_cones > 0)
+    {
+        size_t count = (size_t)blocks->num_cones;
+        blocks->start_idx = (int *)buffer_reader_alloc(reader, count, sizeof(int));
+        blocks->v_dim = (int *)buffer_reader_alloc(reader, count, sizeof(int));
+        blocks->type = (cone_type_t *)buffer_reader_alloc(reader, count, sizeof(cone_type_t));
+    }
+
+    int has_power_alpha = 0;
+    buffer_reader_read(reader, &has_power_alpha, sizeof(int));
+    if (has_power_alpha)
+        blocks->power_alpha = (double *)buffer_reader_alloc(reader, (size_t)blocks->num_cones, sizeof(double));
+
+    buffer_reader_read(reader, &blocks->fixed_mask_size, sizeof(int));
+    if (blocks->fixed_mask_size > 0)
+        blocks->is_fixed = (char *)buffer_reader_alloc(reader, (size_t)blocks->fixed_mask_size, sizeof(char));
+}
+
+static void write_csr_component(buffer_writer_t *writer, const CsrComponent *csr, int num_rows, int num_nonzeros)
+{
+    int has_csr = csr && csr->row_ptr;
+    buffer_writer_write(writer, &has_csr, sizeof(int));
+    if (!has_csr)
+        return;
+
+    buffer_writer_write(writer, csr->row_ptr, (size_t)(num_rows + 1) * sizeof(int));
+    if (num_nonzeros > 0)
+    {
+        buffer_writer_write(writer, csr->col_ind, (size_t)num_nonzeros * sizeof(int));
+        buffer_writer_write(writer, csr->val, (size_t)num_nonzeros * sizeof(double));
+    }
+    else
+    {
+        const int zero_index = 0;
+        const double zero_value = 0.0;
+        buffer_writer_write(writer, &zero_index, sizeof(int));
+        buffer_writer_write(writer, &zero_value, sizeof(double));
+    }
+}
+
+static CsrComponent *read_csr_component(buffer_reader_t *reader, int num_rows, int num_nonzeros)
+{
+    int has_csr = 0;
+    buffer_reader_read(reader, &has_csr, sizeof(int));
+    if (!has_csr)
+        return NULL;
+
+    CsrComponent *csr = (CsrComponent *)safe_calloc(1, sizeof(CsrComponent));
+    int stored_nonzeros = num_nonzeros > 0 ? num_nonzeros : 1;
+    csr->row_ptr = (int *)buffer_reader_alloc(reader, (size_t)num_rows + 1, sizeof(int));
+    csr->col_ind = (int *)buffer_reader_alloc(reader, (size_t)stored_nonzeros, sizeof(int));
+    csr->val = (double *)buffer_reader_alloc(reader, (size_t)stored_nonzeros, sizeof(double));
+    return csr;
+}
+
+static void write_qp_problem_fields(buffer_writer_t *writer, const qp_problem_t *qp)
+{
+    buffer_writer_write(writer, &qp->num_variables, sizeof(int));
+    buffer_writer_write(writer, &qp->num_constraints, sizeof(int));
+    buffer_writer_write(writer, &qp->num_rank_lowrank_obj, sizeof(int));
+    buffer_writer_write(writer, &qp->constraint_matrix_num_nonzeros, sizeof(int));
+    buffer_writer_write(writer, &qp->objective_sparse_matrix_num_nonzeros, sizeof(int));
+    buffer_writer_write(writer, &qp->objective_lowrank_matrix_num_nonzeros, sizeof(int));
+    buffer_writer_write(writer, &qp->objective_constant, sizeof(double));
+    buffer_writer_write(writer, &qp->num_original_variables, sizeof(int));
+
+    write_cone_blocks(writer, &qp->cones);
+    write_cone_blocks(writer, &qp->affine_cones);
+
+    size_t variable_bytes = (size_t)qp->num_variables * sizeof(double);
+    size_t constraint_bytes = (size_t)qp->num_constraints * sizeof(double);
+    buffer_writer_write(writer, qp->objective_vector, variable_bytes);
+    buffer_writer_write(writer, qp->variable_lower_bound, variable_bytes);
+    buffer_writer_write(writer, qp->variable_upper_bound, variable_bytes);
+    buffer_writer_write(writer, qp->constraint_lower_bound, constraint_bytes);
+    buffer_writer_write(writer, qp->constraint_upper_bound, constraint_bytes);
+    buffer_writer_write(writer, qp->affine_cone_offset, constraint_bytes);
+
+    write_csr_component(writer, qp->constraint_matrix, qp->num_constraints, qp->constraint_matrix_num_nonzeros);
+    write_csr_component(
+        writer, qp->objective_sparse_matrix, qp->num_variables, qp->objective_sparse_matrix_num_nonzeros);
+    write_csr_component(
+        writer, qp->objective_lowrank_matrix, qp->num_rank_lowrank_obj, qp->objective_lowrank_matrix_num_nonzeros);
+
+    buffer_writer_write(writer, &qp->objective_lowrank_middle_matrix_num_nonzeros, sizeof(int));
+    write_csr_component(writer,
+                        qp->objective_lowrank_middle_matrix,
+                        qp->num_rank_lowrank_obj,
+                        qp->objective_lowrank_middle_matrix_num_nonzeros);
+
+    int has_primal = qp->primal_start != NULL;
+    int has_dual = qp->dual_start != NULL;
+    buffer_writer_write(writer, &has_primal, sizeof(int));
+    buffer_writer_write(writer, &has_dual, sizeof(int));
+    if (has_primal)
+        buffer_writer_write(writer, qp->primal_start, variable_bytes);
+    if (has_dual)
+        buffer_writer_write(writer, qp->dual_start, constraint_bytes);
+}
+
+static qp_problem_t *read_qp_problem_fields(buffer_reader_t *reader)
+{
+    qp_problem_t *qp = (qp_problem_t *)safe_calloc(1, sizeof(qp_problem_t));
+    buffer_reader_read(reader, &qp->num_variables, sizeof(int));
+    buffer_reader_read(reader, &qp->num_constraints, sizeof(int));
+    buffer_reader_read(reader, &qp->num_rank_lowrank_obj, sizeof(int));
+    buffer_reader_read(reader, &qp->constraint_matrix_num_nonzeros, sizeof(int));
+    buffer_reader_read(reader, &qp->objective_sparse_matrix_num_nonzeros, sizeof(int));
+    buffer_reader_read(reader, &qp->objective_lowrank_matrix_num_nonzeros, sizeof(int));
+    buffer_reader_read(reader, &qp->objective_constant, sizeof(double));
+    buffer_reader_read(reader, &qp->num_original_variables, sizeof(int));
+
+    read_cone_blocks(reader, &qp->cones);
+    read_cone_blocks(reader, &qp->affine_cones);
+
+    qp->objective_vector = (double *)buffer_reader_alloc(reader, (size_t)qp->num_variables, sizeof(double));
+    qp->variable_lower_bound = (double *)buffer_reader_alloc(reader, (size_t)qp->num_variables, sizeof(double));
+    qp->variable_upper_bound = (double *)buffer_reader_alloc(reader, (size_t)qp->num_variables, sizeof(double));
+    qp->constraint_lower_bound = (double *)buffer_reader_alloc(reader, (size_t)qp->num_constraints, sizeof(double));
+    qp->constraint_upper_bound = (double *)buffer_reader_alloc(reader, (size_t)qp->num_constraints, sizeof(double));
+    qp->affine_cone_offset = (double *)buffer_reader_alloc(reader, (size_t)qp->num_constraints, sizeof(double));
+
+    qp->constraint_matrix = read_csr_component(reader, qp->num_constraints, qp->constraint_matrix_num_nonzeros);
+    qp->objective_sparse_matrix =
+        read_csr_component(reader, qp->num_variables, qp->objective_sparse_matrix_num_nonzeros);
+    qp->objective_lowrank_matrix =
+        read_csr_component(reader, qp->num_rank_lowrank_obj, qp->objective_lowrank_matrix_num_nonzeros);
+
+    buffer_reader_read(reader, &qp->objective_lowrank_middle_matrix_num_nonzeros, sizeof(int));
+    qp->objective_lowrank_middle_matrix =
+        read_csr_component(reader, qp->num_rank_lowrank_obj, qp->objective_lowrank_middle_matrix_num_nonzeros);
+
+    int has_primal = 0;
+    int has_dual = 0;
+    buffer_reader_read(reader, &has_primal, sizeof(int));
+    buffer_reader_read(reader, &has_dual, sizeof(int));
+    if (has_primal)
+        qp->primal_start = (double *)buffer_reader_alloc(reader, (size_t)qp->num_variables, sizeof(double));
+    if (has_dual)
+        qp->dual_start = (double *)buffer_reader_alloc(reader, (size_t)qp->num_constraints, sizeof(double));
+    return qp;
+}
+
 size_t get_qp_problem_size(const qp_problem_t *qp)
 {
     if (!qp)
         return 0;
-    size_t size = 0;
-
-    size += sizeof(int) * 6 + sizeof(double);
-
-    size += sizeof(double) * qp->num_variables * 3;
-    size += sizeof(double) * qp->num_constraints * 2;
-
-#define ADD_CSR_SIZE(csr, num_rows, nnz)                                                                               \
-    {                                                                                                                  \
-        size += sizeof(int);                                                                                           \
-        if (csr)                                                                                                       \
-        {                                                                                                              \
-            int safe_nnz = (nnz) > 0 ? (nnz) : 1;                                                                      \
-            size += sizeof(int) * ((num_rows) + 1);                                                                    \
-            size += sizeof(int) * safe_nnz;                                                                            \
-            size += sizeof(double) * safe_nnz;                                                                         \
-        }                                                                                                              \
-    }
-
-    ADD_CSR_SIZE(qp->constraint_matrix, qp->num_constraints, qp->constraint_matrix_num_nonzeros);
-    ADD_CSR_SIZE(qp->objective_sparse_matrix, qp->num_variables, qp->objective_sparse_matrix_num_nonzeros);
-    ADD_CSR_SIZE(qp->objective_lowrank_matrix, qp->num_rank_lowrank_obj, qp->objective_lowrank_matrix_num_nonzeros);
-
-    size += sizeof(int);
-    ADD_CSR_SIZE(qp->objective_lowrank_middle_matrix,
-                 qp->num_rank_lowrank_obj,
-                 qp->objective_lowrank_middle_matrix_num_nonzeros);
-
-    size += sizeof(int) * 2;
-    if (qp->primal_start)
-        size += sizeof(double) * qp->num_variables;
-    if (qp->dual_start)
-        size += sizeof(double) * qp->num_constraints;
-
-    return size;
+    buffer_writer_t writer = {NULL, 0};
+    write_qp_problem_fields(&writer, qp);
+    return writer.size;
 }
-
-#define S_CSR(csr, num_rows, nnz)                                                                                      \
-    {                                                                                                                  \
-        int has_csr = (csr != NULL);                                                                                   \
-        S_COPY(has_csr, int);                                                                                          \
-        if (has_csr)                                                                                                   \
-        {                                                                                                              \
-            S_ARR(csr->row_ptr, num_rows + 1, int);                                                                    \
-            S_ARR(csr->col_ind, nnz > 0 ? nnz : 1, int);                                                               \
-            S_ARR(csr->val, nnz > 0 ? nnz : 1, double);                                                                \
-        }                                                                                                              \
-    }
 
 void serialize_qp_problem_to_ptr(const qp_problem_t *qp, char **ptr_ref)
 {
-    char *ptr = *ptr_ref;
-
-#define S_COPY(val, type)                                                                                              \
-    {                                                                                                                  \
-        *((type *)ptr) = val;                                                                                          \
-        ptr += sizeof(type);                                                                                           \
-    }
-#define S_ARR(arr, count, type)                                                                                        \
-    {                                                                                                                  \
-        memcpy(ptr, arr, sizeof(type) * (count));                                                                      \
-        ptr += sizeof(type) * (count);                                                                                 \
-    }
-
-    S_COPY(qp->num_variables, int);
-    S_COPY(qp->num_constraints, int);
-    S_COPY(qp->num_rank_lowrank_obj, int);
-    S_COPY(qp->constraint_matrix_num_nonzeros, int);
-    S_COPY(qp->objective_sparse_matrix_num_nonzeros, int);
-    S_COPY(qp->objective_lowrank_matrix_num_nonzeros, int);
-    S_COPY(qp->objective_constant, double);
-
-    S_ARR(qp->objective_vector, qp->num_variables, double);
-    S_ARR(qp->variable_lower_bound, qp->num_variables, double);
-    S_ARR(qp->variable_upper_bound, qp->num_variables, double);
-    S_ARR(qp->constraint_lower_bound, qp->num_constraints, double);
-    S_ARR(qp->constraint_upper_bound, qp->num_constraints, double);
-
-    S_CSR(qp->constraint_matrix, qp->num_constraints, qp->constraint_matrix_num_nonzeros);
-    S_CSR(qp->objective_sparse_matrix, qp->num_variables, qp->objective_sparse_matrix_num_nonzeros);
-    S_CSR(qp->objective_lowrank_matrix, qp->num_rank_lowrank_obj, qp->objective_lowrank_matrix_num_nonzeros);
-
-    S_COPY(qp->objective_lowrank_middle_matrix_num_nonzeros, int);
-    S_CSR(qp->objective_lowrank_middle_matrix,
-          qp->num_rank_lowrank_obj,
-          qp->objective_lowrank_middle_matrix_num_nonzeros);
-
-    int has_primal = (qp->primal_start != NULL);
-    int has_dual = (qp->dual_start != NULL);
-    S_COPY(has_primal, int);
-    S_COPY(has_dual, int);
-    if (has_primal)
-        S_ARR(qp->primal_start, qp->num_variables, double);
-    if (has_dual)
-        S_ARR(qp->dual_start, qp->num_constraints, double);
-
-    *ptr_ref = ptr;
+    buffer_writer_t writer = {*ptr_ref, 0};
+    write_qp_problem_fields(&writer, qp);
+    *ptr_ref = writer.cursor;
 }
-#define D_CSR(target_ptr, num_rows, nnz)                                                                               \
-    {                                                                                                                  \
-        int has_csr;                                                                                                   \
-        D_VAL(has_csr, int);                                                                                           \
-        if (has_csr)                                                                                                   \
-        {                                                                                                              \
-            target_ptr = (CsrComponent *)malloc(sizeof(CsrComponent));                                                 \
-            int safe_nnz = nnz > 0 ? nnz : 1;                                                                          \
-            D_ARR(target_ptr->row_ptr, num_rows + 1, int);                                                             \
-            D_ARR(target_ptr->col_ind, safe_nnz, int);                                                                 \
-            D_ARR(target_ptr->val, safe_nnz, double);                                                                  \
-        }                                                                                                              \
-    }
 
 qp_problem_t *deserialize_qp_problem_from_ptr(const char **ptr_ref)
 {
-    const char *ptr = *ptr_ref;
-    qp_problem_t *qp = (qp_problem_t *)calloc(1, sizeof(qp_problem_t));
-
-#define D_VAL(var, type)                                                                                               \
-    {                                                                                                                  \
-        var = *((type *)ptr);                                                                                          \
-        ptr += sizeof(type);                                                                                           \
-    }
-#define D_ARR(dest, count, type)                                                                                       \
-    {                                                                                                                  \
-        dest = (type *)malloc(sizeof(type) * (count));                                                                 \
-        memcpy(dest, ptr, sizeof(type) * (count));                                                                     \
-        ptr += sizeof(type) * (count);                                                                                 \
-    }
-
-    D_VAL(qp->num_variables, int);
-    D_VAL(qp->num_constraints, int);
-    D_VAL(qp->num_rank_lowrank_obj, int);
-    D_VAL(qp->constraint_matrix_num_nonzeros, int);
-    D_VAL(qp->objective_sparse_matrix_num_nonzeros, int);
-    D_VAL(qp->objective_lowrank_matrix_num_nonzeros, int);
-    D_VAL(qp->objective_constant, double);
-
-    D_ARR(qp->objective_vector, qp->num_variables, double);
-    D_ARR(qp->variable_lower_bound, qp->num_variables, double);
-    D_ARR(qp->variable_upper_bound, qp->num_variables, double);
-    D_ARR(qp->constraint_lower_bound, qp->num_constraints, double);
-    D_ARR(qp->constraint_upper_bound, qp->num_constraints, double);
-
-    D_CSR(qp->constraint_matrix, qp->num_constraints, qp->constraint_matrix_num_nonzeros);
-    D_CSR(qp->objective_sparse_matrix, qp->num_variables, qp->objective_sparse_matrix_num_nonzeros);
-    D_CSR(qp->objective_lowrank_matrix, qp->num_rank_lowrank_obj, qp->objective_lowrank_matrix_num_nonzeros);
-
-    D_VAL(qp->objective_lowrank_middle_matrix_num_nonzeros, int);
-    qp->objective_lowrank_middle_matrix = NULL;
-    D_CSR(qp->objective_lowrank_middle_matrix,
-          qp->num_rank_lowrank_obj,
-          qp->objective_lowrank_middle_matrix_num_nonzeros);
-
-    int has_primal, has_dual;
-    D_VAL(has_primal, int);
-    D_VAL(has_dual, int);
-    if (has_primal)
-        D_ARR(qp->primal_start, qp->num_variables, double);
-    if (has_dual)
-        D_ARR(qp->dual_start, qp->num_constraints, double);
-
-    *ptr_ref = ptr;
+    buffer_reader_t reader = {*ptr_ref};
+    qp_problem_t *qp = read_qp_problem_fields(&reader);
+    *ptr_ref = reader.cursor;
     return qp;
+}
+
+static void write_rescale_info_fields(buffer_writer_t *writer, const rescale_info_t *info)
+{
+    buffer_writer_write(writer, &info->con_bound_rescale, sizeof(double));
+    buffer_writer_write(writer, &info->obj_vec_rescale, sizeof(double));
+    buffer_writer_write(writer, &info->rescaling_time_sec, sizeof(double));
+    write_qp_problem_fields(writer, info->scaled_problem);
+    buffer_writer_write(writer, info->var_rescale, (size_t)info->scaled_problem->num_variables * sizeof(double));
+    buffer_writer_write(writer, info->con_rescale, (size_t)info->scaled_problem->num_constraints * sizeof(double));
 }
 
 size_t get_rescale_info_size(const rescale_info_t *info)
 {
     if (!info)
         return 0;
-    size_t size = 0;
-    size += sizeof(double) * 3;
-    int n = info->scaled_problem->num_variables;
-    int m = info->scaled_problem->num_constraints;
-    size += sizeof(double) * (n + m);
-
-    size += get_qp_problem_size(info->scaled_problem);
-
-    return size;
+    buffer_writer_t writer = {NULL, 0};
+    write_rescale_info_fields(&writer, info);
+    return writer.size;
 }
 
 void serialize_rescale_info(const rescale_info_t *info, char *buffer)
 {
-    char *ptr = buffer;
-
-    S_COPY(info->con_bound_rescale, double);
-    S_COPY(info->obj_vec_rescale, double);
-    S_COPY(info->rescaling_time_sec, double);
-
-    serialize_qp_problem_to_ptr(info->scaled_problem, &ptr);
-
-    int n = info->scaled_problem->num_variables;
-    int m = info->scaled_problem->num_constraints;
-    S_ARR(info->var_rescale, n, double);
-    S_ARR(info->con_rescale, m, double);
+    buffer_writer_t writer = {buffer, 0};
+    write_rescale_info_fields(&writer, info);
 }
 
 rescale_info_t *deserialize_rescale_info(const char *buffer)
 {
-    const char *ptr = buffer;
-    rescale_info_t *info = (rescale_info_t *)calloc(1, sizeof(rescale_info_t));
-
-    D_VAL(info->con_bound_rescale, double);
-    D_VAL(info->obj_vec_rescale, double);
-    D_VAL(info->rescaling_time_sec, double);
-
-    info->scaled_problem = deserialize_qp_problem_from_ptr(&ptr);
-
-    int n = info->scaled_problem->num_variables;
-    int m = info->scaled_problem->num_constraints;
-    D_ARR(info->var_rescale, n, double);
-    D_ARR(info->con_rescale, m, double);
-
+    buffer_reader_t reader = {buffer};
+    rescale_info_t *info = (rescale_info_t *)safe_calloc(1, sizeof(rescale_info_t));
+    buffer_reader_read(&reader, &info->con_bound_rescale, sizeof(double));
+    buffer_reader_read(&reader, &info->obj_vec_rescale, sizeof(double));
+    buffer_reader_read(&reader, &info->rescaling_time_sec, sizeof(double));
+    info->scaled_problem = read_qp_problem_fields(&reader);
+    info->var_rescale =
+        (double *)buffer_reader_alloc(&reader, (size_t)info->scaled_problem->num_variables, sizeof(double));
+    info->con_rescale =
+        (double *)buffer_reader_alloc(&reader, (size_t)info->scaled_problem->num_constraints, sizeof(double));
     return info;
 }
 
@@ -695,78 +1125,6 @@ void big_bcast_bytes(void **buffer_ptr, size_t *size_ptr, int root, MPI_Comm com
 
         offset += current_chunk;
     }
-}
-
-void big_send_bytes(const void *buffer, size_t size, int dest, MPI_Comm comm)
-{
-    unsigned long long total_len = size;
-    MPI_Send(&total_len, 1, MPI_UNSIGNED_LONG_LONG, dest, 0, comm);
-
-    const char *buf = (const char *)buffer;
-    size_t offset = 0;
-    while (offset < total_len)
-    {
-        size_t remaining = total_len - offset;
-        int current_chunk = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : (int)remaining;
-        MPI_Send(buf + offset, current_chunk, MPI_BYTE, dest, 1, comm);
-        offset += current_chunk;
-    }
-}
-
-void big_recv_bytes(void **buffer_ptr, size_t *size_ptr, int source, MPI_Comm comm)
-{
-    unsigned long long total_len = 0;
-    MPI_Recv(&total_len, 1, MPI_UNSIGNED_LONG_LONG, source, 0, comm, MPI_STATUS_IGNORE);
-
-    *size_ptr = (size_t)total_len;
-    *buffer_ptr = malloc((size_t)total_len);
-
-    char *buf = (char *)(*buffer_ptr);
-    size_t offset = 0;
-    while (offset < total_len)
-    {
-        size_t remaining = total_len - offset;
-        int current_chunk = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : (int)remaining;
-        MPI_Recv(buf + offset, current_chunk, MPI_BYTE, source, 1, comm, MPI_STATUS_IGNORE);
-        offset += current_chunk;
-    }
-}
-
-big_request_t big_isend_bytes(const void *buffer, size_t size, int dest, MPI_Comm comm)
-{
-    big_request_t breq;
-    int num_chunks = (size + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    breq.num_reqs = 1 + num_chunks;
-    breq.reqs = (MPI_Request *)malloc(breq.num_reqs * sizeof(MPI_Request));
-
-    unsigned long long *p_len = (unsigned long long *)malloc(sizeof(unsigned long long));
-    *p_len = size;
-
-    MPI_Isend(p_len, 1, MPI_UNSIGNED_LONG_LONG, dest, 0, comm, &breq.reqs[0]);
-
-    const char *buf = (const char *)buffer;
-    size_t offset = 0;
-    int req_idx = 1;
-    while (offset < size)
-    {
-        size_t remaining = size - offset;
-        int current_chunk = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : (int)remaining;
-        MPI_Isend(buf + offset, current_chunk, MPI_BYTE, dest, 1, comm, &breq.reqs[req_idx++]);
-        offset += current_chunk;
-    }
-    return breq;
-}
-
-void big_wait_bytes(big_request_t *breq, unsigned long long *p_len)
-{
-    if (breq->num_reqs > 0)
-    {
-        MPI_Waitall(breq->num_reqs, breq->reqs, MPI_STATUSES_IGNORE);
-        free(breq->reqs);
-        breq->num_reqs = 0;
-    }
-    if (p_len)
-        free(p_len);
 }
 
 void distribute_data_bcast_then_partition(const qp_problem_t *working_problem,
@@ -803,6 +1161,7 @@ void distribute_data_bcast_then_partition(const qp_problem_t *working_problem,
     }
 
     grid_context->global_num_variables = current_working_problem->num_variables;
+    configure_partition_metadata(current_working_problem, grid_context, params);
 
     {
         char *buf = NULL;
@@ -828,6 +1187,7 @@ void distribute_data_bcast_then_partition(const qp_problem_t *working_problem,
         partition_rescale_info(current_rescale_info, grid_context, params->partition_method, &real_n_start, NULL);
     *out_local_qp = partition_qp_problem(current_working_problem, grid_context, params->partition_method, NULL, NULL);
     grid_context->n_start = real_n_start;
+    grid_context->n_end = real_n_start + (*out_local_qp)->num_variables;
 
     if (grid_context->rank_global != 0)
     {
@@ -839,112 +1199,6 @@ void distribute_data_bcast_then_partition(const qp_problem_t *working_problem,
     if (params->verbose && grid_context->rank_global == 0)
     {
         printf("[Timer] Data Distribution (Bcast -> Partition) took %.3f seconds.\n", t_end - t_start);
-    }
-}
-
-void distribute_data_partition_then_send(const qp_problem_t *working_problem,
-                                         rescale_info_t *rescale_info,
-                                         grid_context_t *grid_context,
-                                         const pdhg_parameters_t *params,
-                                         qp_problem_t **out_local_qp,
-                                         rescale_info_t **out_local_resc)
-{
-    double t_start = MPI_Wtime();
-    int world_size;
-    MPI_Comm_size(grid_context->comm_global, &world_size);
-
-    if (grid_context->rank_global == 0)
-    {
-        char *prev_buf_lp = NULL;
-        char *prev_buf_resc = NULL;
-        big_request_t req_lp = {NULL, 0};
-        big_request_t req_resc = {NULL, 0};
-        unsigned long long *prev_len_lp = NULL;
-        unsigned long long *prev_len_resc = NULL;
-
-        for (int r = 0; r < world_size; ++r)
-        {
-            grid_context_t target_grid = *grid_context;
-            target_grid.rank_global = r;
-            target_grid.coords[0] = r / grid_context->dims[1];
-            target_grid.coords[1] = r % grid_context->dims[1];
-
-            qp_problem_t *sub_qp =
-                partition_qp_problem(working_problem, &target_grid, params->partition_method, NULL, NULL);
-            rescale_info_t *sub_rescale =
-                partition_rescale_info(rescale_info, &target_grid, params->partition_method, NULL, NULL);
-
-            if (r == 0)
-            {
-                *out_local_qp = sub_qp;
-                *out_local_resc = sub_rescale;
-                continue;
-            }
-
-            size_t sz_lp = get_qp_problem_size(sub_qp);
-            char *buf_lp = (char *)malloc(sz_lp);
-            char *ptr_lp = buf_lp;
-            serialize_qp_problem_to_ptr(sub_qp, &ptr_lp);
-
-            size_t sz_resc = get_rescale_info_size(sub_rescale);
-            char *buf_resc = (char *)malloc(sz_resc);
-            serialize_rescale_info(sub_rescale, buf_resc);
-
-            qp_problem_free(sub_qp);
-            rescale_info_free(sub_rescale);
-
-            if (req_lp.num_reqs > 0 || req_resc.num_reqs > 0)
-            {
-                big_wait_bytes(&req_lp, prev_len_lp);
-                big_wait_bytes(&req_resc, prev_len_resc);
-                free(prev_buf_lp);
-                free(prev_buf_resc);
-            }
-
-            prev_len_lp = (unsigned long long *)malloc(sizeof(unsigned long long));
-            *prev_len_lp = sz_lp;
-            req_lp = big_isend_bytes(buf_lp, sz_lp, r, grid_context->comm_global);
-
-            prev_len_resc = (unsigned long long *)malloc(sizeof(unsigned long long));
-            *prev_len_resc = sz_resc;
-            req_resc = big_isend_bytes(buf_resc, sz_resc, r, grid_context->comm_global);
-
-            prev_buf_lp = buf_lp;
-            prev_buf_resc = buf_resc;
-        }
-
-        if (req_lp.num_reqs > 0 || req_resc.num_reqs > 0)
-        {
-            big_wait_bytes(&req_lp, prev_len_lp);
-            big_wait_bytes(&req_resc, prev_len_resc);
-            free(prev_buf_lp);
-            free(prev_buf_resc);
-        }
-
-        rescale_info_free(rescale_info);
-    }
-    else
-    {
-        char *buf_lp = NULL;
-        size_t sz_lp = 0;
-        big_recv_bytes((void **)&buf_lp, &sz_lp, 0, grid_context->comm_global);
-        const char *ptr_lp = buf_lp;
-        *out_local_qp = deserialize_qp_problem_from_ptr(&ptr_lp);
-        free(buf_lp);
-
-        char *buf_resc = NULL;
-        size_t sz_resc = 0;
-        big_recv_bytes((void **)&buf_resc, &sz_resc, 0, grid_context->comm_global);
-        *out_local_resc = deserialize_rescale_info(buf_resc);
-        free(buf_resc);
-    }
-
-    double t_end = MPI_Wtime();
-    if (params->verbose && grid_context->rank_global == 0)
-    {
-        printf("[Timer] Data Distribution (Partition -> P2P Send) took %.3f "
-               "seconds.\n",
-               t_end - t_start);
     }
 }
 

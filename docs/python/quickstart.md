@@ -1,6 +1,6 @@
 # Python Quick Start
 
-PDHCG provides a user-friendly Python interface that allows you to define, solve, and analyze QP problems using familiar libraries like NumPy and SciPy.
+PDHCG provides a user-friendly Python interface for quadratic and quadratic conic problems using familiar NumPy and SciPy data structures.
 
 ## Basic Usage
 
@@ -55,14 +55,64 @@ if m.X is not None:
     print(f"Primal Solution: {m.X}")
 ```
 
+## Quick start with cone constraints
+
+Conic constraints use a columnar `ConeSpec`, whose arrays can describe many
+blocks without allocating one Python object per cone. See
+[model.md](model.md#cone-constraints).
+
+```python
+import numpy as np
+import scipy.sparse as sp
+from pdhcg import ConeSpec, ConeType, Model
+
+# min  z  s.t.  v = 3, w = 4, (v, w, z) in K_soc  =>  z = sqrt(v^2 + w^2) = 5
+A = sp.csr_matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+model = Model(
+    objective_vector=np.array([0.0, 0.0, 1.0]),
+    constraint_matrix=A,
+    constraint_lower_bound=np.array([3.0, 4.0]),
+    constraint_upper_bound=np.array([3.0, 4.0]),
+    variable_cones=ConeSpec(
+        ConeType.SOC,
+        np.array([0], dtype=np.int32),
+        v_dims=1,
+    ),
+)
+model.optimize()
+print(model.Status, model.X)
+```
+
+## CVXPY
+
+Install the optional integration with `pip install "pdhcg[cvxpy]"`, then
+import the backend once in each process:
+
+```python
+import cvxpy as cp
+import pdhcg.cvxpy_backend  # Registers solver="PDHCG".
+
+x = cp.Variable()
+problem = cp.Problem(cp.Minimize(x), [x >= 1])
+value = problem.solve(solver="PDHCG", eps=1e-6)
+
+print(problem.status, value, x.value)
+```
+
+The backend preserves CVXPY's primal and dual conventions. It supports
+quadratic objectives and Zero, NonNeg, SOC, ExpCone, and PowCone3D
+constraints. PSD and mixed-integer models are not supported.
+
 ## Model Creation
 
-The `Model` class is the core interface for defining QP problems. The problem formulation is:
+The `Model` class is the core interface for defining quadratic conic problems. The problem formulation is:
 
 $$
 \begin{aligned}
 \min_{x} \quad & \frac{1}{2}x^\top (Q + R^\top D R) x + c^\top x \\
 \text{s.t.} \quad & \ell_c \le Ax \le u_c, \\
+                  & Fx + g \in \mathcal{K}_a, \\
+                  & x_J \in \mathcal{K}_v \quad \text{for variable-cone blocks } J, \\
                   & \ell_v \le x \le u_v.
 \end{aligned}
 $$
@@ -79,6 +129,10 @@ $$
 - `constraint_matrix` ($A$): Linear constraint matrix
 - `constraint_lower_bound` ($\ell_c$): Constraint lower bounds
 - `constraint_upper_bound` ($u_c$): Constraint upper bounds
+- `affine_cone_matrix` ($F$): Matrix in the native affine-cone constraint $Fx + g \in \mathcal{K}_a$
+- `affine_cone_offset` ($g$): Affine-cone offset; defaults to zero
+- `affine_cones`: `ConeSpec` covering every row of $F$
+- `variable_cones`: `ConeSpec` describing cone blocks embedded in $x$
 - `variable_lower_bound` ($\ell_v$): Variable lower bounds (default: $-\infty$)
 - `variable_upper_bound` ($u_v$): Variable upper bounds (default: $+\infty$)
 - `objective_constant`: Constant term in objective

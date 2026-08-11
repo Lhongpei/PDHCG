@@ -11,6 +11,9 @@ pybind11_add_module(_pdhcg_core MODULE ${PYBIND_SOURCES})
 target_link_libraries(_pdhcg_core PRIVATE
     pdhcg_core
 )
+target_include_directories(_pdhcg_core PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../internal
+)
 
 # set rpath so that the module can find the shared libraries at runtime
 # Include PSQP build directory in RPATH if PSQP is available
