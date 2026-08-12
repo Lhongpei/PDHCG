@@ -28,6 +28,7 @@ class ConeType(IntEnum):
     SOC = 1
     EXP = 2
     POWER = 3
+    PSD = 4
 
     ROTATED_SOC = RSOC
     STANDARD_SOC = SOC
@@ -39,6 +40,7 @@ _CONE_TYPE_NAMES = {
     "soc": ConeType.SOC,
     "exp": ConeType.EXP,
     "power": ConeType.POWER,
+    "psd": ConeType.PSD,
 }
 
 
@@ -47,11 +49,11 @@ def _cone_type_code(value: Any) -> int:
         try:
             return int(_CONE_TYPE_NAMES[value.lower()])
         except KeyError as exc:
-            raise ValueError("cone type must be 'soc', 'rsoc', 'exp', or 'power'") from exc
+            raise ValueError("cone type must be 'soc', 'rsoc', 'exp', 'power', or 'psd'") from exc
     if not isinstance(value, Integral):
         raise TypeError("cone type must be a ConeType, integer code, or string")
     code = int(value)
-    if code < int(ConeType.RSOC) or code > int(ConeType.POWER):
+    if code < int(ConeType.RSOC) or code > int(ConeType.PSD):
         raise ValueError(f"invalid cone type code {code}")
     return code
 
@@ -97,7 +99,7 @@ def _as_type_vector(value: Any, count: int) -> np.ndarray:
     if array.ndim != 1 or array.size != count:
         raise ValueError(f"types must be a scalar or a 1D array of length {count}")
     if array.dtype.kind in "iu":
-        if array.size and (array.min() < int(ConeType.RSOC) or array.max() > int(ConeType.POWER)):
+        if array.size and (array.min() < int(ConeType.RSOC) or array.max() > int(ConeType.PSD)):
             raise ValueError("types contains an invalid cone type code")
         return np.ascontiguousarray(array, dtype=np.int32)
     return np.fromiter((_cone_type_code(item) for item in array), dtype=np.int32, count=count)
@@ -109,7 +111,8 @@ class ConeSpec:
     ``types``, ``v_dims``, and ``power_alphas`` may be scalars and are then
     broadcast to all entries in ``starts``. For variable cones, ``starts`` are
     variable indices. For affine cones, they are rows of the separately supplied
-    affine map ``F``.
+    affine map ``F``. For PSD cones, ``v_dims`` stores the matrix order and each
+    block occupies lower-triangular column-major ``svec`` coordinates.
     """
 
     __slots__ = ("types", "starts", "v_dims", "power_alphas", "fixed_mask")
@@ -169,11 +172,12 @@ class ConeSpec:
         ambient_dimension = int(ambient_dimension)
         if ambient_dimension < 0:
             raise ValueError("ambient_dimension must be nonnegative")
-        lengths = np.where(
-            (self.types == int(ConeType.EXP)) | (self.types == int(ConeType.POWER)),
-            3,
-            self.v_dims.astype(np.int64) + 2,
-        )
+        v_dims_i64 = self.v_dims.astype(np.int64)
+        lengths = v_dims_i64 + 2
+        three_dimensional = (self.types == int(ConeType.EXP)) | (self.types == int(ConeType.POWER))
+        lengths = np.where(three_dimensional, 3, lengths)
+        psd = self.types == int(ConeType.PSD)
+        lengths = np.where(psd, v_dims_i64 * (v_dims_i64 + 1) // 2, lengths)
         ends = self.starts.astype(np.int64) + lengths
         if np.any(ends > ambient_dimension):
             raise ValueError("a cone block extends beyond the ambient dimension")
@@ -187,6 +191,9 @@ class ConeSpec:
                     "fixed_mask length "
                     f"{self.fixed_mask.size} != ambient dimension {ambient_dimension}"
                 )
+            for start, length, is_psd in zip(self.starts, lengths, psd):
+                if is_psd and np.any(self.fixed_mask[int(start) : int(start + length)]):
+                    raise ValueError("PSD cones do not support fixed slots")
 
     @classmethod
     def from_columnar(cls, payload: Mapping[str, Any]) -> "ConeSpec":

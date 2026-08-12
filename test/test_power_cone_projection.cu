@@ -1,4 +1,4 @@
-#include "pdhcg_kernels.cuh"
+#include "pdhcg_power_cone_kernels.h"
 
 #include <cuda_runtime.h>
 #include <float.h>

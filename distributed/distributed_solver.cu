@@ -19,7 +19,7 @@ limitations under the License.
 #include "distributed_utils.h"
 #include "internal_types.h"
 #include "pdhcg.h"
-#include "pdhcg_kernels.cuh"
+#include "pdhcg_kernels.h"
 #include "pdhg_core_op.h"
 #include "permute.h"
 #include "preconditioner.h"

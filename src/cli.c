@@ -177,7 +177,7 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --no_pock_chambolle  Disable Pock-Chambolle rescaling (default: enabled).\n");
     fprintf(stderr, "      --pock_chambolle_alpha Value for Pock-Chambolle alpha (default: 1.0).\n");
     fprintf(stderr, "      --no_bound_obj_rescaling Disable bound objective rescaling.\n");
-    fprintf(stderr, "      --no_cone_preserving_scaling Keep coordinate-wise cone scaling.\n");
+    fprintf(stderr, "      --no_cone_preserving_scaling Disable cone-preserving scaling.\n");
     fprintf(stderr, "      --eval_freq <int>    Termination evaluation frequency (default: 200).\n");
     fprintf(stderr, "      --artificial_restart_threshold Artificial restart threshold (default: 0.36).\n");
     fprintf(stderr,

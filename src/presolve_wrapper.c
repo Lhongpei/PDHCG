@@ -332,6 +332,11 @@ static int append_fixed_cone_rows(const qp_problem_t *source, PreFOSInputAdapter
     return 1;
 }
 
+static size_t psd_column_major_slot(size_t order, size_t row, size_t column)
+{
+    return column * (2 * order - column + 1) / 2 + row - column;
+}
+
 static int initialize_domains(const qp_problem_t *source, PreFOSInputAdapter *adapter)
 {
     size_t n = (size_t)source->num_variables;
@@ -414,6 +419,19 @@ static int initialize_domains(const qp_problem_t *source, PreFOSInputAdapter *ad
                 target->indices[1] = start + 1;
                 target->indices[2] = start + 2;
                 break;
+            case CONE_PSD:
+            {
+                size_t row;
+                size_t column;
+                size_t position = 0;
+                size_t order = (size_t)vector_dimension;
+                target->type = PREFOS_CONE_POSITIVE_SEMIDEFINITE;
+                target->matrix_order = order;
+                for (row = 0; row < order; ++row)
+                    for (column = 0; column <= row; ++column)
+                        target->indices[position++] = start + (int)psd_column_major_slot(order, row, column);
+                break;
+            }
             default:
                 free(owner);
                 return 0;
@@ -505,12 +523,14 @@ static int convert_cone_to_pdhcg(const PreFOSConeBlock *source, cone_blocks_t *t
     size_t dimension = source->dimension;
     size_t i;
     int start;
-    if (!source->indices || dimension < 2)
+    if (!source->indices || dimension == 0)
         return 0;
 
     switch (source->type)
     {
         case PREFOS_CONE_SECOND_ORDER:
+            if (dimension < 2)
+                return 0;
             start = source->indices[1];
             for (i = 1; i < dimension; ++i)
                 if (source->indices[i] != start + (int)i - 1)
@@ -543,6 +563,30 @@ static int convert_cone_to_pdhcg(const PreFOSConeBlock *source, cone_blocks_t *t
             if (source->type == PREFOS_CONE_POWER)
                 target->power_alpha[cone] = source->power_alpha;
             break;
+        case PREFOS_CONE_POSITIVE_SEMIDEFINITE:
+        {
+            size_t row;
+            size_t column;
+            size_t position = 0;
+            size_t order = source->matrix_order;
+            if (order == 0 || order > (size_t)INT_MAX || order * (order + 1) / 2 != dimension)
+                return 0;
+            start = source->indices[0];
+            if (start < 0)
+                return 0;
+            for (row = 0; row < order; ++row)
+            {
+                for (column = 0; column <= row; ++column)
+                {
+                    size_t slot = psd_column_major_slot(order, row, column);
+                    if ((long long)source->indices[position++] != (long long)start + (long long)slot)
+                        return 0;
+                }
+            }
+            target->type[cone] = CONE_PSD;
+            target->v_dim[cone] = (int)order;
+            break;
+        }
         default:
             return 0;
     }

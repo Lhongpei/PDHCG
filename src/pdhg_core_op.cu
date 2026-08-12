@@ -16,11 +16,15 @@ limitations under the License.
 */
 
 #include "cone_dispatch.h"
+#include "cone_kernel_ops.h"
 #include "distributed_conic.h"
 #include "distributed_interface.h"
 #include "internal_types.h"
 #include "pdhcg.h"
-#include "pdhcg_kernels.cuh"
+#include "pdhcg_affine_cone_kernels.h"
+#include "pdhcg_kernels.h"
+#include "pdhcg_power_cone_kernels.h"
+#include "pdhcg_psd_cone.h"
 #include "pdhg_core_op.h"
 #include "preconditioner.h"
 #include "solver.h"
@@ -158,6 +162,13 @@ static void compute_affine_cone_residuals(pdhg_solver_state_t *state,
                     bucket->count);
             }
         }
+        prepare_psd_affine_cone_residuals(state->affine_cones.psd,
+                                          projection_point,
+                                          state->affine_cones.complementarity_residual,
+                                          state->primal_product,
+                                          state->affine_cone_offset,
+                                          state->pdhg_dual_solution,
+                                          state->constraint_bound_rescaling);
     }
     prepare_split_affine_cone_residuals(
         state, projection_point, state->primal_product, state->affine_cone_offset, state->pdhg_dual_solution);
@@ -212,23 +223,21 @@ static void compute_power_cone_primal_violation(pdhg_solver_state_t *state,
 
     double absolute_accumulator = 0.0;
     double relative_accumulator = 0.0;
-    int threads = THREADS_PER_BLOCK;
     for (int b = 0; b < state->cones.num_buckets; ++b)
     {
         const cone_bucket_t *bucket = &state->cones.buckets[b];
         if (bucket->type != CONE_POWER)
             continue;
-        int blocks = (bucket->count + threads - 1) / threads;
         double *absolute_workspace = state->cones.power_violation_workspace + bucket->offset;
         double *relative_workspace = state->cones.power_violation_workspace + state->cones.num_blocks + bucket->offset;
-        compute_power_cone_primal_violation_kernel<<<blocks, threads>>>(absolute_workspace,
-                                                                        relative_workspace,
-                                                                        state->pdhg_primal_solution,
-                                                                        state->variable_rescaling,
-                                                                        state->cones.start_idx + bucket->offset,
-                                                                        state->cones.power_alpha + bucket->offset,
-                                                                        state->constraint_bound_rescaling,
-                                                                        bucket->count);
+        launch_power_cone_primal_violation(absolute_workspace,
+                                           relative_workspace,
+                                           state->pdhg_primal_solution,
+                                           state->variable_rescaling,
+                                           state->cones.start_idx + bucket->offset,
+                                           state->cones.power_alpha + bucket->offset,
+                                           state->constraint_bound_rescaling,
+                                           bucket->count);
         if (optimality_norm == NORM_TYPE_L_INF)
         {
             absolute_accumulator = fmax(absolute_accumulator,
@@ -718,11 +727,24 @@ void pdhg_update(pdhg_solver_state_t *state)
         case PDHCG_NON_Q:
         {
             lp_primal_update(state, primal_step_size);
+            if (state->has_variable_cones)
+            {
+                project_cone_runtime(
+                    state, &state->cones, state->pdhg_primal_solution, state->cones.projection_warm_start);
+                recompute_cone_reflection(state);
+            }
             break;
         }
         case PDHCG_DIAG_Q:
         {
-            diag_q_primal_update(state, primal_step_size);
+            if (state->cones.has_psd_cones)
+                primal_BB_step_size_update(state, primal_step_size);
+            else
+            {
+                diag_q_primal_update(state, primal_step_size);
+                if (state->has_variable_cones)
+                    project_cone_runtime_diag_q(state, &state->cones, primal_step_size);
+            }
             break;
         }
         case PDHCG_SPARSE_Q:
@@ -735,23 +757,6 @@ void pdhg_update(pdhg_solver_state_t *state)
         default:
             fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
             exit(EXIT_FAILURE);
-    }
-
-    if (state->has_variable_cones)
-    {
-        quad_obj_type_t qt = state->quadratic_objective_term->quad_obj_type;
-        if (qt == PDHCG_DIAG_Q)
-        {
-            project_cone_runtime_diag_q(state, &state->cones, primal_step_size);
-        }
-        else if (qt == PDHCG_SPARSE_Q || qt == PDHCG_LOW_RANK_Q || qt == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
-        {
-        }
-        else
-        {
-            project_cone_runtime(state, &state->cones, state->pdhg_primal_solution, state->cones.projection_warm_start);
-            recompute_cone_reflection(state);
-        }
     }
 
     state->inner_solver->total_count++;
@@ -1021,9 +1026,7 @@ void compute_fixed_point_error(pdhg_solver_state_t *state)
     interaction = 2 * state->step_size * cross_term;
 
     state->fixed_point_error = sqrt(movement + interaction);
-    if (state->problem_type == CONVEX_QP &&
-        (state->quadratic_objective_term->quad_obj_type != PDHCG_NON_Q &&
-         state->quadratic_objective_term->quad_obj_type != PDHCG_DIAG_Q))
+    if (state->problem_type == CONVEX_QP && state->inner_solver->bb_step_size)
     {
         state->inner_solver->tol =
             fmin(state->inner_solver->tol,

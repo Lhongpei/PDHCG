@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 #include "internal_types.h"
-#include "pdhcg_kernels.cuh"
+#include "pdhcg_soc_cone_kernels.h"
 #include "utils.h"
 #include <math.h>
 #include <stdio.h>

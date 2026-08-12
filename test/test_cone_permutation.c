@@ -1,3 +1,4 @@
+#include "cone_utils.h"
 #include "pdhcg.h"
 #include "permute.h"
 #include <math.h>
@@ -17,9 +18,9 @@
 
 int main(void)
 {
-    const int n = 16;
+    const int n = 21;
     static const int scalar_row_ptr[] = {0, 0};
-    static const int affine_row_ptr[] = {0, 0, 0, 0, 0, 0, 0};
+    static const int affine_row_ptr[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     static const int col_ind[] = {0};
     static const double values[] = {0.0};
     double objective[n];
@@ -35,7 +36,7 @@ int main(void)
     A.data.csr.col_ind = col_ind;
     A.data.csr.vals = values;
     matrix_desc_t F = {0};
-    F.m = 6;
+    F.m = 9;
     F.n = n;
     F.fmt = matrix_csr;
     F.data.csr.nnz = 0;
@@ -44,7 +45,7 @@ int main(void)
     F.data.csr.vals = values;
     const double constraint_lower[] = {0.0};
     const double constraint_upper[] = {0.0};
-    static const double affine_offset[] = {10.0, 11.0, 12.0, 20.0, 21.0, 22.0};
+    static const double affine_offset[] = {10.0, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0};
     const char fixed0[] = {0, 0, 1};
     const char fixed1[] = {1, 0, 0};
     const char fixed2[] = {0, 1, 0};
@@ -54,10 +55,12 @@ int main(void)
         {.type = CONE_POWER, .start_idx = 5, .v_dim = 1, .power_alpha = 0.3, .is_fixed = fixed1},
         {.type = CONE_EXPONENTIAL, .start_idx = 9, .v_dim = 1, .power_alpha = 0.0, .is_fixed = fixed2},
         {.type = CONE_ROTATED_SOC, .start_idx = 12, .v_dim = 2, .power_alpha = 0.0, .is_fixed = fixed3},
+        {.type = CONE_PSD, .start_idx = 17, .v_dim = 2},
     };
     const cone_spec_t affine_cones[] = {
         {.type = CONE_STANDARD_SOC, .start_idx = 0, .v_dim = 1},
         {.type = CONE_EXPONENTIAL, .start_idx = 3, .v_dim = 1},
+        {.type = CONE_PSD, .start_idx = 6, .v_dim = 2},
     };
 
     qp_problem_t *problem = create_qp_problem(objective,
@@ -70,29 +73,27 @@ int main(void)
                                               NULL,
                                               NULL,
                                               NULL,
-                                              4,
+                                              5,
                                               cones,
                                               &F,
                                               affine_offset,
-                                              2,
+                                              3,
                                               affine_cones);
     CHECK(problem != NULL);
 
     int permutation[n];
-    int row_permutation[] = {0, 1, 2, 3, 4, 5, 6};
+    int row_permutation[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     srand(7);
     generate_cone_aware_permutation(problem, FULL_RANDOM_PERMUTATION, 1, permutation);
     CHECK(validate_cone_permutation(problem, permutation));
 
     qp_problem_t *permuted = permute_problem_return_new(problem, row_permutation, permutation);
     CHECK(permuted != NULL);
-    for (int cone = 0; cone < 4; ++cone)
+    for (int cone = 0; cone < 5; ++cone)
     {
         int old_start = problem->cones.start_idx[cone];
         int new_start = permuted->cones.start_idx[cone];
-        int length = (problem->cones.type[cone] == CONE_EXPONENTIAL || problem->cones.type[cone] == CONE_POWER)
-            ? 3
-            : problem->cones.v_dim[cone] + 2;
+        int length = cone_block_length(&problem->cones, cone);
         CHECK(permuted->cones.type[cone] == problem->cones.type[cone]);
         if (problem->cones.type[cone] == CONE_POWER)
             CHECK(permuted->cones.power_alpha[cone] == problem->cones.power_alpha[cone]);
@@ -108,7 +109,7 @@ int main(void)
     generate_cone_aware_permutation(problem, BLOCK_RANDOM_PERMUTATION, 2, block_permutation);
     CHECK(validate_cone_permutation(problem, block_permutation));
 
-    int row_cone_permutation[7];
+    int row_cone_permutation[10];
     int identity_columns[n];
     for (int col = 0; col < n; ++col)
         identity_columns[col] = col;
@@ -117,15 +118,16 @@ int main(void)
     CHECK(validate_affine_cone_row_permutation(problem, row_cone_permutation));
     qp_problem_t *affine_permuted = permute_problem_return_new(problem, row_cone_permutation, identity_columns);
     CHECK(affine_permuted != NULL);
-    for (int cone = 0; cone < 2; ++cone)
+    for (int cone = 0; cone < 3; ++cone)
     {
         int old_start = problem->affine_cones.start_idx[cone];
         int new_start = affine_permuted->affine_cones.start_idx[cone];
-        for (int slot = 0; slot < 3; ++slot)
+        int length = cone_block_length(&problem->affine_cones, cone);
+        for (int slot = 0; slot < length; ++slot)
             CHECK(affine_permuted->affine_cone_offset[new_start + slot] ==
                   problem->affine_cone_offset[old_start + slot]);
     }
-    int invalid_rows[] = {1, 0, 2, 3, 4, 5, 6};
+    int invalid_rows[] = {1, 0, 2, 3, 4, 5, 6, 7, 8, 9};
     CHECK(!validate_affine_cone_row_permutation(problem, invalid_rows));
     CHECK(!permute_problem(problem, invalid_rows, identity_columns));
     int duplicate_columns[n];

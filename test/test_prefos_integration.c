@@ -81,6 +81,7 @@ static int test_all_fixed_postsolve(void)
     double objective[] = {1.0, 2.0};
     double row_lower[] = {1.0};
     double row_upper[] = {1.0};
+    double row_offset[] = {0.0};
 
     memset(&problem, 0, sizeof(problem));
     problem.num_variables = 2;
@@ -98,6 +99,7 @@ static int test_all_fixed_postsolve(void)
     problem.objective_vector = objective;
     problem.constraint_lower_bound = row_lower;
     problem.constraint_upper_bound = row_upper;
+    problem.affine_cone_offset = row_offset;
 
     info = pdhcg_presolve(&problem, &parameters);
     CHECK(info != NULL);
@@ -237,6 +239,63 @@ static int test_power_layout_and_alpha(void)
     return 0;
 }
 
+static int test_psd_layout_and_postsolve(void)
+{
+    qp_problem_t problem;
+    pdhg_parameters_t parameters = quiet_parameters();
+    pdhcg_presolve_info_t *info;
+    pdhcg_result_t result;
+    double lower[] = {2.0, -INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY};
+    double upper[] = {2.0, INFINITY, INFINITY, INFINITY, INFINITY, INFINITY, INFINITY};
+    double objective[] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    int cone_start[] = {1};
+    int cone_v_dim[] = {3};
+    cone_type_t cone_type[] = {CONE_PSD};
+    const double identity_svec[] = {1.0, 0.0, 0.0, 1.0, 0.0, 1.0};
+    int i;
+
+    memset(&problem, 0, sizeof(problem));
+    problem.num_variables = 7;
+    problem.constraint_matrix = create_csr(0, 0);
+    CHECK(problem.constraint_matrix != NULL);
+    problem.variable_lower_bound = lower;
+    problem.variable_upper_bound = upper;
+    problem.objective_vector = objective;
+    problem.cones.num_cones = 1;
+    problem.cones.start_idx = cone_start;
+    problem.cones.v_dim = cone_v_dim;
+    problem.cones.type = cone_type;
+
+    info = pdhcg_presolve(&problem, &parameters);
+    CHECK(info != NULL);
+    CHECK(info->presolve_status == PDHCG_PRESOLVE_STATUS_REDUCED);
+    CHECK(!info->problem_solved_during_presolve);
+    CHECK(info->reduced_problem != NULL);
+    CHECK(info->reduced_problem->num_variables == 6);
+    CHECK(info->reduced_problem->cones.num_cones == 1);
+    CHECK(info->reduced_problem->cones.start_idx[0] == 0);
+    CHECK(info->reduced_problem->cones.v_dim[0] == 3);
+    CHECK(info->reduced_problem->cones.type[0] == CONE_PSD);
+
+    memset(&result, 0, sizeof(result));
+    result.primal_solution = (double *)calloc(6, sizeof(double));
+    result.reduced_cost = (double *)calloc(6, sizeof(double));
+    CHECK(result.primal_solution && result.reduced_cost);
+    memcpy(result.primal_solution, identity_svec, sizeof(identity_svec));
+    CHECK(pdhcg_postsolve(info, &result, &problem));
+    CHECK(result.num_variables == 7);
+    CHECK(fabs(result.primal_solution[0] - 2.0) <= 1e-12);
+    for (i = 0; i < 6; ++i)
+        CHECK(fabs(result.primal_solution[i + 1] - identity_svec[i]) <= 1e-12);
+
+    free(result.primal_solution);
+    free(result.dual_solution);
+    free(result.reduced_cost);
+    pdhcg_presolve_info_free(info);
+    free_csr(problem.constraint_matrix);
+    return 0;
+}
+
 static int test_diagonal_middle_matrix(void)
 {
     qp_problem_t problem;
@@ -309,6 +368,10 @@ int main(void)
     printf("Power-cone layout and alpha...\n");
     fflush(stdout);
     if (test_power_layout_and_alpha())
+        return 1;
+    printf("PSD layout and postsolve...\n");
+    fflush(stdout);
+    if (test_psd_layout_and_postsolve())
         return 1;
     printf("diagonal middle matrix...\n");
     fflush(stdout);

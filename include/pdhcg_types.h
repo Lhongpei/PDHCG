@@ -66,14 +66,15 @@ extern "C"
         CONE_STANDARD_SOC = 1,
         CONE_EXPONENTIAL = 2,
         CONE_POWER = 3, /* 3-dim: x^alpha * y^(1-alpha) >= |z|, x,y >= 0 */
-        NUM_CONE_TYPES = 4
+        CONE_PSD = 4,   /* svec(X), X symmetric positive semidefinite */
+        NUM_CONE_TYPES = 5
     } cone_type_t;
 
     typedef struct
     {
         int num_cones;
         int *start_idx;      /* [num_cones] */
-        int *v_dim;          /* [num_cones] */
+        int *v_dim;          /* [num_cones]; PSD stores the matrix order */
         cone_type_t *type;   /* [num_cones] */
         double *power_alpha; /* [num_cones]; alpha in (0,1) for CONE_POWER, else unused */
         int fixed_mask_size; /* number of entries in is_fixed; zero when no mask is stored */
@@ -83,10 +84,10 @@ extern "C"
     typedef struct
     {
         cone_type_t type;
-        int start_idx; /* variable index, or row of F for affine cones */
-        int v_dim;
+        int start_idx;        /* variable index, or row of F for affine cones */
+        int v_dim;            /* vector dimension for SOC/RSOC; matrix order for PSD */
         double power_alpha;   /* required for CONE_POWER (in (0,1)); ignored otherwise */
-        const char *is_fixed; /* variable cones only; must be NULL for affine cones */
+        const char *is_fixed; /* variable non-PSD cones only; must be NULL for affine cones */
     } cone_spec_t;
 
     typedef struct

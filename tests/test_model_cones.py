@@ -84,6 +84,43 @@ def test_model_native_affine_soc_columnar_input(sparse: bool) -> None:
 
 
 @pytest.mark.gpu
+def test_model_variable_psd_svec_input() -> None:
+    sqrt_two = np.sqrt(2.0)
+    model = _quiet_model(
+        Model(
+            objective_vector=np.array([0.0, 0.0, 1.0]),
+            constraint_matrix=sp.csr_matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+            constraint_lower_bound=np.array([1.0, 2.0 * sqrt_two]),
+            constraint_upper_bound=np.array([1.0, 2.0 * sqrt_two]),
+            variable_cones=ConeSpec(ConeType.PSD, np.array([0], dtype=np.int32), v_dims=2),
+        )
+    )
+
+    model.optimize()
+
+    assert model.Status == "OPTIMAL"
+    np.testing.assert_allclose(model.X, [1.0, 2.0 * sqrt_two, 4.0], atol=8e-4)
+
+
+@pytest.mark.gpu
+def test_model_native_affine_psd_svec_input() -> None:
+    sqrt_two = np.sqrt(2.0)
+    model = _quiet_model(
+        Model(
+            objective_vector=np.array([1.0]),
+            affine_cone_matrix=sp.csr_matrix([[1.0], [0.0], [0.0]]),
+            affine_cone_offset=np.array([0.0, sqrt_two, 1.0]),
+            affine_cones=ConeSpec(ConeType.PSD, np.array([0], dtype=np.int32), v_dims=2),
+        )
+    )
+
+    model.optimize()
+
+    assert model.Status == "OPTIMAL"
+    np.testing.assert_allclose(model.X, [1.0], atol=8e-4)
+
+
+@pytest.mark.gpu
 def test_cvxpy_constant_exp_rows_use_equalities_instead_of_fixed_slots() -> None:
     cp = pytest.importorskip("cvxpy")
     import pdhcg.cvxpy_backend  # noqa: F401
@@ -134,3 +171,20 @@ def test_cvxpy_soc_dual_sign_and_order() -> None:
     np.testing.assert_allclose(fixed.dual_value, [-0.6, -0.8], atol=5e-5)
     np.testing.assert_allclose(cone.dual_value[0], [1.0], atol=5e-5)
     np.testing.assert_allclose(cone.dual_value[1].ravel(), [-0.6, -0.8], atol=5e-5)
+
+
+@pytest.mark.gpu
+def test_cvxpy_psd_primal_and_dual_svec_order() -> None:
+    cp = pytest.importorskip("cvxpy")
+    import pdhcg.cvxpy_backend  # noqa: F401
+
+    matrix = cp.Variable((2, 2), symmetric=True)
+    fixed = [matrix[0, 0] == 1.0, matrix[0, 1] == 2.0]
+    cone = matrix >> 0
+    problem = cp.Problem(cp.Minimize(matrix[1, 1]), [*fixed, cone])
+
+    problem.solve(solver="PDHCG", eps=1e-6, verbose=False)
+
+    assert problem.status == cp.OPTIMAL
+    np.testing.assert_allclose(matrix.value, [[1.0, 2.0], [2.0, 4.0]], atol=2e-3)
+    np.testing.assert_allclose(cone.dual_value, [[4.0, -2.0], [-2.0, 1.0]], atol=3e-3)

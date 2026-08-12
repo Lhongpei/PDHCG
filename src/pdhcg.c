@@ -629,6 +629,11 @@ int set_cone_fixed(qp_problem_t *prob, int cone_idx, int slot, double value)
         fprintf(stderr, "[set_cone_fixed] cone_idx %d out of range [0, %d)\n", cone_idx, prob->cones.num_cones);
         return -1;
     }
+    if (prob->cones.type[cone_idx] == CONE_PSD)
+    {
+        fprintf(stderr, "[set_cone_fixed] fixed PSD cone sections are not supported.\n");
+        return -1;
+    }
     int len = cone_block_length(&prob->cones, cone_idx);
     if (slot < 0 || slot >= len)
     {

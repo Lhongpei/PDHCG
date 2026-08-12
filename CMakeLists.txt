@@ -3,6 +3,11 @@
 # -----------------------------------------------------------------------------
 cmake_minimum_required(VERSION 3.20)
 
+set(_PDHCG_CUDA_ARCHITECTURES_EXPLICIT FALSE)
+if(DEFINED CMAKE_CUDA_ARCHITECTURES OR DEFINED ENV{CUDAARCHS})
+    set(_PDHCG_CUDA_ARCHITECTURES_EXPLICIT TRUE)
+endif()
+
 project(pdhcg LANGUAGES C CXX CUDA)
 
 set(PDHCG_VERSION_MAJOR 0)
@@ -26,9 +31,17 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86 89 90)
+if(NOT _PDHCG_CUDA_ARCHITECTURES_EXPLICIT)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+        set(_PDHCG_DEFAULT_CUDA_ARCHITECTURES all)
+    else()
+        set(_PDHCG_DEFAULT_CUDA_ARCHITECTURES 60 70 75 80 86 89 90)
+    endif()
+    set(CMAKE_CUDA_ARCHITECTURES "${_PDHCG_DEFAULT_CUDA_ARCHITECTURES}"
+        CACHE STRING "CUDA architectures to build" FORCE)
+    unset(_PDHCG_DEFAULT_CUDA_ARCHITECTURES)
 endif()
+unset(_PDHCG_CUDA_ARCHITECTURES_EXPLICIT)
 
 # Global Compile flags (corresponding to CFLAGS/NVCCFLAGS)
 add_compile_options(-fPIC -O3 -Wall -Wextra -g)
@@ -162,6 +175,7 @@ endif()
 set(CORE_LINK_LIBS PUBLIC
   CUDA::cudart
   CUDA::cublas
+  CUDA::cusolver
   CUDA::cusparse
   ZLIB::ZLIB
 )
@@ -323,7 +337,7 @@ if(PDHCG_BUILD_TESTS)
 
         # Input-driven inspection/export tools are built but require explicit
         # command-line data, so they are not zero-argument CTest cases.
-        if(TEST_NAME STREQUAL "test_distributed_conic" AND PDHCG_COMPILE_DISTRIBUTED)
+        if(TEST_NAME MATCHES "^test_distributed_(conic|psd)$" AND PDHCG_COMPILE_DISTRIBUTED)
             add_test(NAME ${TEST_NAME}
                      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
                              $<TARGET_FILE:${TEST_NAME}> ${MPIEXEC_POSTFLAGS})
