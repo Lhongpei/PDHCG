@@ -103,7 +103,9 @@ typedef enum {
   CONE_ROTATED_SOC = 0,
   CONE_STANDARD_SOC = 1,
   CONE_EXPONENTIAL = 2,
-  CONE_POWER = 3
+  CONE_POWER = 3,
+  CONE_PSD = 4,
+  NUM_CONE_TYPES = 5
 } cone_type_t;
 ```
 
@@ -113,6 +115,12 @@ typedef enum {
 | `CONE_ROTATED_SOC` | `\|\|v\|\|^2 <= 2 s t`, `s, t >= 0` | `v` (`v_dim`), `s`, `t` |
 | `CONE_EXPONENTIAL` | `y * exp(x / y) <= z`, `y > 0` | `x`, `y`, `z` (`v_dim` must be 1) |
 | `CONE_POWER` | `x^alpha * y^(1-alpha) >= \|z\|`, `x,y >= 0` | `x`, `y`, `z` (`v_dim` must be 1) |
+| `CONE_PSD` | Symmetric matrix `X` is positive semidefinite | `svec(X)` (`v_dim` is the matrix order; length `v_dim * (v_dim + 1) / 2`) |
+
+PSD `svec` stores the lower triangle in column-major order. Diagonal entries
+are unchanged and off-diagonal entries are multiplied by `sqrt(2)`.
+Distributed partitioning keeps each PSD block on one GPU and never splits its
+`svec` coordinates across devices.
 
 ## Cone Spec
 
@@ -128,12 +136,12 @@ typedef struct {
 
 Input descriptor for a single cone block. In `var_cones`, `start_idx` indexes
 the variable vector; in `affine_cones`, it indexes rows of the separately
-supplied affine matrix `F`. The
-slot count is `v_dim + 2` for SOC/RSOC and `3` for
-exponential/power cones. Power cones require `power_alpha` in `(0,1)`.
-Variable cones may provide an `is_fixed` array of `slot_count` bytes. Every
-mathematically nonempty fixed-slot pattern is supported for all four cone
-types. Affine cones must set `is_fixed` to NULL.
+supplied affine matrix `F`. The slot count is `v_dim + 2` for SOC/RSOC, `3`
+for exponential/power cones, and `v_dim * (v_dim + 1) / 2` for PSD cones.
+Power cones require `power_alpha` in `(0,1)`. Variable non-PSD cones may
+provide an `is_fixed` array of `slot_count` bytes. Every mathematically
+nonempty fixed-slot pattern is supported for those cone types. PSD blocks do
+not support fixed slots, and affine cones must set `is_fixed` to NULL.
 
 ## Cone Blocks
 

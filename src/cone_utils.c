@@ -29,6 +29,11 @@ int cone_length(cone_type_t type, int v_dim)
         return 3;
     if (type == CONE_STANDARD_SOC || type == CONE_ROTATED_SOC)
         return v_dim >= 0 && v_dim <= INT_MAX - 2 ? v_dim + 2 : -1;
+    if (type == CONE_PSD && v_dim > 0)
+    {
+        long long length = (long long)v_dim * (v_dim + 1LL) / 2LL;
+        return length <= INT_MAX ? (int)length : -1;
+    }
     return -1;
 }
 
@@ -91,6 +96,18 @@ int cone_blocks_init_from_specs(cone_blocks_t *blocks,
             fprintf(stderr, "[create_qp_problem] %s cone %d does not support fixed slots.\n", kind, cone);
             free(owner);
             return -1;
+        }
+        if (specs[cone].type == CONE_PSD && specs[cone].is_fixed)
+        {
+            int has_fixed = 0;
+            for (int slot = 0; slot < length; ++slot)
+                has_fixed |= specs[cone].is_fixed[slot] != 0;
+            if (has_fixed)
+            {
+                fprintf(stderr, "[create_qp_problem] %s PSD cone %d does not support fixed slots.\n", kind, cone);
+                free(owner);
+                return -1;
+            }
         }
         if (specs[cone].type == CONE_POWER &&
             !(isfinite(specs[cone].power_alpha) && specs[cone].power_alpha > 0.0 && specs[cone].power_alpha < 1.0))

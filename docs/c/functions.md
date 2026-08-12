@@ -92,7 +92,7 @@ int set_cone_fixed(
 
 Pins one slot of cone `cone_idx` to `value`. Allocates the `is_fixed` flag array on first use and also writes `primal_start[start_idx + slot] = value` so the projection sees the constant. During preprocessing, that slot is also converted to equal lower and upper bounds. Typical use: fix the `y` slot of an exponential cone (e.g. Fisher-market entropy term with `y = 1`).
 
-Variable SOC, rotated-SOC, exponential, and power cones support every fixed-slot pattern whose intersection with the cone is nonempty. The solver validates the section before preprocessing and rejects empty or non-finite sections. Projection and stationarity residuals use the same weighted fixed-section operator, including diagonal quadratic objectives and large SOC/rotated-SOC blocks.
+Variable SOC, rotated-SOC, exponential, and power cones support every fixed-slot pattern whose intersection with the cone is nonempty. The solver validates the section before preprocessing and rejects empty or non-finite sections. Projection and stationarity residuals use the same weighted fixed-section operator, including diagonal quadratic objectives and large SOC/rotated-SOC blocks. `set_cone_fixed` rejects PSD blocks.
 
 **Parameters:**
 

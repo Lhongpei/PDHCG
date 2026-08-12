@@ -1,5 +1,10 @@
 #include "internal_types.h"
-#include "pdhcg_kernels.cuh"
+#include "pdhcg_affine_cone_kernels.h"
+#include "pdhcg_cone_common_kernels.h"
+#include "pdhcg_exp_cone_kernels.h"
+#include "pdhcg_kernels.h"
+#include "pdhcg_rsoc_cone_kernels.h"
+#include "pdhcg_soc_cone_kernels.h"
 #include "pdhcg_types.h"
 
 #include <cuda_runtime.h>

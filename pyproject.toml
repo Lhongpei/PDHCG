@@ -26,7 +26,6 @@ wheel.packages = ["python/pdhcg"]
 sdist.include = ["tests/**", "CHANGELOG.md", "pyproject.toml", "README.md", "LICENSE"]
 
 [tool.scikit-build.cmake.define]
-CMAKE_CUDA_ARCHITECTURES = "all"
 CMAKE_CUDA_STANDARD = "17"
 PDHCG_BUILD_PYTHON = "ON"
 PDHCG_BUILD_STATIC_LIB = "ON"

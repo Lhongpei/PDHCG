@@ -100,8 +100,8 @@ print(problem.status, value, x.value)
 ```
 
 The backend preserves CVXPY's primal and dual conventions. It supports
-quadratic objectives and Zero, NonNeg, SOC, ExpCone, and PowCone3D
-constraints. PSD and mixed-integer models are not supported.
+quadratic objectives and Zero, NonNeg, SOC, PSD, ExpCone, and PowCone3D
+constraints. Mixed-integer models are not supported.
 
 ## Model Creation
 

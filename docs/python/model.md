@@ -36,9 +36,9 @@ require one Python dict per cone.
 
 | Field | Type | Notes |
 |---|---|---|
-| `types` | scalar or `int32[K]` | `ConeType.SOC`, `RSOC`, `EXP`, or `POWER`. |
+| `types` | scalar or `int32[K]` | `ConeType.SOC`, `RSOC`, `EXP`, `POWER`, or `PSD`. |
 | `starts` | `int32[K]` | First variable index or affine row of each block. |
-| `v_dims` | scalar or `int32[K]` | Length of `v`; defaults to 1. |
+| `v_dims` | scalar or `int32[K]` | Length of `v`, or matrix order for PSD; defaults to 1. |
 | `power_alphas` | scalar or `float64[K]` | Required in `(0, 1)` for power cones. |
 | `fixed_mask` | optional `uint8[N]` | Ambient-coordinate mask for fixed variable slots. Values come from the primal warm start. |
 
@@ -48,6 +48,14 @@ Slot layout per cone:
 - `rsoc`: `v[0..v_dim-1], s, t` with `||v||^2 <= 2 s t`, `s, t >= 0`.
 - `exp`: `x, y, z` with `y * exp(x / y) <= z`, `y > 0`.
 - `power`: `x, y, z` with `x^alpha * y^(1-alpha) >= |z|`, `x, y >= 0`.
+- `psd`: `svec(X)` for an order-`v_dim` symmetric matrix `X >= 0`. `svec`
+  stores the lower triangle in column-major order, leaves diagonal entries
+  unchanged, and multiplies off-diagonal entries by `sqrt(2)`.
+
+PSD blocks do not support entries in `fixed_mask`; express fixed matrix entries
+as ordinary linear equalities instead.
+In distributed solves, each PSD block remains on one GPU; permutation and
+partitioning never split its `svec` coordinates across devices.
 
 ```python
 import numpy as np

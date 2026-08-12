@@ -14,7 +14,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "pdhcg_kernels.cuh"
+#include "pdhcg_kernels.h"
 #include "solver_state.h"
 #include "spmv_backend.h"
 #include "utils.h"

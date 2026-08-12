@@ -115,8 +115,8 @@ print("Dual solution:", m.Pi)
 
 ## Cone Constraints
 
-Second-order, rotated second-order, exponential, and power cone constraints use
-the columnar `ConeSpec` API:
+Second-order, rotated second-order, exponential, power, and positive-semidefinite
+cone constraints use the columnar `ConeSpec` API:
 
 ```python
 import numpy as np
@@ -150,8 +150,8 @@ problem = cp.Problem(cp.Minimize(x), [x >= 1])
 problem.solve(solver="PDHCG", eps=1e-6)
 ```
 
-Quadratic objectives and Zero, NonNeg, SOC, ExpCone, and PowCone3D
-constraints are supported. PSD and mixed-integer models are not supported.
+Quadratic objectives and Zero, NonNeg, SOC, PSD, ExpCone, and PowCone3D
+constraints are supported. Mixed-integer models are not supported.
 
 ## Modeling
 
@@ -238,7 +238,7 @@ Below is a list of commonly used parameters, their internal keys, and descriptio
 | `UsePCAlpha` | `has_pock_chambolle_alpha` | bool | `True` | Whether to use the Pock–Chambolle α step size adjustment. |
 | `PCAlpha` | `pock_chambolle_alpha` | float | `1.0` | Value of the Pock–Chambolle α parameter. |
 | `BoundObjRescaling` | `bound_objective_rescaling` | bool | `True` | Whether to rescale the objective vector during preprocessing. |
-| `UseConePreservingScaling` | `use_cone_preserving_scaling` | bool | `True` | Whether to broadcast one scaling value over every cone block. |
+| `UseConePreservingScaling` | `use_cone_preserving_scaling` | bool | `True` | Whether to broadcast one scale over each cone block. |
 | `RestartArtificialThresh` | `artificial_restart_threshold` | float | `0.36` | Threshold for artificial restart. |
 | `RestartSufficientReduction` | `sufficient_reduction_for_restart` | float | `0.2` | Sufficient reduction factor to justify a restart. |
 | `RestartNecessaryReduction` | `necessary_reduction_for_restart` | float | `0.8` | Necessary reduction factor required for a restart. |

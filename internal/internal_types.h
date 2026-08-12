@@ -91,10 +91,10 @@ typedef struct
     double min_tol;
     int iteration_limit;
     int total_count;
-    int has_inner_loop;
 } inner_solver_t;
 
 typedef struct distributed_cone_split_s distributed_cone_split_t;
+typedef struct psd_projection_runtime_s psd_projection_runtime_t;
 struct cone_bucket_s;
 
 typedef enum
@@ -121,6 +121,8 @@ typedef struct
     struct cone_bucket_s *buckets;
     int num_buckets;
     bool has_power_cones;
+    bool has_psd_cones;
+    psd_projection_runtime_t *psd;
     distributed_cone_split_t *split;
 } cone_runtime_t;
 

@@ -9,8 +9,8 @@ Import this module (``import pdhcg.cvxpy_backend``) once per process; it will
 register ``PDHCG`` under ``cvxpy.settings.SOLVER_MAP_CONIC`` so that
 ``problem.solve(solver='PDHCG')`` works.
 
-Supported CVXPY constraints: Zero, NonNeg, SOC, ExpCone, PowCone3D.
-Not supported: PSD, integer variables.
+Supported CVXPY constraints: Zero, NonNeg, SOC, PSD, ExpCone, PowCone3D.
+Not supported: integer variables.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any
 import cvxpy.settings as _cvx_s
 import numpy as np
 import scipy.sparse as sp
-from cvxpy.constraints import SOC, ExpCone, NonNeg, PowCone3D, Zero
+from cvxpy.constraints import PSD, SOC, ExpCone, NonNeg, PowCone3D, Zero
 from cvxpy.reductions.solution import Solution, failure_solution
 from cvxpy.reductions.solvers import utilities
 from cvxpy.reductions.solvers.conic_solvers.conic_solver import ConicSolver
@@ -45,7 +45,7 @@ class PDHCG(ConicSolver):
     """PDHCG conic-solver plugin for CVXPY."""
 
     MIP_CAPABLE = False
-    SUPPORTED_CONSTRAINTS = [Zero, NonNeg, SOC, ExpCone, PowCone3D]
+    SUPPORTED_CONSTRAINTS = [Zero, NonNeg, SOC, PSD, ExpCone, PowCone3D]
 
     # CVXPY's ExpCone convention is (x, y, z) with z >= y * exp(x/y), y > 0.
     # PDHCG's internal exp cone convention is (r1, r2, r3) with r3 >= r2 * exp(r1/r2).
@@ -60,6 +60,55 @@ class PDHCG(ConicSolver):
 
     def supports_quad_obj(self) -> bool:
         return True
+
+    @staticmethod
+    def psd_format_mat(constr):
+        """Map a symmetric matrix to lower-triangular column-major svec."""
+        order = constr.expr.shape[0]
+        packed_length = order * (order + 1) // 2
+
+        lower = np.tril_indices(order)
+        columns = np.sort(np.ravel_multi_index(lower, (order, order), order="F"))
+        values = np.zeros((order, order), dtype=np.float64)
+        values[lower] = np.sqrt(2.0)
+        np.fill_diagonal(values, 1.0)
+        values = values.ravel(order="F")
+        values = values[values != 0.0]
+        packed = sp.csc_array(
+            (values, (np.arange(packed_length), columns)),
+            shape=(packed_length, order * order),
+        )
+
+        indices = np.arange(order * order)
+        matrix_indices = indices.reshape((order, order))
+        symmetrize = sp.csc_array(
+            (
+                np.full(2 * order * order, 0.5),
+                (
+                    np.concatenate((indices, matrix_indices.ravel(order="F"))),
+                    np.concatenate((indices, matrix_indices.T.ravel(order="F"))),
+                ),
+            ),
+            shape=(order * order, order * order),
+        )
+        return packed @ symmetrize
+
+    @staticmethod
+    def extract_dual_value(result_vec, offset, constraint):
+        """Expand a PSD svec dual before CVXPY restores constraint shapes."""
+        if not isinstance(constraint, PSD):
+            return utilities.extract_dual_value(result_vec, offset, constraint)
+
+        order = constraint.shape[0]
+        packed_length = order * (order + 1) // 2
+        new_offset = offset + packed_length
+        full = np.zeros((order, order), dtype=np.float64)
+        full[np.triu_indices(order)] = result_vec[offset:new_offset]
+        full += full.T
+        full[np.diag_indices(order)] *= 0.5
+        full[np.tril_indices(order, k=-1)] /= np.sqrt(2.0)
+        full[np.triu_indices(order, k=1)] /= np.sqrt(2.0)
+        return full.ravel(order="F"), new_offset
 
     def cite(self, data):
         return (
@@ -82,12 +131,12 @@ class PDHCG(ConicSolver):
             primal_vars = {inverse_data[self.VAR_ID]: solution["primal"]}
             eq_dual = utilities.get_dual_values(
                 solution["eq_dual"],
-                utilities.extract_dual_value,
+                self.extract_dual_value,
                 inverse_data[self.EQ_CONSTR],
             )
             ineq_dual = utilities.get_dual_values(
                 solution["ineq_dual"],
-                utilities.extract_dual_value,
+                self.extract_dual_value,
                 inverse_data[self.NEQ_CONSTR],
             )
             dual_vars = {**eq_dual, **ineq_dual}
@@ -106,16 +155,16 @@ class PDHCG(ConicSolver):
         n_zero = int(cone_dims.zero)
         n_nonneg = int(cone_dims.nonneg)
         soc_dims = list(cone_dims.soc)
+        psd_dims = list(cone_dims.psd)
         n_exp = int(cone_dims.exp)
         pow_alphas = list(cone_dims.p3d)
-        if cone_dims.psd:
-            raise ValueError("PDHCG does not support PSD constraints.")
 
         n = c.size
         soc_total = sum(soc_dims)
+        psd_total = sum(order * (order + 1) // 2 for order in psd_dims)
         exp_total = 3 * n_exp
         pow_total = 3 * len(pow_alphas)
-        n_cone_rows = soc_total + exp_total + pow_total
+        n_cone_rows = soc_total + psd_total + exp_total + pow_total
         n_total_rows = n_zero + n_nonneg + n_cone_rows
 
         assert A_cvx.shape == (n_total_rows, n), (
@@ -123,10 +172,12 @@ class PDHCG(ConicSolver):
         )
 
         # Internal slack layout: one SOC needs (v_dim + 2) slots = (k - 1) + 2 = k + 1
-        # (extra "phantom" w-slot pinned to 0). EXP and POWER need 3 slots each.
+        # (extra "phantom" w-slot pinned to 0). PSD uses lower-triangular svec;
+        # EXP and POWER need 3 slots each.
         n_soc_blocks = len(soc_dims)
+        n_psd_blocks = len(psd_dims)
         n_pow_blocks = len(pow_alphas)
-        n_slack = soc_total + n_soc_blocks + 3 * n_exp + 3 * n_pow_blocks
+        n_slack = soc_total + n_soc_blocks + psd_total + 3 * n_exp + 3 * n_pow_blocks
         n_vars_total = n + n_slack
         if n_vars_total > np.iinfo(np.int32).max or n_total_rows > np.iinfo(np.int32).max:
             raise ValueError("PDHCG dimensions must fit signed 32-bit indices.")
@@ -135,7 +186,7 @@ class PDHCG(ConicSolver):
         # column map directly; row indices are simply arange(n_cone_rows).
         S_cols = np.empty(n_cone_rows, dtype=np.int64)
 
-        n_cones = n_soc_blocks + n_exp + n_pow_blocks
+        n_cones = n_soc_blocks + n_psd_blocks + n_exp + n_pow_blocks
         cone_types = np.empty(n_cones, dtype=np.int32)
         cone_starts = np.empty(n_cones, dtype=np.int32)
         cone_v_dims = np.ones(n_cones, dtype=np.int32)
@@ -160,6 +211,21 @@ class PDHCG(ConicSolver):
             cone_idx += 1
             slack_off += k + 1
             cvx_row_off += k
+
+        # --- PSD blocks ---
+        # CVXPY uses lower-triangular column-major svec with sqrt(2)-scaled
+        # off-diagonal entries, which is PDHCG's native PSD representation.
+        for order in psd_dims:
+            packed_length = order * (order + 1) // 2
+            S_cols[cvx_row_off : cvx_row_off + packed_length] = np.arange(
+                slack_off, slack_off + packed_length, dtype=np.int64
+            )
+            cone_types[cone_idx] = int(ConeType.PSD)
+            cone_starts[cone_idx] = n + slack_off
+            cone_v_dims[cone_idx] = order
+            cone_idx += 1
+            slack_off += packed_length
+            cvx_row_off += packed_length
 
         # --- EXP blocks ---
         if n_exp:
@@ -290,7 +356,7 @@ class PDHCG(ConicSolver):
         primal = x_full[:n] if x_full is not None else None
         # PDHCG's row multiplier convention is the negative of CVXPY's canonical
         # A*x + s = b convention. Convert once before splitting Zero and inequality
-        # cone duals so equality, NonNeg, SOC, Exp, and Power duals agree with CVXPY.
+        # cone duals so equality, NonNeg, SOC, PSD, Exp, and Power duals agree with CVXPY.
         cvxpy_dual = -y_full if y_full is not None else None
         eq_dual = cvxpy_dual[:n_zero] if cvxpy_dual is not None else None
         ineq_dual = cvxpy_dual[n_zero:] if cvxpy_dual is not None else None

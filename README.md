@@ -27,7 +27,7 @@ PDHCG solves convex quadratic conic programs in the following form, with a spars
 - $Q$ is the sparse symmetric quadratic component (optional).
 - $R \in \mathbb{R}^{k\times n}$ is a tall low-rank factor (optional, $k$ = rank).
 - $D \in \mathbb{R}^{k\times k}$ is an optional middle matrix that scales / weights / signs the low-rank term. When omitted it defaults to the identity, recovering the standard $Q + R^\top R$ formulation. $D$ may be **diagonal, sparse, dense, or indefinite** — the backend auto-detects the cheapest runtime representation.
-- Standard SOC, Rotated SOC, Exponential, and Power cones are supported both on variable blocks and through native affine constraints $Fx + g \in \mathcal{K}_a$.
+- Standard SOC, Rotated SOC, Exponential, Power, and positive-semidefinite (PSD) cones are supported both on variable blocks and through native affine constraints $Fx + g \in \mathcal{K}_a$.
 
 
 ## Installation (C++ Executable)
@@ -99,7 +99,7 @@ Solver Parameters:
 | --pock_chambolle_alpha | double | Value for Pock-Chambolle step size parameter $\alpha$. | 1.0 |
 | --no_pock_chambolle | flag | Disable Pock-Chambolle rescaling (enabled by default). | false |
 | --no_bound_obj_rescaling | flag | Disable bound objective rescaling (enabled by default). | false |
-| --no_cone_preserving_scaling | flag | Keep coordinate-wise scaling within cone blocks. | false |
+| --no_cone_preserving_scaling | flag | Disable cone-preserving scaling. | false |
 | --sv_max_iter | int | Max iterations for singular value estimation (Power Method). | 5000 |
 | --sv_tol | double | Tolerance for singular value estimation. | 1e-4 |
 | --eval_freq | int | Frequency of termination criteria evaluation (in iterations). | 200 |
@@ -132,7 +132,9 @@ The block scale is
 | Pock-Chambolle | `d_rms` | `sqrt(d_max * d_rms)` |
 
 PDHCG applies the rule to both variable and affine cone blocks. Setting
-`--no_cone_preserving_scaling` bypasses block aggregation.
+`--no_cone_preserving_scaling` bypasses block aggregation. PSD blocks
+remain cone-compatible through a structured element-wise scale
+$s_{ij}=d_i d_j$.
 
 **Distributed Options** (only available when built with `-DPDHCG_COMPILE_DISTRIBUTED=ON`):
 | Option | Type | Description | Default |
@@ -238,9 +240,8 @@ problem = cp.Problem(cp.Minimize(x), [x >= 1])
 problem.solve(solver="PDHCG", eps=1e-6)
 ```
 
-The backend supports quadratic objectives and CVXPY Zero, NonNeg, SOC,
-ExpCone, and PowCone3D constraints. PSD and mixed-integer models are not
-supported.
+The backend supports quadratic objectives and CVXPY Zero, NonNeg, SOC, PSD,
+ExpCone, and PowCone3D constraints.
 
 ## Citation
 If you use this software or method in your research, please cite our paper:

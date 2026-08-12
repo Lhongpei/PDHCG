@@ -208,7 +208,7 @@ static void test_cone_block_scaling(void)
     qp_problem_free(problem);
 }
 
-static qp_problem_t *make_phase_taper_problem(int length, int affine)
+static qp_problem_t *make_diagonal_cone_scaling_problem(int length, int affine, cone_type_t cone_type, int v_dim)
 {
     int *row_ptr = (int *)malloc((size_t)(length + 1) * sizeof(int));
     int *col_ind = (int *)malloc((size_t)length * sizeof(int));
@@ -239,9 +239,9 @@ static qp_problem_t *make_phase_taper_problem(int length, int affine)
     diagonal.data.csr.col_ind = col_ind;
     diagonal.data.csr.vals = values;
     cone_spec_t cone = {
-        .type = CONE_STANDARD_SOC,
+        .type = cone_type,
         .start_idx = 0,
-        .v_dim = length - 2,
+        .v_dim = v_dim,
     };
 
     qp_problem_t *problem = NULL;
@@ -278,7 +278,7 @@ static pdhg_parameters_t phase_taper_parameters(int ruiz)
 
 static void test_phase_taper_case(int length, int affine, int ruiz)
 {
-    qp_problem_t *problem = make_phase_taper_problem(length, affine);
+    qp_problem_t *problem = make_diagonal_cone_scaling_problem(length, affine, CONE_STANDARD_SOC, length - 2);
     if (!problem)
     {
         fprintf(
@@ -308,6 +308,128 @@ static void test_phase_taper_case(int length, int affine, int ruiz)
 
     rescale_info_free(info);
     qp_problem_free(problem);
+}
+
+static qp_problem_t *make_psd_congruence_scaling_problem(int affine)
+{
+    const int order = 3;
+    const int length = order * (order + 1) / 2;
+    const int rows = affine ? length : 1;
+    const int columns = affine ? 1 : length;
+    int *row_ptr = (int *)malloc((size_t)(rows + 1) * sizeof(int));
+    int *col_ind = (int *)malloc((size_t)length * sizeof(int));
+    double *values = (double *)malloc((size_t)length * sizeof(double));
+    double *objective = (double *)calloc((size_t)columns, sizeof(double));
+    double *bounds = (double *)calloc((size_t)rows, sizeof(double));
+    if (!row_ptr || !col_ind || !values || !objective || !bounds)
+    {
+        free(row_ptr);
+        free(col_ind);
+        free(values);
+        free(objective);
+        free(bounds);
+        return NULL;
+    }
+
+    if (affine)
+    {
+        for (int row = 0; row <= rows; ++row)
+            row_ptr[row] = row;
+        for (int index = 0; index < length; ++index)
+            col_ind[index] = 0;
+    }
+    else
+    {
+        row_ptr[0] = 0;
+        row_ptr[1] = length;
+        for (int index = 0; index < length; ++index)
+            col_ind[index] = index;
+    }
+    for (int index = 0; index < length; ++index)
+        values[index] = (double)(index + 1) * (double)(index + 1);
+
+    matrix_desc_t matrix = {0};
+    matrix.m = rows;
+    matrix.n = columns;
+    matrix.fmt = matrix_csr;
+    matrix.data.csr.nnz = length;
+    matrix.data.csr.row_ptr = row_ptr;
+    matrix.data.csr.col_ind = col_ind;
+    matrix.data.csr.vals = values;
+    const cone_spec_t cone = {
+        .type = CONE_PSD,
+        .start_idx = 0,
+        .v_dim = order,
+    };
+
+    qp_problem_t *problem = affine
+        ? create_qp_problem(
+              objective, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, &matrix, NULL, 1, &cone)
+        : create_qp_problem(
+              objective, NULL, NULL, NULL, &matrix, bounds, bounds, NULL, NULL, NULL, 1, &cone, NULL, NULL, 0, NULL);
+
+    free(row_ptr);
+    free(col_ind);
+    free(values);
+    free(objective);
+    free(bounds);
+    return problem;
+}
+
+static void test_psd_scaling_case(int affine, int method)
+{
+    qp_problem_t *problem = make_psd_congruence_scaling_problem(affine);
+    if (!problem)
+    {
+        fprintf(stderr, "failed to create %s PSD scaling problem\n", affine ? "affine" : "variable");
+        ++failures;
+        return;
+    }
+
+    pdhg_parameters_t params;
+    if (method == 0)
+        params = curtis_reid_only_parameters();
+    else
+        params = phase_taper_parameters(method == 1);
+    params.use_cone_preserving_scaling = false;
+
+    rescale_info_t *info = rescale_problem(&params, problem);
+    if (!info)
+    {
+        fprintf(stderr,
+                "%s PSD scaling returned NULL\n",
+                method == 0       ? "Curtis-Reid"
+                    : method == 1 ? "Ruiz"
+                                  : "Pock-Chambolle");
+        ++failures;
+        qp_problem_free(problem);
+        return;
+    }
+
+    const double *scaling = affine ? info->con_rescale : info->var_rescale;
+    check_close("PSD (1,0) congruence scale", scaling[1] * scaling[1], scaling[0] * scaling[3], 1e-12);
+    check_close("PSD (2,0) congruence scale", scaling[2] * scaling[2], scaling[0] * scaling[5], 1e-12);
+    check_close("PSD (2,1) congruence scale", scaling[4] * scaling[4], scaling[3] * scaling[5], 1e-12);
+    if (fabs(log(scaling[0] / scaling[5])) < 1e-8)
+    {
+        fprintf(stderr,
+                "%s %s PSD scaling unexpectedly remained uniform\n",
+                affine ? "affine" : "variable",
+                method == 0       ? "Curtis-Reid"
+                    : method == 1 ? "Ruiz"
+                                  : "Pock-Chambolle");
+        ++failures;
+    }
+
+    rescale_info_free(info);
+    qp_problem_free(problem);
+}
+
+static void test_psd_diagonal_congruence_scaling(void)
+{
+    for (int affine = 0; affine <= 1; ++affine)
+        for (int method = 0; method < 3; ++method)
+            test_psd_scaling_case(affine, method);
 }
 
 static void test_phase_taper_scaling(void)
@@ -340,5 +462,6 @@ int main(void)
     test_plain_scaling();
     test_cone_block_scaling();
     test_phase_taper_scaling();
+    test_psd_diagonal_congruence_scaling();
     return failures == 0 ? 0 : 1;
 }

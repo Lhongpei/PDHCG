@@ -24,8 +24,9 @@ limitations under the License.
 #include <time.h>
 
 #define SCALING_EPSILON 1e-12
-#define CURTIS_REID_MIN_ABS 1e-300
-#define CURTIS_REID_LOG_SCALE_LIMIT 69.07755278982137
+#define LOG_SCALING_MIN_ABS 1e-300
+#define LOG_SCALING_LIMIT 69.07755278982137
+#define PSD_LOG_FACTOR_LIMIT (0.5 * LOG_SCALING_LIMIT)
 #define PHASE_TAPER_CONE_THRESHOLD 8
 
 typedef enum
@@ -34,14 +35,93 @@ typedef enum
     CONE_SCALING_POCK_CHAMBOLLE,
 } cone_scaling_phase_t;
 
-/*
- * Cone-block aggregation follows HPR-SOCP's :phase_taper strategy:
- * https://github.com/PolyU-IOR/HPR-SOCP
- */
-static void apply_cone_preserving_scaling(double *scaling, const cone_blocks_t *cones, cone_scaling_phase_t phase)
+static int max_psd_order(const cone_blocks_t *cones)
 {
+    int max_order = 0;
+    for (int block = 0; block < cones->num_cones; ++block)
+        if (cones->type[block] == CONE_PSD)
+            max_order = cones->v_dim[block] > max_order ? cones->v_dim[block] : max_order;
+    return max_order;
+}
+
+static void project_psd_log_scaling(double *log_scaling, int start, int order, double *factor_log)
+{
+    memset(factor_log, 0, (size_t)order * sizeof(double));
+
+    int slot = start;
+    for (int column = 0; column < order; ++column)
+    {
+        for (int row = column; row < order; ++row, ++slot)
+        {
+            double value = log_scaling[slot];
+            if (isnan(value))
+                value = 0.0;
+            else if (value > LOG_SCALING_LIMIT)
+                value = LOG_SCALING_LIMIT;
+            else if (value < -LOG_SCALING_LIMIT)
+                value = -LOG_SCALING_LIMIT;
+
+            if (row == column)
+                factor_log[row] += 2.0 * value;
+            else
+            {
+                factor_log[row] += value;
+                factor_log[column] += value;
+            }
+        }
+    }
+
+    double rhs_sum = 0.0;
+    for (int index = 0; index < order; ++index)
+        rhs_sum += factor_log[index];
+    const double correction = rhs_sum / (2.0 * order + 2.0);
+    const double diagonal = order + 2.0;
+    for (int index = 0; index < order; ++index)
+    {
+        factor_log[index] = (factor_log[index] - correction) / diagonal;
+        factor_log[index] = fmax(-PSD_LOG_FACTOR_LIMIT, fmin(PSD_LOG_FACTOR_LIMIT, factor_log[index]));
+    }
+
+    slot = start;
+    for (int column = 0; column < order; ++column)
+        for (int row = column; row < order; ++row, ++slot)
+            log_scaling[slot] = factor_log[row] + factor_log[column];
+}
+
+static void project_psd_scaling(double *scaling, int start, int order, double *factor_log)
+{
+    const int length = cone_length(CONE_PSD, order);
+    for (int slot = start; slot < start + length; ++slot)
+        scaling[slot] = log(fmax(scaling[slot], LOG_SCALING_MIN_ABS));
+    project_psd_log_scaling(scaling, start, order, factor_log);
+    for (int slot = start; slot < start + length; ++slot)
+        scaling[slot] = exp(scaling[slot]);
+}
+
+/*
+ * Part of PDHCG's cone-preserving scaling mode follows HPR-SOCP's :phase_taper strategy:
+ * https://github.com/PolyU-IOR/HPR-SOCP
+ *
+ * When that mode is disabled, PSD blocks follow CARDAL's per-element scaling:
+ * https://github.com/Lhongpei/CARDAL
+ */
+static void apply_cone_scaling_adjustment(double *scaling,
+                                          const cone_blocks_t *cones,
+                                          cone_scaling_phase_t phase,
+                                          bool use_cone_preserving_scaling)
+{
+    int workspace_order = use_cone_preserving_scaling ? 0 : max_psd_order(cones);
+    double *factor_log = workspace_order > 0 ? safe_malloc((size_t)workspace_order * sizeof(double)) : NULL;
+
     for (int block = 0; block < cones->num_cones; ++block)
     {
+        if (!use_cone_preserving_scaling)
+        {
+            if (cones->type[block] == CONE_PSD)
+                project_psd_scaling(scaling, cones->start_idx[block], cones->v_dim[block], factor_log);
+            continue;
+        }
+
         int start = cones->start_idx[block];
         int length = cone_block_length(cones, block);
         double block_max = 0.0;
@@ -59,16 +139,18 @@ static void apply_cone_preserving_scaling(double *scaling, const cone_blocks_t *
         for (int index = start; index < start + length; ++index)
             scaling[index] = block_scale;
     }
+
+    free(factor_log);
 }
 
 static double curtis_reid_exp_clamped(double value)
 {
     if (isnan(value))
         return 1.0;
-    if (value > CURTIS_REID_LOG_SCALE_LIMIT)
-        value = CURTIS_REID_LOG_SCALE_LIMIT;
-    else if (value < -CURTIS_REID_LOG_SCALE_LIMIT)
-        value = -CURTIS_REID_LOG_SCALE_LIMIT;
+    if (value > LOG_SCALING_LIMIT)
+        value = LOG_SCALING_LIMIT;
+    else if (value < -LOG_SCALING_LIMIT)
+        value = -LOG_SCALING_LIMIT;
     return exp(value);
 }
 
@@ -260,6 +342,14 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
     const int num_nonzeros = problem->constraint_matrix_num_nonzeros;
     double *con_rescale = safe_malloc((size_t)num_cons * sizeof(double));
     double *var_rescale = safe_malloc((size_t)num_vars * sizeof(double));
+    int psd_workspace_order = 0;
+    if (!use_cone_preserving_scaling)
+    {
+        psd_workspace_order = max_psd_order(&problem->cones);
+        int affine_psd_order = max_psd_order(&problem->affine_cones);
+        psd_workspace_order = affine_psd_order > psd_workspace_order ? affine_psd_order : psd_workspace_order;
+    }
+    double *psd_factor_log = psd_workspace_order > 0 ? safe_malloc((size_t)psd_workspace_order * sizeof(double)) : NULL;
 
     for (int row = 0; row < num_cons; ++row)
         con_rescale[row] = 1.0;
@@ -281,7 +371,7 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
             for (int nz = matrix->row_ptr[row]; nz < matrix->row_ptr[row + 1]; ++nz)
             {
                 const int col = matrix->col_ind[nz];
-                const double log_abs = log(fmax(fabs(matrix->val[nz]), CURTIS_REID_MIN_ABS));
+                const double log_abs = log(fmax(fabs(matrix->val[nz]), LOG_SCALING_MIN_ABS));
                 row_log_abs_sum[row] += log_abs;
                 col_log_abs_sum[col] += log_abs;
                 ++col_count[col];
@@ -304,27 +394,36 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
                 row_log_scale[row] = (end > begin) ? sum / (double)(end - begin) : 0.0;
             }
 
-            if (use_cone_preserving_scaling)
+            for (int block = 0; block < problem->affine_cones.num_cones; ++block)
             {
-                for (int block = 0; block < problem->affine_cones.num_cones; ++block)
+                if (!use_cone_preserving_scaling)
                 {
-                    int start = problem->affine_cones.start_idx[block];
-                    int length = cone_block_length(&problem->affine_cones, block);
-                    double block_sum = 0.0;
-                    int block_count = 0;
-                    for (int row = start; row < start + length; ++row)
+                    if (problem->affine_cones.type[block] == CONE_PSD)
                     {
-                        int begin = matrix->row_ptr[row];
-                        int end = matrix->row_ptr[row + 1];
-                        block_sum += row_log_abs_sum[row];
-                        block_count += end - begin;
-                        for (int nz = begin; nz < end; ++nz)
-                            block_sum -= col_log_scale[matrix->col_ind[nz]];
+                        project_psd_log_scaling(row_log_scale,
+                                                problem->affine_cones.start_idx[block],
+                                                problem->affine_cones.v_dim[block],
+                                                psd_factor_log);
                     }
-                    double block_log_scale = block_count > 0 ? block_sum / (double)block_count : 0.0;
-                    for (int row = start; row < start + length; ++row)
-                        row_log_scale[row] = block_log_scale;
+                    continue;
                 }
+
+                int start = problem->affine_cones.start_idx[block];
+                int length = cone_block_length(&problem->affine_cones, block);
+                double block_sum = 0.0;
+                int block_count = 0;
+                for (int row = start; row < start + length; ++row)
+                {
+                    int begin = matrix->row_ptr[row];
+                    int end = matrix->row_ptr[row + 1];
+                    block_sum += row_log_abs_sum[row];
+                    block_count += end - begin;
+                    for (int nz = begin; nz < end; ++nz)
+                        block_sum -= col_log_scale[matrix->col_ind[nz]];
+                }
+                double block_log_scale = block_count > 0 ? block_sum / (double)block_count : 0.0;
+                for (int row = start; row < start + length; ++row)
+                    row_log_scale[row] = block_log_scale;
             }
 
             memcpy(col_sum, col_log_abs_sum, (size_t)num_vars * sizeof(double));
@@ -336,28 +435,37 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
             for (int col = 0; col < num_vars; ++col)
                 col_log_scale[col] = col_count[col] > 0 ? col_sum[col] / (double)col_count[col] : 0.0;
 
-            if (use_cone_preserving_scaling)
+            /*
+             * Adding c_j = c_B for all j in cone block B gives the exact
+             * block minimizer below. With block aggregation disabled, PSD
+             * columns use the diagonal-congruence projection instead.
+             */
+            for (int block = 0; block < problem->cones.num_cones; ++block)
             {
-                /*
-                 * Adding c_j = c_B for all j in cone block B gives the exact
-                 * block minimizer below. With cone-preserving scaling disabled,
-                 * the independent column minimizers above are retained.
-                 */
-                for (int block = 0; block < problem->cones.num_cones; ++block)
+                if (!use_cone_preserving_scaling)
                 {
-                    const int start = problem->cones.start_idx[block];
-                    const int length = cone_block_length(&problem->cones, block);
-                    double block_sum = 0.0;
-                    int block_count = 0;
-                    for (int col = start; col < start + length; ++col)
+                    if (problem->cones.type[block] == CONE_PSD)
                     {
-                        block_sum += col_sum[col];
-                        block_count += col_count[col];
+                        project_psd_log_scaling(col_log_scale,
+                                                problem->cones.start_idx[block],
+                                                problem->cones.v_dim[block],
+                                                psd_factor_log);
                     }
-                    const double block_log_scale = block_count > 0 ? block_sum / (double)block_count : 0.0;
-                    for (int col = start; col < start + length; ++col)
-                        col_log_scale[col] = block_log_scale;
+                    continue;
                 }
+
+                const int start = problem->cones.start_idx[block];
+                const int length = cone_block_length(&problem->cones, block);
+                double block_sum = 0.0;
+                int block_count = 0;
+                for (int col = start; col < start + length; ++col)
+                {
+                    block_sum += col_sum[col];
+                    block_count += col_count[col];
+                }
+                const double block_log_scale = block_count > 0 ? block_sum / (double)block_count : 0.0;
+                for (int col = start; col < start + length; ++col)
+                    col_log_scale[col] = block_log_scale;
             }
         }
 
@@ -383,6 +491,7 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
 
     free(con_rescale);
     free(var_rescale);
+    free(psd_factor_log);
 }
 
 static void ruiz_rescaling(qp_problem_t *problem,
@@ -432,11 +541,9 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-        if (use_cone_preserving_scaling)
-        {
-            apply_cone_preserving_scaling(var_rescale, &problem->cones, CONE_SCALING_RUIZ);
-            apply_cone_preserving_scaling(con_rescale, &problem->affine_cones, CONE_SCALING_RUIZ);
-        }
+        apply_cone_scaling_adjustment(var_rescale, &problem->cones, CONE_SCALING_RUIZ, use_cone_preserving_scaling);
+        apply_cone_scaling_adjustment(
+            con_rescale, &problem->affine_cones, CONE_SCALING_RUIZ, use_cone_preserving_scaling);
 
         scale_problem(problem, con_rescale, var_rescale);
         for (int i = 0; i < num_vars; ++i)
@@ -477,11 +584,10 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
     for (int i = 0; i < num_cons; ++i)
         con_rescale[i] = (con_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(con_rescale[i]);
 
-    if (use_cone_preserving_scaling)
-    {
-        apply_cone_preserving_scaling(var_rescale, &problem->cones, CONE_SCALING_POCK_CHAMBOLLE);
-        apply_cone_preserving_scaling(con_rescale, &problem->affine_cones, CONE_SCALING_POCK_CHAMBOLLE);
-    }
+    apply_cone_scaling_adjustment(
+        var_rescale, &problem->cones, CONE_SCALING_POCK_CHAMBOLLE, use_cone_preserving_scaling);
+    apply_cone_scaling_adjustment(
+        con_rescale, &problem->affine_cones, CONE_SCALING_POCK_CHAMBOLLE, use_cone_preserving_scaling);
 
     scale_problem(problem, con_rescale, var_rescale);
     for (int i = 0; i < num_vars; ++i)

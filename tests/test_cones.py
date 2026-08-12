@@ -41,6 +41,20 @@ def test_cone_spec_validates_power_and_ambient_ranges() -> None:
         cones.validate_ambient(4, allow_fixed=True)
 
 
+def test_psd_cone_uses_matrix_order_and_rejects_fixed_slots() -> None:
+    cones = ConeSpec("psd", np.array([0], dtype=np.int32), v_dims=3)
+    cones.validate_ambient(6, allow_fixed=True, require_cover=True)
+
+    fixed = ConeSpec(
+        ConeType.PSD,
+        np.array([0], dtype=np.int32),
+        v_dims=2,
+        fixed_mask=np.array([0, 1, 0], dtype=np.uint8),
+    )
+    with pytest.raises(ValueError, match="PSD"):
+        fixed.validate_ambient(3, allow_fixed=True)
+
+
 def test_read_problem_file_returns_columnar_cones() -> None:
     problem = Path(__file__).parent / "data" / "cbf_q3_smoke.cbf"
     raw = read_problem_file(str(problem))

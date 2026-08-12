@@ -596,7 +596,7 @@ static ParsedConeSpecs parse_columnar_cone_specs(py::object cones, bool affine, 
     for (py::ssize_t cone = 0; cone < count; ++cone)
     {
         int type_code = type_data[cone];
-        if (type_code < CONE_ROTATED_SOC || type_code > CONE_POWER)
+        if (type_code < CONE_ROTATED_SOC || type_code >= NUM_CONE_TYPES)
             throw std::invalid_argument(std::string(kind) + " has an invalid type code");
         cone_spec_t &spec = out.specs[(size_t)cone];
         spec.type = static_cast<cone_type_t>(type_code);

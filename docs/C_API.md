@@ -46,7 +46,7 @@ The objective minimized is `0.5 * x^T (Q + R^T D R) x + c^T x + c0`. `Q`, `R`, a
 - `var_lb`: Variable lower bounds. If `NULL`, defaults to all `-INFINITY`.
 - `var_ub`: Variable upper bounds. If `NULL`, defaults to all `+INFINITY`.
 - `objective_constant`: Scalar constant term added to the objective value. If `NULL`, defaults to `0.0`.
-- `num_var_cones`, `var_cones`: Optional conic variable blocks. Supported types are SOC, rotated SOC, exponential, and power cones. Pass `0` and `NULL` when no variable cones are present. See [Types](c/types.md) for slot layouts and `set_cone_fixed` in [Functions](c/functions.md) for pinning individual slots.
+- `num_var_cones`, `var_cones`: Optional conic variable blocks. Supported types are SOC, rotated SOC, exponential, power, and positive-semidefinite cones. Pass `0` and `NULL` when no variable cones are present. See [Types](c/types.md) for slot layouts and `set_cone_fixed` in [Functions](c/functions.md) for pinning individual non-PSD slots.
 - `affine_cone_matrix_desc`: Matrix descriptor for `F` in the native constraint `F x + affine_cone_offset in K`. Pass `NULL` when no affine cone rows are present.
 - `affine_cone_offset`: Offset vector with one entry per row of `F`. Pass `NULL` for zero offsets.
 - `num_affine_cones`, `affine_cones`: Cone blocks covering every row of `F`. Each `start_idx` is relative to `F`; blocks must be disjoint. Affine cone descriptors must set `is_fixed = NULL`.

@@ -19,7 +19,8 @@ limitations under the License.
 #include "distributed_conic.h"
 #include "internal_types.h"
 #include "pdhcg.h"
-#include "pdhcg_kernels.cuh"
+#include "pdhcg_kernels.h"
+#include "pdhcg_psd_cone.h"
 #include "pdhg_core_op.h"
 #include "preconditioner.h"
 #include "solver.h"
@@ -279,7 +280,6 @@ static void initialize_quadratic_obj_term(pdhg_solver_state_t *state, const proc
 static void initialize_inner_solver(pdhg_solver_state_t *state, const pdhg_parameters_t *params)
 {
     state->inner_solver = (inner_solver_t *)safe_calloc(1, sizeof(inner_solver_t));
-    state->inner_solver->has_inner_loop = false;
 
     int iteration_limit = params->inner_solver_parameters.iteration_limit;
     double initial_tol = params->inner_solver_parameters.initial_tolerance;
@@ -303,91 +303,69 @@ static void initialize_inner_solver(pdhg_solver_state_t *state, const pdhg_param
         min_tol = 1e-9;
     }
 
-    if (!(state->quadratic_objective_term->quad_obj_type == PDHCG_NON_Q ||
-          state->quadratic_objective_term->quad_obj_type == PDHCG_DIAG_Q))
+    quad_obj_type_t objective_type = state->quadratic_objective_term->quad_obj_type;
+    if (objective_type == PDHCG_NON_Q || (objective_type == PDHCG_DIAG_Q && !state->cones.has_psd_cones))
+        return;
+
+    /* A nonuniform diagonal metric has no one-EVD PSD prox, so diagonal-Q
+       models with PSD variables use the existing projected BB solve. */
+    ALLOC_ZERO(state->inner_solver->primal_buffer, state->num_variables * sizeof(double));
+    ALLOC_ZERO(state->inner_solver->dual_buffer, state->num_constraints * sizeof(double));
+    state->inner_solver->bb_step_size = (bb_step_size_t *)safe_calloc(1, sizeof(bb_step_size_t));
+    ALLOC_ZERO(state->inner_solver->bb_step_size->gradient, state->num_variables * sizeof(double));
+    ALLOC_ZERO(state->inner_solver->bb_step_size->direction, state->num_variables * sizeof(double));
+    ALLOC_ZERO(state->inner_solver->bb_step_size->scalar_buffer, 4 * sizeof(double));
+
+    state->inner_solver->iteration_limit = iteration_limit;
+    state->inner_solver->tol = initial_tol;
+    state->inner_solver->min_tol = min_tol;
+
+    state->inner_solver->bb_step_size->precond_enabled = params->diag_jacobi_precond && !state->cones.has_psd_cones;
+    if (state->inner_solver->bb_step_size->precond_enabled)
     {
-        ALLOC_ZERO(state->inner_solver->primal_buffer, state->num_variables * sizeof(double));
-        ALLOC_ZERO(state->inner_solver->dual_buffer, state->num_constraints * sizeof(double));
-    }
+        int n = state->num_variables;
+        ALLOC_ZERO(state->inner_solver->bb_step_size->diag_h_static, n * sizeof(double));
+        ALLOC_ZERO(state->inner_solver->bb_step_size->m_diag, n * sizeof(double));
+        ALLOC_ZERO(state->inner_solver->bb_step_size->m_inv, n * sizeof(double));
+        ALLOC_ZERO(state->inner_solver->bb_step_size->Ms_buffer, n * sizeof(double));
+        state->inner_solver->bb_step_size->cached_inv_tau = -1.0;
+        state->inner_solver->bb_step_size->tol_scale = 1.0;
 
-    switch (state->quadratic_objective_term->quad_obj_type)
-    {
-        case PDHCG_NON_Q:
-            break;
-        case PDHCG_DIAG_Q:
-            break;
-        case PDHCG_SPARSE_Q:
-        case PDHCG_LOW_RANK_Q:
-        case PDHCG_LOW_RANK_PLUS_SPARSE_Q:
-            state->inner_solver->has_inner_loop = true;
-            state->inner_solver->bb_step_size = (bb_step_size_t *)safe_calloc(1, sizeof(bb_step_size_t));
-            ALLOC_ZERO(state->inner_solver->bb_step_size->gradient, state->num_variables * sizeof(double));
-            ALLOC_ZERO(state->inner_solver->bb_step_size->direction, state->num_variables * sizeof(double));
-            ALLOC_ZERO(state->inner_solver->bb_step_size->scalar_buffer, 4 * sizeof(double));
+        if (objective_type == PDHCG_SPARSE_Q || objective_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+        {
+            cu_sparse_matrix_csr_t *Q = state->quadratic_objective_term->objective_sparse_matrix;
+            compute_csr_diag_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                Q->row_ptr, Q->col_ind, Q->val, state->inner_solver->bb_step_size->diag_h_static, n);
+            CUDA_CHECK(cudaGetLastError());
+        }
 
-            state->inner_solver->iteration_limit = iteration_limit;
-            state->inner_solver->tol = initial_tol;
-            state->inner_solver->min_tol = min_tol;
-
-            state->inner_solver->bb_step_size->precond_enabled = params->diag_jacobi_precond;
-            if (params->diag_jacobi_precond)
+        if (objective_type == PDHCG_LOW_RANK_Q || objective_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+        {
+            cu_sparse_matrix_csr_t *Rt = state->quadratic_objective_term->objective_lowrank_matrix_t;
+            double *out = state->inner_solver->bb_step_size->Ms_buffer;
+            int mtype = state->quadratic_objective_term->lowrank_middle_type;
+            if (mtype == 1)
             {
-                int n = state->num_variables;
-                ALLOC_ZERO(state->inner_solver->bb_step_size->diag_h_static, n * sizeof(double));
-                ALLOC_ZERO(state->inner_solver->bb_step_size->m_diag, n * sizeof(double));
-                ALLOC_ZERO(state->inner_solver->bb_step_size->m_inv, n * sizeof(double));
-                ALLOC_ZERO(state->inner_solver->bb_step_size->Ms_buffer, n * sizeof(double));
-                state->inner_solver->bb_step_size->cached_inv_tau = -1.0;
-                state->inner_solver->bb_step_size->tol_scale = 1.0;
-
-                if (state->quadratic_objective_term->quad_obj_type == PDHCG_SPARSE_Q ||
-                    state->quadratic_objective_term->quad_obj_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
-                {
-                    cu_sparse_matrix_csr_t *Q = state->quadratic_objective_term->objective_sparse_matrix;
-                    compute_csr_diag_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-                        Q->row_ptr, Q->col_ind, Q->val, state->inner_solver->bb_step_size->diag_h_static, n);
-                    CUDA_CHECK(cudaGetLastError());
-                }
-
-                if (state->quadratic_objective_term->quad_obj_type == PDHCG_LOW_RANK_Q ||
-                    state->quadratic_objective_term->quad_obj_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
-                {
-                    cu_sparse_matrix_csr_t *Rt = state->quadratic_objective_term->objective_lowrank_matrix_t;
-                    double *out = state->inner_solver->bb_step_size->Ms_buffer;
-                    int mtype = state->quadratic_objective_term->lowrank_middle_type;
-                    if (mtype == 1)
-                    {
-                        compute_csr_row_sq_norm_weighted_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-                            Rt->row_ptr, Rt->col_ind, Rt->val, state->quadratic_objective_term->d_middle_diag, out, n);
-                    }
-                    else if (mtype == 2)
-                    {
-                        int rank = state->quadratic_objective_term->num_rank_lowrank_obj;
-                        compute_csr_row_quad_form_dense_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-                            Rt->row_ptr,
-                            Rt->col_ind,
-                            Rt->val,
-                            state->quadratic_objective_term->d_middle_dense,
-                            rank,
-                            out,
-                            n);
-                    }
-                    else
-                    {
-                        compute_csr_row_sq_norm_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-                            Rt->row_ptr, Rt->val, out, n);
-                    }
-                    CUDA_CHECK(cudaGetLastError());
-                    const double one = 1.0;
-                    CUBLAS_CHECK(cublasDaxpy(
-                        state->blas_handle, n, &one, out, 1, state->inner_solver->bb_step_size->diag_h_static, 1));
-                    CUDA_CHECK(cudaMemset(out, 0, n * sizeof(double)));
-                }
+                compute_csr_row_sq_norm_weighted_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                    Rt->row_ptr, Rt->col_ind, Rt->val, state->quadratic_objective_term->d_middle_diag, out, n);
             }
-            break;
-        default:
-            fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
-            exit(EXIT_FAILURE);
+            else if (mtype == 2)
+            {
+                int rank = state->quadratic_objective_term->num_rank_lowrank_obj;
+                compute_csr_row_quad_form_dense_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                    Rt->row_ptr, Rt->col_ind, Rt->val, state->quadratic_objective_term->d_middle_dense, rank, out, n);
+            }
+            else
+            {
+                compute_csr_row_sq_norm_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+                    Rt->row_ptr, Rt->val, out, n);
+            }
+            CUDA_CHECK(cudaGetLastError());
+            const double one = 1.0;
+            CUBLAS_CHECK(
+                cublasDaxpy(state->blas_handle, n, &one, out, 1, state->inner_solver->bb_step_size->diag_h_static, 1));
+            CUDA_CHECK(cudaMemset(out, 0, n * sizeof(double)));
+        }
     }
 }
 
@@ -446,7 +424,7 @@ pick_cone_proj_method(const cone_blocks_t *cones, int cone, const double *coordi
 {
     cone_type_t type = cones->type[cone];
     int v_dim = cones->v_dim[cone];
-    if (type == CONE_EXPONENTIAL || type == CONE_POWER)
+    if (type == CONE_EXPONENTIAL || type == CONE_POWER || type == CONE_PSD)
         return PROJ_METHOD_THREAD;
     if (v_dim < 32)
         return PROJ_METHOD_THREAD;
@@ -514,6 +492,7 @@ initialize_cone_layout(cone_runtime_t *runtime, const cone_blocks_t *cones, cons
         bucket_count[cones->type[i]][methods[i]]++;
     for (int method = 0; method < NUM_PROJ_METHODS; ++method)
         runtime->has_power_cones |= bucket_count[CONE_POWER][method] > 0;
+    runtime->has_psd_cones = bucket_count[CONE_PSD][PROJ_METHOD_THREAD] > 0;
 
     cone_bucket_t buckets_tmp[NUM_CONE_TYPES * NUM_PROJ_METHODS];
     int num_buckets = 0;
@@ -524,7 +503,7 @@ initialize_cone_layout(cone_runtime_t *runtime, const cone_blocks_t *cones, cons
         for (int m = 0; m < NUM_PROJ_METHODS; ++m)
         {
             bucket_offset[t][m] = offset;
-            if (bucket_count[t][m] > 0)
+            if (bucket_count[t][m] > 0 && t != CONE_PSD)
             {
                 buckets_tmp[num_buckets].type = (cone_type_t)t;
                 buckets_tmp[num_buckets].method = (cone_proj_method_t)m;
@@ -537,8 +516,11 @@ initialize_cone_layout(cone_runtime_t *runtime, const cone_blocks_t *cones, cons
     }
 
     runtime->num_buckets = num_buckets;
-    runtime->buckets = (cone_bucket_t *)safe_malloc((size_t)num_buckets * sizeof(cone_bucket_t));
-    memcpy(runtime->buckets, buckets_tmp, (size_t)num_buckets * sizeof(cone_bucket_t));
+    if (num_buckets > 0)
+    {
+        runtime->buckets = (cone_bucket_t *)safe_malloc((size_t)num_buckets * sizeof(cone_bucket_t));
+        memcpy(runtime->buckets, buckets_tmp, (size_t)num_buckets * sizeof(cone_bucket_t));
+    }
 
     size_t cb = (size_t)K * sizeof(int);
     int *start_perm = (int *)safe_malloc(cb);
@@ -569,6 +551,13 @@ initialize_cone_layout(cone_runtime_t *runtime, const cone_blocks_t *cones, cons
         CUDA_CHECK(cudaMalloc(&runtime->power_alpha, ab));
         CUDA_CHECK(cudaMemcpy(runtime->power_alpha, alpha_perm, ab, cudaMemcpyHostToDevice));
         free(alpha_perm);
+    }
+    if (runtime->has_psd_cones)
+    {
+        int psd_offset = bucket_offset[CONE_PSD][PROJ_METHOD_THREAD];
+        int psd_count = bucket_count[CONE_PSD][PROJ_METHOD_THREAD];
+        runtime->psd =
+            create_psd_projection_runtime(start_perm + psd_offset, vdim_perm + psd_offset, psd_count, psd_offset);
     }
     free(start_perm);
     free(vdim_perm);
@@ -614,14 +603,21 @@ static void initialize_cone_runtime(pdhg_solver_state_t *state,
         size_t vb = (size_t)state->num_variables * sizeof(double);
         if (qt != PDHCG_NON_Q)
             CUDA_CHECK(cudaMalloc(&state->cones.effective_objective_gradient, vb));
-        if (qt == PDHCG_SPARSE_Q || qt == PDHCG_LOW_RANK_Q || qt == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
-            CUDA_CHECK(cudaMalloc(&state->cones.bb_primal_snapshot, vb));
     }
 
     initialize_cone_layout(&state->cones, &working_problem->cones, rescale_info->var_rescale);
     double global_has_power_cones = state->cones.has_power_cones ? 1.0 : 0.0;
     pdhcg_all_reduce_scalar(state->grid_context, &global_has_power_cones, PDHCG_OP_MAX, PDHCG_SCOPE_ROW, false);
     state->cones.has_power_cones = global_has_power_cones != 0.0;
+    double global_has_psd_cones = state->cones.has_psd_cones ? 1.0 : 0.0;
+    pdhcg_all_reduce_scalar(state->grid_context, &global_has_psd_cones, PDHCG_OP_MAX, PDHCG_SCOPE_ROW, false);
+    state->cones.has_psd_cones = global_has_psd_cones != 0.0;
+    if (state->has_variable_cones)
+    {
+        quad_obj_type_t qt = rescale_info->processed_problem ? rescale_info->processed_problem->quad_type : PDHCG_NON_Q;
+        if (qt != PDHCG_NON_Q && (qt != PDHCG_DIAG_Q || state->cones.has_psd_cones))
+            CUDA_CHECK(cudaMalloc(&state->cones.bb_primal_snapshot, (size_t)state->num_variables * sizeof(double)));
+    }
 
     bool has_affine_cones = working_problem->affine_cones.num_cones > 0 || state->affine_cones.split != NULL ||
         pdhcg_get_global_num_affine_cones(state->grid_context) > 0;
@@ -667,9 +663,9 @@ static void initialize_cone_runtime(pdhg_solver_state_t *state,
                     CUDA_CHECK(cudaMemcpy(dst + z_idx, &z_val, sizeof(double), cudaMemcpyHostToDevice));
             }
         }
-        else if (cones->type[i] == CONE_EXPONENTIAL || cones->type[i] == CONE_POWER)
+        else if (cones->type[i] == CONE_EXPONENTIAL || cones->type[i] == CONE_POWER || cones->type[i] == CONE_PSD)
         {
-            /* Rely on the ALLOC_ZERO default (0, 0, 0), which is in-cone for both. */
+            /* The zero vector is feasible for these cones. */
         }
         else
         {
@@ -1254,6 +1250,7 @@ void pdhg_solver_state_free(pdhg_solver_state_t *state)
             CUDA_CHECK(cudaFree(runtime->effective_objective_gradient));
         if (runtime->bb_primal_snapshot)
             CUDA_CHECK(cudaFree(runtime->bb_primal_snapshot));
+        free_psd_projection_runtime(runtime->psd);
     }
     free_split_cones(state);
 
