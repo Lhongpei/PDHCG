@@ -31,6 +31,12 @@ pdhcg_result_t* solve_qp_problem(
     const qp_problem_t* prob,
     const pdhg_parameters_t* params    // NULL → use default parameters
 );
+
+int pdhcg_validate_parameters(
+    const pdhg_parameters_t* params,
+    char* error_message,
+    size_t error_message_size
+);
 ```
 
 The objective minimized is `0.5 * x^T (Q + R^T D R) x + c^T x + c0`. `Q`, `R`, and `D` are all optional; `D` defaults to identity, recovering the standard `Q + R^T R` form.
@@ -59,6 +65,10 @@ the order `[dual_A, dual_F]`.
 `solve_qp_problem` parameters:
 - `prob`: An QP problem built with `create_qp_problem`.
 - `params`: Solver parameters. If `NULL`, the solver will use default parameters.
+
+`pdhcg_validate_parameters` checks parameter ranges without starting a solve.
+It returns `0` for a valid parameter struct and writes the first error into an
+optional caller-provided buffer on failure.
 
 #### Distributed Solving
 

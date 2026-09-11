@@ -18,7 +18,6 @@ limitations under the License.
 #include "mps_parser.h"
 #include "pdhcg.h"
 #include "utils.h"
-#include <ctype.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -325,6 +324,8 @@ typedef struct
     double *objective_coeffs;
     double *var_lower_bounds;
     double *var_upper_bounds;
+    unsigned char *col_binary_default;
+    unsigned char *col_has_lower_bound;
     double *constraint_lower_bounds;
     double *constraint_upper_bounds;
 
@@ -335,6 +336,7 @@ typedef struct
     char *current_col_name;
     double objective_constant;
     bool is_maximize;
+    bool in_integer_block;
     int error_flag;
 
     QcMatrixAccum *qc_accums;
@@ -379,12 +381,18 @@ static bool ensure_column_capacity(MpsParserState *state)
     state->objective_coeffs = (double *)safe_realloc(state->objective_coeffs, new_cap * sizeof(double));
     state->var_lower_bounds = (double *)safe_realloc(state->var_lower_bounds, new_cap * sizeof(double));
     state->var_upper_bounds = (double *)safe_realloc(state->var_upper_bounds, new_cap * sizeof(double));
+    state->col_binary_default =
+        (unsigned char *)safe_realloc(state->col_binary_default, new_cap * sizeof(unsigned char));
+    state->col_has_lower_bound =
+        (unsigned char *)safe_realloc(state->col_has_lower_bound, new_cap * sizeof(unsigned char));
 
     for (size_t i = state->col_capacity; i < new_cap; ++i)
     {
         state->objective_coeffs[i] = 0.0;
         state->var_lower_bounds[i] = 0.0;
         state->var_upper_bounds[i] = INFINITY;
+        state->col_binary_default[i] = 0;
+        state->col_has_lower_bound[i] = 0;
     }
 
     state->col_capacity = new_cap;
@@ -411,11 +419,66 @@ typedef enum
     SEC_RANGES,
     SEC_BOUNDS,
     SEC_OBJSENSE,
+    SEC_SOS,
+    SEC_UNSUPPORTED,
     SEC_ENDATA,
     SEC_QUADOBJ,
     SEC_QMATRIX,
     SEC_QCMATRIX
 } MpsSection;
+
+static bool standalone_section_from_name(const char *name, MpsSection *section)
+{
+    static const char *const unsupported_sections[] = {
+        "QSECTION",
+        "CSECTION",
+        "INDICATORS",
+        "DELAYEDROWS",
+        "MODELCUTS",
+        "USERCUTS",
+        "GENCONS",
+        "PWLOBJ",
+        "PWLNAM",
+        "PWLCON",
+    };
+
+    static const struct
+    {
+        const char *name;
+        MpsSection section;
+    } supported_sections[] = {
+        {"ROWS", SEC_ROWS},
+        {"COLUMNS", SEC_COLUMNS},
+        {"RHS", SEC_RHS},
+        {"RANGES", SEC_RANGES},
+        {"BOUNDS", SEC_BOUNDS},
+        {"OBJSENSE", SEC_OBJSENSE},
+        {"OBJSENS", SEC_OBJSENSE},
+        {"SOS", SEC_SOS},
+        {"SETS", SEC_SOS},
+        {"QUADOBJ", SEC_QUADOBJ},
+        {"QMATRIX", SEC_QMATRIX},
+        {"ENDATA", SEC_ENDATA},
+    };
+
+    for (size_t i = 0; i < sizeof(supported_sections) / sizeof(supported_sections[0]); ++i)
+    {
+        if (strcmp(name, supported_sections[i].name) == 0)
+        {
+            *section = supported_sections[i].section;
+            return true;
+        }
+    }
+    for (size_t i = 0; i < sizeof(unsupported_sections) / sizeof(unsupported_sections[0]); ++i)
+    {
+        if (strcmp(name, unsupported_sections[i]) == 0)
+        {
+            *section = SEC_UNSUPPORTED;
+            return true;
+        }
+    }
+    return false;
+}
 
 qp_problem_t *read_mps_file(const char *filename)
 {
@@ -428,6 +491,7 @@ qp_problem_t *read_mps_file(const char *filename)
     if (!reader)
     {
         fprintf(stderr, "ERROR: Could not open file %s\n", filename);
+        return NULL;
     }
 
     namemap_init(&state.row_map, 1024);
@@ -454,28 +518,20 @@ qp_problem_t *read_mps_file(const char *filename)
         if (n_tokens == 0)
             continue;
 
-        if (n_tokens == 1 && isalpha(tokens[0][0]))
+        bool inline_objsense =
+            n_tokens == 2 && (strcmp(tokens[0], "OBJSENSE") == 0 || strcmp(tokens[0], "OBJSENS") == 0);
+        MpsSection next_section = SEC_NONE;
+        bool standalone_section = n_tokens == 1 && standalone_section_from_name(tokens[0], &next_section);
+        if (standalone_section || inline_objsense)
         {
-            MpsSection next_section = SEC_NONE;
-            if (strcmp(tokens[0], "ROWS") == 0)
-                next_section = SEC_ROWS;
-            else if (strcmp(tokens[0], "COLUMNS") == 0)
-                next_section = SEC_COLUMNS;
-            else if (strcmp(tokens[0], "RHS") == 0)
-                next_section = SEC_RHS;
-            else if (strcmp(tokens[0], "RANGES") == 0)
-                next_section = SEC_RANGES;
-            else if (strcmp(tokens[0], "BOUNDS") == 0)
-                next_section = SEC_BOUNDS;
-            else if (strcmp(tokens[0], "OBJSENSE") == 0)
+            if (inline_objsense)
                 next_section = SEC_OBJSENSE;
-            else if (strcmp(tokens[0], "QUADOBJ") == 0)
-                next_section = SEC_QUADOBJ;
-            else if (strcmp(tokens[0], "QMATRIX") == 0)
-                next_section = SEC_QMATRIX;
-            else if (strcmp(tokens[0], "ENDATA") == 0)
+
+            if (next_section == SEC_UNSUPPORTED)
             {
-                next_section = SEC_ENDATA;
+                fprintf(stderr, "ERROR: Unsupported MPS section '%s'.\n", tokens[0]);
+                state.error_flag = 1;
+                break;
             }
 
             if (current_section == SEC_ROWS && next_section != SEC_ROWS && !rows_finalized)
@@ -488,6 +544,8 @@ qp_problem_t *read_mps_file(const char *filename)
             current_section = next_section;
             if (current_section == SEC_ENDATA)
                 break;
+            if (inline_objsense)
+                state.is_maximize = strcmp(tokens[1], "MAX") == 0 || strcmp(tokens[1], "MAXIMIZE") == 0;
             continue;
         }
 
@@ -545,19 +603,36 @@ qp_problem_t *read_mps_file(const char *filename)
                 if (parse_qcmatrix_section(&state, tokens, n_tokens) != 0)
                     state.error_flag = 1;
                 break;
+            case SEC_SOS:
+                break;
             default:
-
                 break;
         }
     }
 
     fast_reader_close(reader);
 
+    if (!state.error_flag && !rows_finalized && state.num_buffered_rows > 0)
+    {
+        if (finalize_rows(&state) != 0)
+            state.error_flag = 1;
+        rows_finalized = true;
+    }
+
     if (state.error_flag)
     {
         fprintf(stderr, "ERROR: Failed to parse MPS file.\n");
         free_parser_state(&state);
         return NULL;
+    }
+
+    for (size_t col = 0; col < state.col_map.size; ++col)
+    {
+        if (state.col_binary_default[col])
+        {
+            state.var_lower_bounds[col] = 0.0;
+            state.var_upper_bounds[col] = 1.0;
+        }
     }
 
     qp_problem_t *prob = safe_calloc(1, sizeof(qp_problem_t));
@@ -717,9 +792,7 @@ static int finalize_rows(MpsParserState *state)
     }
 
     if (obj_idx == -1 && state->num_buffered_rows > 0)
-    {
-        obj_idx = 0;
-    }
+        fprintf(stderr, "Warning: MPS file has no objective row; using a zero objective.\n");
 
     if (obj_idx != -1)
     {
@@ -781,8 +854,17 @@ static int parse_columns_section(MpsParserState *state, char **tokens, int n_tok
     if (n_tokens < 2)
         return 0;
 
-    if (n_tokens >= 2 && strcmp(tokens[1], "'MARKER'") == 0)
+    if (n_tokens >= 2 && (strcmp(tokens[1], "'MARKER'") == 0 || strcmp(tokens[1], "MARKER") == 0))
     {
+        if (n_tokens >= 3)
+        {
+            if (strcmp(tokens[2], "'INTORG'") == 0 || strcmp(tokens[2], "INTORG") == 0)
+                state->in_integer_block = true;
+            else if (strcmp(tokens[2], "'INTEND'") == 0 || strcmp(tokens[2], "INTEND") == 0)
+                state->in_integer_block = false;
+        }
+        free(state->current_col_name);
+        state->current_col_name = NULL;
         return 0;
     }
 
@@ -813,9 +895,12 @@ static int parse_columns_section(MpsParserState *state, char **tokens, int n_tok
     if (!ensure_column_capacity(state))
         return -1;
 
+    size_t old_num_columns = state->col_map.size;
     int col_idx = namemap_put(&state->col_map, col_name);
     if (col_idx == -1)
         return -1;
+    if (state->col_map.size > old_num_columns && state->in_integer_block)
+        state->col_binary_default[col_idx] = 1;
 
     for (int i = pair_start_index; i + 1 < n_tokens; i += 2)
     {
@@ -963,8 +1048,13 @@ static int parse_qcmatrix_section(MpsParserState *state, char **tokens, int n_to
 
 static int parse_rhs_section(MpsParserState *state, char **tokens, int n_tokens)
 {
+    int start = 1;
+    if (n_tokens > 0 &&
+        ((state->objective_row_name && strcmp(tokens[0], state->objective_row_name) == 0) ||
+         namemap_get(&state->row_map, tokens[0]) != -1))
+        start = 0;
 
-    for (int i = 1; i + 1 < n_tokens; i += 2)
+    for (int i = start; i + 1 < n_tokens; i += 2)
     {
         const char *row_name = tokens[i];
         double value = atof(tokens[i + 1]);
@@ -996,8 +1086,9 @@ static int parse_rhs_section(MpsParserState *state, char **tokens, int n_tokens)
 
 static int parse_ranges_section(MpsParserState *state, char **tokens, int n_tokens)
 {
+    int start = n_tokens > 0 && namemap_get(&state->row_map, tokens[0]) != -1 ? 0 : 1;
 
-    for (int i = 1; i + 1 < n_tokens; i += 2)
+    for (int i = start; i + 1 < n_tokens; i += 2)
     {
         const char *row_name = tokens[i];
         double range_val = atof(tokens[i + 1]);
@@ -1035,39 +1126,50 @@ static int parse_ranges_section(MpsParserState *state, char **tokens, int n_toke
 
 static int parse_bounds_section(MpsParserState *state, char **tokens, int n_tokens)
 {
-    if (n_tokens < 3)
+    if (n_tokens < 2)
         return 0;
 
     const char *bound_type = tokens[0];
-
-    const char *col_name = tokens[2];
-    double value = (n_tokens > 3) ? atof(tokens[3]) : 0.0;
+    int col_pos = namemap_get(&state->col_map, tokens[1]) != -1 ? 1 : 2;
+    if (col_pos >= n_tokens)
+        return 0;
+    const char *col_name = tokens[col_pos];
+    double value = (col_pos + 1 < n_tokens) ? atof(tokens[col_pos + 1]) : 0.0;
 
     int col_idx = namemap_get(&state->col_map, col_name);
     if (col_idx == -1)
         return 0;
 
-    if (strcmp(bound_type, "LO") == 0)
+    /* Any explicit BOUNDS entry cancels the integer column's implicit [0, 1]. */
+    state->col_binary_default[col_idx] = 0;
+
+    if (strcmp(bound_type, "LO") == 0 || strcmp(bound_type, "LI") == 0)
     {
         state->var_lower_bounds[col_idx] = value;
+        state->col_has_lower_bound[col_idx] = 1;
     }
-    else if (strcmp(bound_type, "UP") == 0)
+    else if (strcmp(bound_type, "UP") == 0 || strcmp(bound_type, "UI") == 0)
     {
         state->var_upper_bounds[col_idx] = value;
+        if (value < 0.0 && !state->col_has_lower_bound[col_idx])
+            state->var_lower_bounds[col_idx] = -INFINITY;
     }
     else if (strcmp(bound_type, "FX") == 0)
     {
         state->var_lower_bounds[col_idx] = value;
         state->var_upper_bounds[col_idx] = value;
+        state->col_has_lower_bound[col_idx] = 1;
     }
     else if (strcmp(bound_type, "FR") == 0)
     {
         state->var_lower_bounds[col_idx] = -INFINITY;
         state->var_upper_bounds[col_idx] = INFINITY;
+        state->col_has_lower_bound[col_idx] = 1;
     }
     else if (strcmp(bound_type, "MI") == 0)
     {
         state->var_lower_bounds[col_idx] = -INFINITY;
+        state->col_has_lower_bound[col_idx] = 1;
     }
     else if (strcmp(bound_type, "PL") == 0)
     {
@@ -1077,6 +1179,7 @@ static int parse_bounds_section(MpsParserState *state, char **tokens, int n_toke
     {
         state->var_lower_bounds[col_idx] = 0.0;
         state->var_upper_bounds[col_idx] = 1.0;
+        state->col_has_lower_bound[col_idx] = 1;
     }
     return 0;
 }
@@ -1167,6 +1270,8 @@ static void free_parser_state(MpsParserState *state)
     free(state->objective_coeffs);
     free(state->var_lower_bounds);
     free(state->var_upper_bounds);
+    free(state->col_binary_default);
+    free(state->col_has_lower_bound);
     free(state->constraint_lower_bounds);
     free(state->constraint_upper_bounds);
     free(state->objective_row_name);

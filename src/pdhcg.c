@@ -32,6 +32,99 @@ volatile sig_atomic_t g_pdhcg_cancel_request = 0;
 
 static void csr_component_free(CsrComponent *csr);
 
+static int parameter_error(char *error_message, size_t error_message_size, const char *message)
+{
+    if (error_message && error_message_size > 0)
+        snprintf(error_message, error_message_size, "%s", message);
+    return -1;
+}
+
+int pdhcg_validate_parameters(const pdhg_parameters_t *params, char *error_message, size_t error_message_size)
+{
+    if (error_message && error_message_size > 0)
+        error_message[0] = '\0';
+    if (!params)
+        return parameter_error(error_message, error_message_size, "params must not be NULL");
+
+    const termination_criteria_t *termination = &params->termination_criteria;
+    const restart_parameters_t *restart = &params->restart_params;
+    const inner_solver_parameters_t *inner = &params->inner_solver_parameters;
+
+    if (params->curtis_reid_iterations < 0 || params->l_inf_ruiz_iterations < 0)
+        return parameter_error(error_message, error_message_size, "scaling iteration counts must be nonnegative");
+    if (params->has_pock_chambolle_alpha &&
+        (!isfinite(params->pock_chambolle_alpha) || params->pock_chambolle_alpha < 0.0 ||
+         params->pock_chambolle_alpha > 2.0))
+        return parameter_error(error_message, error_message_size, "pock_chambolle_alpha must be in [0, 2]");
+    if (params->verbose < 0)
+        return parameter_error(error_message, error_message_size, "verbose must be nonnegative");
+    if (params->termination_evaluation_frequency <= 0)
+        return parameter_error(error_message, error_message_size, "termination_evaluation_frequency must be positive");
+    if (params->sv_max_iter <= 0)
+        return parameter_error(error_message, error_message_size, "sv_max_iter must be positive");
+    if (!isfinite(params->sv_tol) || params->sv_tol <= 0.0)
+        return parameter_error(error_message, error_message_size, "sv_tol must be finite and positive");
+
+    if (!isfinite(termination->eps_optimal_relative) || termination->eps_optimal_relative <= 0.0)
+        return parameter_error(error_message, error_message_size, "eps_optimal_relative must be finite and positive");
+    if (!isfinite(termination->eps_feasible_relative) || termination->eps_feasible_relative <= 0.0)
+        return parameter_error(error_message, error_message_size, "eps_feasible_relative must be finite and positive");
+    if (!isfinite(termination->eps_feas_polish_relative) || termination->eps_feas_polish_relative <= 0.0)
+        return parameter_error(
+            error_message, error_message_size, "eps_feas_polish_relative must be finite and positive");
+    if (!isfinite(termination->eps_infeasible) || termination->eps_infeasible < 0.0)
+        return parameter_error(error_message, error_message_size, "eps_infeasible must be finite and nonnegative");
+    if (isnan(termination->time_sec_limit) || termination->time_sec_limit < 0.0)
+        return parameter_error(error_message, error_message_size, "time_sec_limit must be nonnegative");
+    if (termination->iteration_limit < 0)
+        return parameter_error(error_message, error_message_size, "iteration_limit must be nonnegative");
+
+    if (!isfinite(restart->artificial_restart_threshold) || restart->artificial_restart_threshold <= 0.0)
+        return parameter_error(error_message, error_message_size, "artificial_restart_threshold must be positive");
+    if (!isfinite(restart->sufficient_reduction_for_restart) || restart->sufficient_reduction_for_restart <= 0.0 ||
+        restart->sufficient_reduction_for_restart > 1.0)
+        return parameter_error(error_message, error_message_size, "sufficient_reduction_for_restart must be in (0, 1]");
+    if (!isfinite(restart->necessary_reduction_for_restart) || restart->necessary_reduction_for_restart <= 0.0 ||
+        restart->necessary_reduction_for_restart > 1.0)
+        return parameter_error(error_message, error_message_size, "necessary_reduction_for_restart must be in (0, 1]");
+    if (restart->sufficient_reduction_for_restart > restart->necessary_reduction_for_restart)
+        return parameter_error(error_message,
+                               error_message_size,
+                               "sufficient_reduction_for_restart must not exceed necessary_reduction_for_restart");
+    if (!isfinite(restart->k_p) || !isfinite(restart->k_i) || !isfinite(restart->k_d))
+        return parameter_error(error_message, error_message_size, "restart PID coefficients must be finite");
+    if (!isfinite(restart->i_smooth) || restart->i_smooth < 0.0 || restart->i_smooth > 1.0)
+        return parameter_error(error_message, error_message_size, "restart i_smooth must be in [0, 1]");
+
+    if (!isfinite(params->reflection_coefficient) || params->reflection_coefficient <= 0.0 ||
+        params->reflection_coefficient >= 2.0)
+        return parameter_error(error_message, error_message_size, "reflection_coefficient must be in (0, 2)");
+    if (params->optimality_norm != NORM_TYPE_L2 && params->optimality_norm != NORM_TYPE_L_INF)
+        return parameter_error(error_message, error_message_size, "optimality_norm is invalid");
+    if (inner->iteration_limit <= 0)
+        return parameter_error(error_message, error_message_size, "inner_iter_limit must be positive");
+    if (!isfinite(inner->initial_tolerance) || inner->initial_tolerance <= 0.0)
+        return parameter_error(error_message, error_message_size, "inner_init_tol must be finite and positive");
+    if (!isfinite(inner->min_tolerance) || inner->min_tolerance <= 0.0)
+        return parameter_error(error_message, error_message_size, "inner_min_tol must be finite and positive");
+    if (inner->min_tolerance > inner->initial_tolerance)
+        return parameter_error(error_message, error_message_size, "inner_min_tol must not exceed inner_init_tol");
+
+    if (params->default_cone_type != CONE_ROTATED_SOC && params->default_cone_type != CONE_STANDARD_SOC)
+        return parameter_error(error_message, error_message_size, "default_cone_type must be rotated or standard SOC");
+    if (params->partition_method != UNIFORM_PARTITION && params->partition_method != NNZ_BALANCE_PARTITION)
+        return parameter_error(error_message, error_message_size, "partition_method is invalid");
+    if (params->permute_method != NO_PERMUTATION && params->permute_method != FULL_RANDOM_PERMUTATION &&
+        params->permute_method != BLOCK_RANDOM_PERMUTATION)
+        return parameter_error(error_message, error_message_size, "permute_method is invalid");
+    if (params->permute_block_size <= 0)
+        return parameter_error(error_message, error_message_size, "permute_block_size must be positive");
+    if (params->grid_size.decided && (params->grid_size.row_dims <= 0 || params->grid_size.col_dims <= 0))
+        return parameter_error(error_message, error_message_size, "decided grid dimensions must be positive");
+
+    return 0;
+}
+
 static int validate_matrix_descriptor(const matrix_desc_t *desc, const char *name)
 {
     if (!desc)
@@ -898,9 +991,6 @@ pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters
         fprintf(stderr, "[interface] solve_qp_problem: invalid arguments.\n");
         return NULL;
     }
-    if (pdhcg_validate_fixed_cone_sections(prob) != 0)
-        return NULL;
-
     pdhg_parameters_t local_params;
     if (params)
     {
@@ -910,6 +1000,15 @@ pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters
     {
         set_default_parameters(&local_params);
     }
+
+    char parameter_message[256];
+    if (pdhcg_validate_parameters(&local_params, parameter_message, sizeof(parameter_message)) != 0)
+    {
+        fprintf(stderr, "[solve_qp_problem] invalid parameters: %s.\n", parameter_message);
+        return NULL;
+    }
+    if (pdhcg_validate_fixed_cone_sections(prob) != 0)
+        return NULL;
 
     pdhcg_result_t *res = optimize(&local_params, prob);
     if (!res)
@@ -923,5 +1022,17 @@ pdhcg_result_t *solve_qp_problem(const qp_problem_t *prob, const pdhg_parameters
 
 pdhcg_result_t *solve_qp_problem_distributed(const pdhg_parameters_t *params, const qp_problem_t *original_problem)
 {
-    return pdhcg_distributed_optimize(params, original_problem);
+    pdhg_parameters_t local_params;
+    if (params)
+        local_params = *params;
+    else
+        set_default_parameters(&local_params);
+
+    char parameter_message[256];
+    if (pdhcg_validate_parameters(&local_params, parameter_message, sizeof(parameter_message)) != 0)
+    {
+        fprintf(stderr, "[solve_qp_problem_distributed] invalid parameters: %s.\n", parameter_message);
+        return NULL;
+    }
+    return pdhcg_distributed_optimize(&local_params, original_problem);
 }

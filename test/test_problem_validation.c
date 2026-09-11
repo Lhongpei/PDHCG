@@ -1,6 +1,7 @@
 #include "pdhcg.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #define CHECK(condition)                                                                                               \
     do                                                                                                                 \
@@ -108,6 +109,43 @@ int main(void)
     problem = create_qp_problem(
         NULL, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, affine_offset, 1, &affine_cone);
     CHECK(problem == NULL);
+
+    pdhg_parameters_t parameters;
+    char error_message[256];
+    set_default_parameters(&parameters);
+    CHECK(parameters.grid_size.row_dims == 0);
+    CHECK(parameters.grid_size.col_dims == 0);
+    CHECK(parameters.permute_block_size == 256);
+    CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) == 0);
+    CHECK(error_message[0] == '\0');
+
+    parameters.termination_evaluation_frequency = 0;
+    CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) != 0);
+    CHECK(strstr(error_message, "termination_evaluation_frequency") != NULL);
+
+    set_default_parameters(&parameters);
+    parameters.inner_solver_parameters.min_tolerance = 1.0;
+    CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) != 0);
+    CHECK(strstr(error_message, "inner_min_tol") != NULL);
+
+    set_default_parameters(&parameters);
+    parameters.reflection_coefficient = 2.0;
+    CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) != 0);
+    CHECK(strstr(error_message, "reflection_coefficient") != NULL);
+
+    set_default_parameters(&parameters);
+    parameters.termination_criteria.iteration_limit = 0;
+    CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) == 0);
+    parameters.termination_criteria.iteration_limit = -1;
+    CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) != 0);
+    CHECK(strstr(error_message, "iteration_limit") != NULL);
+
+    problem = create_qp_problem(NULL, NULL, NULL, NULL, &A, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL);
+    CHECK(problem != NULL);
+    set_default_parameters(&parameters);
+    parameters.termination_evaluation_frequency = 0;
+    CHECK(solve_qp_problem(problem, &parameters) == NULL);
+    qp_problem_free(problem);
 
     return 0;
 }

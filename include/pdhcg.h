@@ -61,6 +61,10 @@ extern "C"
     // parameter
     void set_default_parameters(pdhg_parameters_t *params);
 
+    /* Return 0 when params are valid. On failure, return nonzero and write the
+       first error to error_message when a nonempty buffer is provided. */
+    int pdhcg_validate_parameters(const pdhg_parameters_t *params, char *error_message, size_t error_message_size);
+
     void pdhcg_result_free(pdhcg_result_t *results);
 
     void qp_problem_free(qp_problem_t *prob);

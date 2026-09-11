@@ -22,7 +22,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from . import PDHCG
-from ._core import get_default_params, read_problem_file, solve_once
+from ._core import get_default_params, read_problem_file, solve_once, validate_params
 from .cones import ConeSpec
 
 # array-like type
@@ -683,6 +683,9 @@ class Model:
         Set the value of a solver parameter by name.
         """
         key = PDHCG._PARAM_ALIAS.get(name, name)
+        candidate = dict(self._params)
+        candidate[key] = value
+        validate_params(candidate)
         self._params[key] = value
 
     def getParam(self, name: str) -> Any:
@@ -696,8 +699,12 @@ class Model:
         """
         Set multiple solver parameters by keyword arguments.
         """
-        for k, v in kwargs.items():
-            self.setParam(k, v)
+        candidate = dict(self._params)
+        for name, value in kwargs.items():
+            key = PDHCG._PARAM_ALIAS.get(name, name)
+            candidate[key] = value
+        validate_params(candidate)
+        self._params = candidate
 
     def optimize(self):
         """

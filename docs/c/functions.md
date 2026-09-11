@@ -152,7 +152,7 @@ Solves the QP problem using the distributed multi-GPU PDHCG algorithm.
 | `params` | Solver parameters (including `partition_method`, `permute_method`, `grid_size`, and `permute_block_size`) |
 | `original_problem` | QP problem pointer (only required on rank 0; can be NULL on other ranks) |
 
-**Returns:** Pointer to `pdhcg_result_t` containing solution information (valid on all ranks; only rank 0 writes output).
+**Returns:** Pointer to `pdhcg_result_t` on rank 0. Other ranks return `NULL`.
 
 ---
 
@@ -169,6 +169,22 @@ Fills the parameter struct with default values.
 | Parameter | Description |
 |-----------|-------------|
 | `params` | Pointer to parameters struct to fill |
+
+---
+
+## pdhcg_validate_parameters
+
+```c
+int pdhcg_validate_parameters(
+    const pdhg_parameters_t *params,
+    char *error_message,
+    size_t error_message_size
+);
+```
+
+Validates solver parameter ranges. Returns `0` on success and nonzero on
+failure. If `error_message` is non-`NULL` and its size is nonzero, the first
+validation error is written there.
 
 ---
 
