@@ -360,8 +360,11 @@ void set_default_parameters(pdhg_parameters_t *params)
     params->inner_solver_parameters.min_tolerance = 1e-9;
 
     params->grid_size.decided = false;
+    params->grid_size.row_dims = 0;
+    params->grid_size.col_dims = 0;
     params->partition_method = NNZ_BALANCE_PARTITION;
     params->permute_method = BLOCK_RANDOM_PERMUTATION;
+    params->permute_block_size = 256;
 
     params->diag_jacobi_precond = true;
     params->default_cone_type = CONE_ROTATED_SOC;

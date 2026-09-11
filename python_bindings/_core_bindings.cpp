@@ -26,6 +26,7 @@ limitations under the License.
 #include <cstring>
 #include <cuda_runtime.h>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -46,6 +47,28 @@ void sigint_handler(int signum)
     (void)signum;
     g_pdhcg_cancel_request = 1;
 }
+
+using QpProblemPtr = std::unique_ptr<qp_problem_t, decltype(&qp_problem_free)>;
+using PdhcgResultPtr = std::unique_ptr<pdhcg_result_t, decltype(&pdhcg_result_free)>;
+
+class SigintHandlerGuard
+{
+  public:
+    SigintHandlerGuard() : previous_(std::signal(SIGINT, sigint_handler))
+    {
+    }
+    ~SigintHandlerGuard()
+    {
+        if (previous_ != SIG_ERR)
+            std::signal(SIGINT, previous_);
+    }
+
+    SigintHandlerGuard(const SigintHandlerGuard &) = delete;
+    SigintHandlerGuard &operator=(const SigintHandlerGuard &) = delete;
+
+  private:
+    void (*previous_)(int);
+};
 
 // keepalive for numpy arrays
 struct MatrixKeepalive
@@ -263,6 +286,7 @@ static py::dict get_default_params_py()
     // tolerances
     d["eps_optimal_relative"] = p.termination_criteria.eps_optimal_relative;
     d["eps_feasible_relative"] = p.termination_criteria.eps_feasible_relative;
+    d["eps_infeasible"] = p.termination_criteria.eps_infeasible;
 
     // limits
     d["time_sec_limit"] = p.termination_criteria.time_sec_limit;
@@ -314,6 +338,15 @@ static void parse_params_from_python(py::object params_obj, pdhg_parameters_t *p
     if (!params_obj || params_obj.is_none())
         return;
     py::dict d = params_obj.cast<py::dict>();
+    py::dict defaults = get_default_params_py();
+    for (auto item : d)
+    {
+        if (!py::isinstance<py::str>(item.first) || !defaults.contains(item.first))
+        {
+            std::string name = py::cast<std::string>(py::str(item.first));
+            throw std::invalid_argument("Unknown parameter: " + name);
+        }
+    }
 
     auto getf = [&](const char *k, double &tgt)
     {
@@ -354,6 +387,7 @@ static void parse_params_from_python(py::object params_obj, pdhg_parameters_t *p
     // tolerances
     getf("eps_optimal_relative", p->termination_criteria.eps_optimal_relative);
     getf("eps_feasible_relative", p->termination_criteria.eps_feasible_relative);
+    getf("eps_infeasible", p->termination_criteria.eps_infeasible);
 
     // limits
     getf("time_sec_limit", p->termination_criteria.time_sec_limit);
@@ -395,6 +429,17 @@ static void parse_params_from_python(py::object params_obj, pdhg_parameters_t *p
 
     // presolve
     getb("presolve", p->presolve);
+
+    char error_message[256];
+    if (pdhcg_validate_parameters(p, error_message, sizeof(error_message)) != 0)
+        throw std::invalid_argument(error_message);
+}
+
+static void validate_params_py(py::object params)
+{
+    pdhg_parameters_t local_params;
+    set_default_parameters(&local_params);
+    parse_params_from_python(params, &local_params);
 }
 
 // view of matrix from Python
@@ -800,22 +845,23 @@ static py::dict solve_once(py::object Q,
         affine_g_ptr = get_arr_ptr_f64_or_null(affine_g, "affine_g", view_f.keep);
     }
 
-    qp_problem_t *prob = create_qp_problem(c_ptr,
-                                           q_desc_ptr,
-                                           r_desc_ptr,
-                                           d_desc_ptr,
-                                           a_desc_ptr,
-                                           l_ptr,
-                                           u_ptr,
-                                           lb_ptr,
-                                           ub_ptr,
-                                           c0_ptr,
-                                           (int)cones_vec.size(),
-                                           cones_vec.empty() ? nullptr : cones_vec.data(),
-                                           f_desc_ptr,
-                                           affine_g_ptr,
-                                           (int)affine_cones_vec.size(),
-                                           affine_cones_vec.empty() ? nullptr : affine_cones_vec.data());
+    QpProblemPtr prob(create_qp_problem(c_ptr,
+                                        q_desc_ptr,
+                                        r_desc_ptr,
+                                        d_desc_ptr,
+                                        a_desc_ptr,
+                                        l_ptr,
+                                        u_ptr,
+                                        lb_ptr,
+                                        ub_ptr,
+                                        c0_ptr,
+                                        (int)cones_vec.size(),
+                                        cones_vec.empty() ? nullptr : cones_vec.data(),
+                                        f_desc_ptr,
+                                        affine_g_ptr,
+                                        (int)affine_cones_vec.size(),
+                                        affine_cones_vec.empty() ? nullptr : affine_cones_vec.data()),
+                      &qp_problem_free);
     if (!prob)
     {
         throw std::runtime_error("create_qp_problem failed.");
@@ -829,7 +875,7 @@ static py::dict solve_once(py::object Q,
         const double *primal_ptr = get_arr_ptr_f64_or_null(primal_start, "primal_start", view_a.keep);
         const double *dual_ptr = get_arr_ptr_f64_or_null(dual_start, "dual_start", view_a.keep);
 
-        set_start_values(prob, primal_ptr, dual_ptr);
+        set_start_values(prob.get(), primal_ptr, dual_ptr);
     }
 
     // parse PDHG params
@@ -837,28 +883,16 @@ static py::dict solve_once(py::object Q,
     set_default_parameters(&local_params);
     parse_params_from_python(params, &local_params);
     // solve (release GIL during compute)
-    pdhcg_result_t *res = nullptr;
+    pdhcg_result_t *raw_result = nullptr;
     g_pdhcg_cancel_request = 0;
-    void (*old_sigint_handler)(int) = std::signal(SIGINT, sigint_handler);
 
     {
+        SigintHandlerGuard signal_guard;
         py::gil_scoped_release release;
-        res = solve_qp_problem(prob, &local_params);
+        raw_result = solve_qp_problem(prob.get(), &local_params);
     }
 
-    std::signal(SIGINT, old_sigint_handler);
-
-    // Note: A user interrupt will only terminate the optimization process, without killing the Python instance.
-    // if (g_pdhcg_cancel_request) {
-    //     PyErr_SetInterrupt();
-    //     if (PyErr_CheckSignals() != 0) {
-    //         qp_problem_free(prob);
-    //         if (res) pdhcg_result_free(res);
-    //         throw py::error_already_set();
-    //     }
-    // }
-
-    qp_problem_free(prob);
+    PdhcgResultPtr res(raw_result, &pdhcg_result_free);
     if (!res)
     {
         throw std::runtime_error("solve_qp_problem returned NULL.");
@@ -867,6 +901,10 @@ static py::dict solve_once(py::object Q,
     // parse result
     const int n_out = res->num_variables;
     const int m_out = res->num_constraints;
+    if (n_out != n || m_out != m + num_affine_rows)
+        throw std::runtime_error("solve_qp_problem returned inconsistent solution dimensions");
+    if ((n_out > 0 && !res->primal_solution) || (m_out > 0 && !res->dual_solution))
+        throw std::runtime_error("solve_qp_problem returned incomplete solution arrays");
     py::array_t<double> x({n_out});
     py::array_t<double> y({m_out});
     {
@@ -898,9 +936,6 @@ static py::dict solve_once(py::object Q,
     info["MaxDualRayInfeas"] = res->max_dual_ray_infeasibility;
     info["PrimalRayLinObj"] = res->primal_ray_linear_objective;
     info["DualRayObj"] = res->dual_ray_objective;
-
-    // free result
-    pdhcg_result_free(res);
 
     return info;
 }
@@ -966,7 +1001,6 @@ static py::object csr_selected_rows_to_py(const CsrComponent *csr, const std::ve
    and affine_cones. Sparse matrices use {indptr, indices, data, shape} payloads. */
 static py::dict read_problem_file_py(const std::string &path)
 {
-    qp_problem_t *prob = nullptr;
     size_t n = path.size();
     bool is_cbf = false;
     size_t stem_end = n;
@@ -975,7 +1009,7 @@ static py::dict read_problem_file_py(const std::string &path)
     if (stem_end >= 4 && path.compare(stem_end - 4, 4, ".cbf") == 0)
         is_cbf = true;
 
-    prob = is_cbf ? read_cbf_file(path.c_str()) : read_mps_file(path.c_str());
+    QpProblemPtr prob(is_cbf ? read_cbf_file(path.c_str()) : read_mps_file(path.c_str()), &qp_problem_free);
     if (!prob)
         throw std::runtime_error("failed to read problem file: " + path);
 
@@ -983,11 +1017,10 @@ static py::dict read_problem_file_py(const std::string &path)
        problem is directly solvable via solve_once. Default to rotated SOC form. */
     if (prob->num_quadratic_constraints > 0)
     {
-        qp_problem_t *lifted = qcqp_to_socp_qp(prob, CONE_ROTATED_SOC);
-        qp_problem_free(prob);
+        qp_problem_t *lifted = qcqp_to_socp_qp(prob.get(), CONE_ROTATED_SOC);
         if (!lifted)
             throw std::runtime_error("QCQP -> SOCP transform failed for: " + path);
-        prob = lifted;
+        prob.reset(lifted);
     }
 
     py::dict out;
@@ -1080,7 +1113,6 @@ static py::dict read_problem_file_py(const std::string &path)
         out["primal_start"] = ps;
     }
 
-    qp_problem_free(prob);
     return out;
 }
 
@@ -1090,6 +1122,7 @@ PYBIND11_MODULE(_pdhcg_core, m)
               "default params here)";
 
     m.def("get_default_params", &get_default_params_py, "Return default PDHG parameters as a dict");
+    m.def("validate_params", &validate_params_py, py::arg("params"), "Validate a PDHG parameter dict");
 
     m.def("read_problem_file",
           &read_problem_file_py,

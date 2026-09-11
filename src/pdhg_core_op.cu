@@ -1495,6 +1495,11 @@ pdhcg_result_t *create_result_from_state(pdhg_solver_state_t *state, const qp_pr
     return results;
 }
 
+static bool spectral_error_within_tolerance(double error, double estimate, double tolerance)
+{
+    return fabs(error) <= tolerance * fmin(1.0, fabs(estimate));
+}
+
 double estimate_maximum_eigenvalue(cusparseHandle_t sparse_handle,
                                    cublasHandle_t blas_handle,
                                    const cu_sparse_matrix_csr_t *A,
@@ -1561,7 +1566,7 @@ double estimate_maximum_eigenvalue(cusparseHandle_t sparse_handle,
         pdhcg_all_reduce_scalar(ctx, &local_dot, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
         lambda = local_dot;
 
-        if (i > 0 && fabs(lambda - old_lambda) < tolerance)
+        if (i > 0 && spectral_error_within_tolerance(lambda - old_lambda, lambda, tolerance))
             break;
 
         if (n_local > 0)
@@ -1651,7 +1656,7 @@ double estimate_minimum_eigenvalue(cusparseHandle_t sparse_handle,
         pdhcg_all_reduce_scalar(ctx, &local_dot, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
         mu = local_dot;
 
-        if (i > 0 && fabs(mu - old_mu) < tolerance)
+        if (i > 0 && spectral_error_within_tolerance(mu - old_mu, mu, tolerance))
             break;
 
         if (n_local > 0)
@@ -1750,7 +1755,8 @@ double estimate_maximum_singular_value(cusparseHandle_t sparse_handle,
         double res_sq = local_res_norm * local_res_norm;
         pdhcg_all_reduce_scalar(ctx, &res_sq, PDHCG_OP_SUM, PDHCG_SCOPE_COL, false);
 
-        if (sqrt(res_sq) < tolerance)
+        double residual_norm = sqrt(res_sq);
+        if (spectral_error_within_tolerance(residual_norm, sigma_max_sq, tolerance))
             break;
 
         if (m > 0)

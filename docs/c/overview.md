@@ -156,6 +156,16 @@ void set_default_parameters(pdhg_parameters_t *params);
 
 Fills the parameter struct with default values.
 
+```c
+int pdhcg_validate_parameters(
+    const pdhg_parameters_t *params,
+    char *error_message,
+    size_t error_message_size
+);
+```
+
+Checks parameter ranges without starting a solve.
+
 ### Cleanup
 
 ```c

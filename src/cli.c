@@ -19,7 +19,6 @@ limitations under the License.
 #include "mps_parser.h"
 #include "pdhcg.h"
 #include "presolve_wrapper.h"
-#include "solver.h"
 #include "utils.h"
 #include <cuda_runtime.h>
 #include <getopt.h>
@@ -31,7 +30,6 @@ limitations under the License.
 #include <string.h>
 
 #ifdef PDHCG_COMPILE_DISTRIBUTED
-#include "distributed_solver.h"
 #include <mpi.h>
 #endif
 
@@ -372,7 +370,7 @@ int run_pdhcg(int argc, char *argv[])
         return 1;
     }
 
-    pdhcg_result_t *result = optimize(&params, problem);
+    pdhcg_result_t *result = solve_qp_problem(problem, &params);
 
     if (result == NULL)
     {
@@ -659,7 +657,7 @@ int run_d_pdhcg(int argc, char *argv[])
         }
     }
 
-    pdhcg_result_t *result = distributed_optimize(&params, problem);
+    pdhcg_result_t *result = solve_qp_problem_distributed(&params, problem);
 
     if (rank_global == 0)
     {
