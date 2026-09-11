@@ -43,7 +43,15 @@ static void pdhcg_spmv_buffer_size(cusparseHandle_t sparse_handle,
 {
 #if PDHCG_USE_SPMVOP
     CUSPARSE_CHECK(cusparseSpMVOp_bufferSize(
-        sparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE, mat, vec_x, vec_y, vec_y, CUDA_R_64F, buffer_size));
+        sparse_handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        mat,
+        vec_x,
+        vec_y,
+        vec_y,
+        CUDA_R_64F,
+        CUSPARSE_SPMVOP_ALG_DEFAULT,
+        buffer_size));
 #else
     CUSPARSE_CHECK(cusparseSpMV_bufferSize(sparse_handle,
                                            CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -70,7 +78,16 @@ static void pdhcg_spmv_prepare(cusparseHandle_t sparse_handle,
     cusparseSpMVOpDescr_t local_descr = NULL;
     cusparseSpMVOpPlan_t local_plan = NULL;
     CUSPARSE_CHECK(cusparseSpMVOp_createDescr(
-        sparse_handle, &local_descr, CUSPARSE_OPERATION_NON_TRANSPOSE, mat, vec_x, vec_y, vec_y, CUDA_R_64F, buffer));
+        sparse_handle,
+        &local_descr,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        mat,
+        vec_x,
+        vec_y,
+        vec_y,
+        CUDA_R_64F,
+        CUSPARSE_SPMVOP_ALG_DEFAULT,
+        buffer));
     CUSPARSE_CHECK(cusparseSpMVOp_createPlan(sparse_handle, local_descr, &local_plan, NULL, 0));
     *descr = (void *)local_descr;
     *plan = (void *)local_plan;
