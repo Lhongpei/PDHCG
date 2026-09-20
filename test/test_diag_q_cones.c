@@ -66,6 +66,8 @@ static int run_test_soc_diag_q(void)
 
     pdhg_parameters_t params;
     set_default_parameters(&params);
+    /* This option must not replace the exact diagonal-Q update. */
+    params.non_diagonal_quadratic_mode = NON_DIAGONAL_QUADRATIC_LINEARIZED;
     params.verbose = 1;
     params.termination_criteria.eps_optimal_relative = 1e-8;
     params.termination_criteria.eps_feasible_relative = 1e-8;

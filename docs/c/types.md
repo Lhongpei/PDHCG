@@ -37,6 +37,20 @@ typedef enum {
 } norm_type_t;
 ```
 
+## Non-Diagonal Quadratic Mode
+
+```c
+typedef enum {
+  NON_DIAGONAL_QUADRATIC_INNER = 0,
+  NON_DIAGONAL_QUADRATIC_LINEARIZED = 1
+} non_diagonal_quadratic_mode_t;
+```
+
+`NON_DIAGONAL_QUADRATIC_LINEARIZED` replaces the non-diagonal quadratic
+proximal inner solve with one gradient evaluation and one box/cone projection.
+Diagonal Q is unaffected and retains its dedicated update. The default remains
+`NON_DIAGONAL_QUADRATIC_INNER`.
+
 ## Matrix Format
 
 ```c
@@ -310,6 +324,7 @@ typedef struct {
   double reflection_coefficient;
   bool feasibility_polishing;
   norm_type_t optimality_norm;
+  non_diagonal_quadratic_mode_t non_diagonal_quadratic_mode;
   inner_solver_parameters_t inner_solver_parameters;
   bool presolve;
   bool diag_jacobi_precond;

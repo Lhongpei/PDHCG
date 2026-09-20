@@ -35,6 +35,12 @@ typedef enum
     CONE_SCALING_POCK_CHAMBOLLE,
 } cone_scaling_phase_t;
 
+typedef enum
+{
+    QUADRATIC_COLUMN_MAX,
+    QUADRATIC_COLUMN_SUM,
+} quadratic_column_stat_t;
+
 static int max_psd_order(const cone_blocks_t *cones)
 {
     int max_order = 0;
@@ -165,11 +171,13 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
                                   double *cum_var_rescale);
 static void ruiz_rescaling(qp_problem_t *problem,
                            int num_iters,
+                           bool include_quadratic_objective,
                            bool use_cone_preserving_scaling,
                            double *cum_con_rescale,
                            double *cum_var_rescale);
 static void pock_chambolle_rescaling(qp_problem_t *problem,
                                      double alpha,
+                                     bool include_quadratic_objective,
                                      bool use_cone_preserving_scaling,
                                      double *cum_con_rescale,
                                      double *cum_var_rescale);
@@ -494,8 +502,77 @@ static void curtis_reid_rescaling(qp_problem_t *problem,
     free(psd_factor_log);
 }
 
+static void accumulate_lowrank_quadratic_column_bound(const qp_problem_t *problem,
+                                                      quadratic_column_stat_t statistic,
+                                                      double *column_stat)
+{
+    const int rank = problem->num_rank_lowrank_obj;
+    const CsrComponent *R = problem->objective_lowrank_matrix;
+    if (rank <= 0 || !R || problem->objective_lowrank_matrix_num_nonzeros <= 0)
+        return;
+
+    double *row_stat = safe_calloc((size_t)rank, sizeof(double));
+    double *middle_weight = safe_calloc((size_t)rank, sizeof(double));
+    for (int row = 0; row < rank; ++row)
+    {
+        for (int nz = R->row_ptr[row]; nz < R->row_ptr[row + 1]; ++nz)
+        {
+            const double value = fabs(R->val[nz]);
+            if (statistic == QUADRATIC_COLUMN_MAX)
+                row_stat[row] = fmax(row_stat[row], value);
+            else
+                row_stat[row] += value;
+        }
+    }
+
+    const CsrComponent *D = problem->objective_lowrank_middle_matrix;
+    if (D && problem->objective_lowrank_middle_matrix_num_nonzeros > 0)
+    {
+        for (int row = 0; row < rank; ++row)
+            for (int nz = D->row_ptr[row]; nz < D->row_ptr[row + 1]; ++nz)
+                middle_weight[D->col_ind[nz]] += fabs(D->val[nz]) * row_stat[row];
+    }
+    else
+    {
+        memcpy(middle_weight, row_stat, (size_t)rank * sizeof(double));
+    }
+
+    /* Bound the requested column norm of R' D R without forming a dense Hessian. */
+    for (int row = 0; row < rank; ++row)
+        for (int nz = R->row_ptr[row]; nz < R->row_ptr[row + 1]; ++nz)
+            column_stat[R->col_ind[nz]] += fabs(R->val[nz]) * middle_weight[row];
+
+    free(row_stat);
+    free(middle_weight);
+}
+
+/* Q-aware variable equilibration follows HPR-QP's scaling rule:
+ * https://github.com/PolyU-IOR/HPR-QP */
+static void
+compute_quadratic_column_statistics(const qp_problem_t *problem, quadratic_column_stat_t statistic, double *column_stat)
+{
+    const CsrComponent *Q = problem->objective_sparse_matrix;
+    if (Q && problem->objective_sparse_matrix_num_nonzeros > 0)
+    {
+        for (int row = 0; row < problem->num_variables; ++row)
+        {
+            for (int nz = Q->row_ptr[row]; nz < Q->row_ptr[row + 1]; ++nz)
+            {
+                const int col = Q->col_ind[nz];
+                const double value = fabs(Q->val[nz]);
+                if (statistic == QUADRATIC_COLUMN_MAX)
+                    column_stat[col] = fmax(column_stat[col], value);
+                else
+                    column_stat[col] += value;
+            }
+        }
+    }
+    accumulate_lowrank_quadratic_column_bound(problem, statistic, column_stat);
+}
+
 static void ruiz_rescaling(qp_problem_t *problem,
                            int num_iterations,
+                           bool include_quadratic_objective,
                            bool use_cone_preserving_scaling,
                            double *cum_constraint_rescaling,
                            double *cum_variable_rescaling)
@@ -504,6 +581,7 @@ static void ruiz_rescaling(qp_problem_t *problem,
     int num_vars = problem->num_variables;
     double *con_rescale = safe_malloc(num_cons * sizeof(double));
     double *var_rescale = safe_malloc(num_vars * sizeof(double));
+    double *quadratic_column_max = include_quadratic_objective ? safe_malloc((size_t)num_vars * sizeof(double)) : NULL;
 
     for (int iter = 0; iter < num_iterations; ++iter)
     {
@@ -536,6 +614,13 @@ static void ruiz_rescaling(qp_problem_t *problem,
                     con_rescale[row] = val;
             }
         }
+        if (include_quadratic_objective)
+        {
+            memset(quadratic_column_max, 0, (size_t)num_vars * sizeof(double));
+            compute_quadratic_column_statistics(problem, QUADRATIC_COLUMN_MAX, quadratic_column_max);
+            for (int col = 0; col < num_vars; ++col)
+                var_rescale[col] = fmax(var_rescale[col], quadratic_column_max[col]);
+        }
         for (int i = 0; i < num_vars; ++i)
             var_rescale[i] = (var_rescale[i] < SCALING_EPSILON) ? 1.0 : sqrt(var_rescale[i]);
         for (int i = 0; i < num_cons; ++i)
@@ -551,12 +636,14 @@ static void ruiz_rescaling(qp_problem_t *problem,
         for (int i = 0; i < num_cons; ++i)
             cum_constraint_rescaling[i] *= con_rescale[i];
     }
+    free(quadratic_column_max);
     free(con_rescale);
     free(var_rescale);
 }
 
 static void pock_chambolle_rescaling(qp_problem_t *problem,
                                      double alpha,
+                                     bool include_quadratic_objective,
                                      bool use_cone_preserving_scaling,
                                      double *cum_constraint_rescaling,
                                      double *cum_variable_rescaling)
@@ -577,6 +664,15 @@ static void pock_chambolle_rescaling(qp_problem_t *problem,
             var_rescale[col] += pow(val, 2.0 - alpha);
             con_rescale[row] += pow(val, alpha);
         }
+    }
+
+    if (include_quadratic_objective)
+    {
+        double *quadratic_column_sum = safe_calloc((size_t)num_vars, sizeof(double));
+        compute_quadratic_column_statistics(problem, QUADRATIC_COLUMN_SUM, quadratic_column_sum);
+        for (int col = 0; col < num_vars; ++col)
+            var_rescale[col] += quadratic_column_sum[col];
+        free(quadratic_column_sum);
     }
 
     for (int i = 0; i < num_vars; ++i)
@@ -673,6 +769,12 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
         rescale_info->var_rescale[i] = 1.0;
 
     bool use_cone_preserving_scaling = params->use_cone_preserving_scaling;
+    bool include_quadratic_objective =
+        uses_linearized_quadratic_update(params->non_diagonal_quadratic_mode,
+                                         detect_q_type(working_problem->objective_sparse_matrix,
+                                                       working_problem->objective_lowrank_matrix,
+                                                       working_problem->num_variables,
+                                                       working_problem->num_rank_lowrank_obj));
     if (params->curtis_reid_iterations > 0)
     {
         curtis_reid_rescaling(rescale_info->scaled_problem,
@@ -685,6 +787,7 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
     {
         ruiz_rescaling(rescale_info->scaled_problem,
                        params->l_inf_ruiz_iterations,
+                       include_quadratic_objective,
                        use_cone_preserving_scaling,
                        rescale_info->con_rescale,
                        rescale_info->var_rescale);
@@ -693,6 +796,7 @@ rescale_info_t *rescale_problem(const pdhg_parameters_t *params, const qp_proble
     {
         pock_chambolle_rescaling(rescale_info->scaled_problem,
                                  params->pock_chambolle_alpha,
+                                 include_quadratic_objective,
                                  use_cone_preserving_scaling,
                                  rescale_info->con_rescale,
                                  rescale_info->var_rescale);

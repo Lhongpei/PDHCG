@@ -118,6 +118,9 @@ int main(void)
     CHECK(parameters.permute_block_size == 256);
     CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) == 0);
     CHECK(error_message[0] == '\0');
+    parameters.non_diagonal_quadratic_mode = (non_diagonal_quadratic_mode_t)99;
+    CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) != 0);
+    parameters.non_diagonal_quadratic_mode = NON_DIAGONAL_QUADRATIC_INNER;
 
     parameters.termination_evaluation_frequency = 0;
     CHECK(pdhcg_validate_parameters(&parameters, error_message, sizeof(error_message)) != 0);

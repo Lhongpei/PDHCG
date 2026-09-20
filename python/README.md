@@ -245,6 +245,7 @@ Below is a list of commonly used parameters, their internal keys, and descriptio
 | `RestartNecessaryReduction` | `necessary_reduction_for_restart` | float | `0.8` | Necessary reduction factor required for a restart. |
 | `RestartKp` | `k_p` | float | `0.99` | Proportional coefficient for PID-controlled primal weight updates. |
 | `ReflectionCoeff` | `reflection_coefficient` | float | `1.0` | Reflection coefficient. |
+| `NonDiagonalQuadraticMode` | `non_diagonal_quadratic_mode` | string | `"inner"` | Use an inner proximal solve or the single-projection `"linearized"` update for non-diagonal Q. |
 | `SVMaxIter` | `sv_max_iter` | int | `5000` | Maximum number of iterations for the power method. |
 | `SVTol`| `sv_tol` | float | `1e-4` | Termination tolerance for the power method. |
 | `InnerIterLimit` | `inner_iter_limit` | int | `1000` | Maximum number of iterations for the inner solver. |

@@ -56,7 +56,6 @@ typedef struct
     double *Rx_product;
 
     cusparseDnVecDescr_t vec_Rx_prod;
-    cusparseDnVecDescr_t vec_RRx_prod;
     int num_rank_lowrank_obj;
 
     int lowrank_middle_type;
@@ -67,6 +66,21 @@ typedef struct
     double *global_primal_obj_product;
     cusparseDnVecDescr_t vec_global_primal_obj_prod;
 } quadratic_objective_term_t;
+
+static inline bool quadratic_type_has_sparse_component(quad_obj_type_t type)
+{
+    return type == PDHCG_SPARSE_Q || type == PDHCG_LOW_RANK_PLUS_SPARSE_Q;
+}
+
+static inline bool quadratic_type_has_lowrank_component(quad_obj_type_t type)
+{
+    return type == PDHCG_LOW_RANK_Q || type == PDHCG_LOW_RANK_PLUS_SPARSE_Q;
+}
+
+static inline bool uses_linearized_quadratic_update(non_diagonal_quadratic_mode_t mode, quad_obj_type_t type)
+{
+    return mode == NON_DIAGONAL_QUADRATIC_LINEARIZED && type != PDHCG_NON_Q && type != PDHCG_DIAG_Q;
+}
 
 typedef struct
 {
@@ -226,6 +240,7 @@ typedef struct
     int feasibility_iteration;
 
     problem_type_t problem_type;
+    bool use_linearized_quadratic_update;
     inner_solver_t *inner_solver;
     grid_context_t *grid_context;
 

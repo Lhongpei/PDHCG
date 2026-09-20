@@ -101,6 +101,9 @@ int pdhcg_validate_parameters(const pdhg_parameters_t *params, char *error_messa
         return parameter_error(error_message, error_message_size, "reflection_coefficient must be in (0, 2)");
     if (params->optimality_norm != NORM_TYPE_L2 && params->optimality_norm != NORM_TYPE_L_INF)
         return parameter_error(error_message, error_message_size, "optimality_norm is invalid");
+    if (params->non_diagonal_quadratic_mode != NON_DIAGONAL_QUADRATIC_INNER &&
+        params->non_diagonal_quadratic_mode != NON_DIAGONAL_QUADRATIC_LINEARIZED)
+        return parameter_error(error_message, error_message_size, "non_diagonal_quadratic_mode is invalid");
     if (inner->iteration_limit <= 0)
         return parameter_error(error_message, error_message_size, "inner_iter_limit must be positive");
     if (!isfinite(inner->initial_tolerance) || inner->initial_tolerance <= 0.0)

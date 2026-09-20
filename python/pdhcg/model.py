@@ -107,6 +107,7 @@ class Model:
         - FeasibilityTol: Relative feasibility tolerance (default: 1e-4)
         - Presolve: Enable/disable presolve (default: True)
         - RuizIters: Number of Ruiz rescaling iterations (default: 10)
+        - NonDiagonalQuadraticMode: "inner" or "linearized" (default: "inner")
         - LogLevel: Verbosity level 0-3 (default: 1)
 
         Use `model.Params["Presolve"] = False` to disable presolve.
