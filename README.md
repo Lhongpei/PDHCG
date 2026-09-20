@@ -110,6 +110,7 @@ Solver Parameters:
 | --inner_iter_limit | int | Max iterations for the inner solver. | 1000 |
 | --inner_init_tol | double | Initial tolerance for the inner solver. | 1e-3 |
 | --inner_min_tol | double | Minimum tolerance for the inner solver. | 1e-9 |
+| --non_diagonal_quadratic_mode | string | Non-diagonal Q update: `inner` or single-projection `linearized` using a safeguarded power-method estimate. | inner |
 | --no_diag_precond | flag | Disable the Jacobi diagonal preconditioner used in the inner subproblem (enabled by default). | false |
 | --soc_form | string | Cone formulation for QCQP transformations: rotated or standard. | rotated |
 

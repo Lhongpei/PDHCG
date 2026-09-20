@@ -309,6 +309,10 @@ static py::dict get_default_params_py()
     // reflection
     d["reflection_coefficient"] = p.reflection_coefficient;
 
+    // non-diagonal quadratic objective update
+    d["non_diagonal_quadratic_mode"] =
+        p.non_diagonal_quadratic_mode == NON_DIAGONAL_QUADRATIC_LINEARIZED ? "linearized" : "inner";
+
     // feasiblity polishing
     d["feasibility_polishing"] = p.feasibility_polishing;
     d["eps_feas_polish_relative"] = p.termination_criteria.eps_feas_polish_relative;
@@ -379,6 +383,20 @@ static void parse_params_from_python(py::object params_obj, pdhg_parameters_t *p
             }
         }
     };
+    auto get_non_diagonal_quadratic_mode = [&](const char *k, non_diagonal_quadratic_mode_t &tgt)
+    {
+        if (!d.contains(k))
+            return;
+        if (!py::isinstance<py::str>(d[k]))
+            throw std::invalid_argument("non_diagonal_quadratic_mode must be a string ('inner'/'linearized')");
+        std::string value = py::cast<std::string>(d[k]);
+        if (value == "inner")
+            tgt = NON_DIAGONAL_QUADRATIC_INNER;
+        else if (value == "linearized")
+            tgt = NON_DIAGONAL_QUADRATIC_LINEARIZED;
+        else
+            throw std::invalid_argument("non_diagonal_quadratic_mode must be 'inner' or 'linearized'");
+    };
 
     // verbosity
     geti("verbose", p->verbose);
@@ -409,6 +427,7 @@ static void parse_params_from_python(py::object params_obj, pdhg_parameters_t *p
 
     // reflection
     getf("reflection_coefficient", p->reflection_coefficient);
+    get_non_diagonal_quadratic_mode("non_diagonal_quadratic_mode", p->non_diagonal_quadratic_mode);
 
     // Feasibility Polishing
     getb("feasibility_polishing", p->feasibility_polishing);

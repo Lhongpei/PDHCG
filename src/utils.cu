@@ -333,6 +333,7 @@ void set_default_parameters(pdhg_parameters_t *params)
     params->termination_evaluation_frequency = 200;
     params->feasibility_polishing = false;
     params->reflection_coefficient = 1.0;
+    params->non_diagonal_quadratic_mode = NON_DIAGONAL_QUADRATIC_INNER;
     params->presolve = false;
 
     params->sv_max_iter = 5000;
@@ -463,6 +464,11 @@ void print_initial_info(const pdhg_parameters_t *params, const qp_problem_t *pro
     if (params->optimality_norm != default_params.optimality_norm)
     {
         printf("  optimality_norm    : %s\n", params->optimality_norm == NORM_TYPE_L_INF ? "L_inf" : "L2");
+    }
+    if (params->non_diagonal_quadratic_mode != default_params.non_diagonal_quadratic_mode)
+    {
+        printf("  non_diag_q_mode    : %s\n",
+               params->non_diagonal_quadratic_mode == NON_DIAGONAL_QUADRATIC_LINEARIZED ? "linearized" : "inner");
     }
 
     PRINT_DIFF_INT("curtis_reid_iter", params->curtis_reid_iterations, default_params.curtis_reid_iterations);

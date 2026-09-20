@@ -44,6 +44,12 @@ extern "C"
         NORM_TYPE_L_INF = 1
     } norm_type_t;
 
+    typedef enum
+    {
+        NON_DIAGONAL_QUADRATIC_INNER = 0,
+        NON_DIAGONAL_QUADRATIC_LINEARIZED = 1
+    } non_diagonal_quadratic_mode_t;
+
     typedef struct
     {
         int *row_ptr;
@@ -197,6 +203,7 @@ extern "C"
         double reflection_coefficient;
         bool feasibility_polishing;
         norm_type_t optimality_norm;
+        non_diagonal_quadratic_mode_t non_diagonal_quadratic_mode;
         inner_solver_parameters_t inner_solver_parameters;
         bool presolve;
         bool diag_jacobi_precond;

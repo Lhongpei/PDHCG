@@ -187,6 +187,8 @@ void print_usage(const char *prog_name)
     fprintf(stderr, "      --inner_iter_limit   Max iterations for the inner solver (default: 1000).\n");
     fprintf(stderr, "      --inner_init_tol     Initial tolerance for the inner solver (default: 1e-3).\n");
     fprintf(stderr, "      --inner_min_tol      Minimum tolerance for the inner solver (default: 1e-9).\n");
+    fprintf(stderr,
+            "      --non_diagonal_quadratic_mode Non-diagonal Q update: 'inner' or 'linearized' (default: inner).\n");
     fprintf(
         stderr,
         "      --no_diag_precond    Disable Jacobi diagonal preconditioner for inner subproblem (default: enabled).\n");
@@ -235,6 +237,7 @@ int run_pdhcg(int argc, char *argv[])
                                            {"sufficient_reduction_for_restart", required_argument, 0, 1023},
                                            {"necessary_reduction_for_restart", required_argument, 0, 1024},
                                            {"curtis_reid_iter", required_argument, 0, 1025},
+                                           {"non_diagonal_quadratic_mode", required_argument, 0, 1026},
                                            {0, 0, 0, 0}};
 
     int opt;
@@ -343,6 +346,17 @@ int run_pdhcg(int argc, char *argv[])
             case 1025:
                 params.curtis_reid_iterations = atoi(optarg);
                 break;
+            case 1026:
+                if (strcmp(optarg, "inner") == 0)
+                    params.non_diagonal_quadratic_mode = NON_DIAGONAL_QUADRATIC_INNER;
+                else if (strcmp(optarg, "linearized") == 0)
+                    params.non_diagonal_quadratic_mode = NON_DIAGONAL_QUADRATIC_LINEARIZED;
+                else
+                {
+                    fprintf(stderr, "Error: non_diagonal_quadratic_mode must be 'inner' or 'linearized'\n");
+                    return 1;
+                }
+                break;
             case '?':
                 return 1;
         }
@@ -440,6 +454,7 @@ int run_d_pdhcg(int argc, char *argv[])
                                            {"sufficient_reduction_for_restart", required_argument, 0, 1023},
                                            {"necessary_reduction_for_restart", required_argument, 0, 1024},
                                            {"curtis_reid_iter", required_argument, 0, 1025},
+                                           {"non_diagonal_quadratic_mode", required_argument, 0, 1026},
                                            {"grid_size", required_argument, 0, 2001},
                                            {"partition_method", required_argument, 0, 2002},
                                            {"permute_method", required_argument, 0, 2003},
@@ -543,6 +558,18 @@ int run_d_pdhcg(int argc, char *argv[])
                 break;
             case 1025:
                 params.curtis_reid_iterations = atoi(optarg);
+                break;
+            case 1026:
+                if (strcmp(optarg, "inner") == 0)
+                    params.non_diagonal_quadratic_mode = NON_DIAGONAL_QUADRATIC_INNER;
+                else if (strcmp(optarg, "linearized") == 0)
+                    params.non_diagonal_quadratic_mode = NON_DIAGONAL_QUADRATIC_LINEARIZED;
+                else
+                {
+                    if (rank_global == 0)
+                        fprintf(stderr, "Error: non_diagonal_quadratic_mode must be 'inner' or 'linearized'\n");
+                    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+                }
                 break;
             case 2001: // --grid_size r,c
             {

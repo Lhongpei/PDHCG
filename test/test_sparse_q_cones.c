@@ -1,7 +1,7 @@
 /*
  * E2E test for off-diagonal (sparse) Q on non-cone vars coupled to a SOC cone.
- * Exercises the SPARSE_Q path through BB with dispatch_cone_projection in the
- * inner loop. Variables: (a, b, v, w, z); Q couples (a, b); (v, w, z) is K_soc.
+ * Exercises both inner-proximal and linearized SPARSE_Q updates with the same
+ * cone projection. Variables: (a, b, v, w, z); Q couples (a, b); (v, w, z) is K_soc.
  */
 
 #include "pdhcg.h"
@@ -62,29 +62,39 @@ int main(void)
     params.termination_criteria.eps_feasible_relative = 1e-7;
     params.termination_criteria.iteration_limit = 100000;
     params.termination_criteria.time_sec_limit = 30.0;
-    pdhcg_result_t *res = solve_qp_problem(prob, &params);
-    if (!res)
+    int pass = 1;
+    const non_diagonal_quadratic_mode_t modes[] = {NON_DIAGONAL_QUADRATIC_INNER, NON_DIAGONAL_QUADRATIC_LINEARIZED};
+    const char *mode_names[] = {"inner", "linearized"};
+    for (int mode = 0; mode < 2; ++mode)
     {
-        qp_problem_free(prob);
-        return 1;
+        params.non_diagonal_quadratic_mode = modes[mode];
+        pdhcg_result_t *res = solve_qp_problem(prob, &params);
+        if (!res)
+        {
+            pass = 0;
+            continue;
+        }
+
+        double a = res->primal_solution[0], b = res->primal_solution[1];
+        double v = res->primal_solution[2], w = res->primal_solution[3], z = res->primal_solution[4];
+        double cone_lhs = v * v + w * w, cone_rhs = z * z;
+        double cone_viol = cone_lhs - cone_rhs;
+        printf("\nmode=%s status=%d iter=%d obj=%.6f\n",
+               mode_names[mode],
+               (int)res->termination_reason,
+               res->total_count,
+               res->primal_objective_value);
+        printf("a=%.6f b=%.6f v=%.6f w=%.6f z=%.6f\n", a, b, v, w, z);
+        printf("cone violation (v^2+w^2-z^2) = %.3e  (expect 0)\n", cone_viol);
+        printf("expected: a=3, b=4, v=3, w=4, z=5; obj=-1.5\n");
+
+        pass &= (res->termination_reason == TERMINATION_REASON_OPTIMAL) && fabs(a - 3.0) < 1e-4 &&
+            fabs(b - 4.0) < 1e-4 && fabs(v - 3.0) < 1e-4 && fabs(w - 4.0) < 1e-4 && fabs(z - 5.0) < 1e-4 &&
+            fabs(cone_viol) < 1e-4 && fabs(res->primal_objective_value - (-1.5)) < 1e-3;
+        pdhcg_result_free(res);
     }
-
-    double a = res->primal_solution[0], b = res->primal_solution[1];
-    double v = res->primal_solution[2], w = res->primal_solution[3], z = res->primal_solution[4];
-    double cone_lhs = v * v + w * w, cone_rhs = z * z;
-    double cone_viol = cone_lhs - cone_rhs;
-    printf(
-        "\nstatus=%d iter=%d obj=%.6f\n", (int)res->termination_reason, res->total_count, res->primal_objective_value);
-    printf("a=%.6f b=%.6f v=%.6f w=%.6f z=%.6f\n", a, b, v, w, z);
-    printf("cone violation (v^2+w^2-z^2) = %.3e  (expect 0)\n", cone_viol);
-    printf("expected: a=3, b=4, v=3, w=4, z=5; obj=-1.5\n");
-
-    int pass = (res->termination_reason == TERMINATION_REASON_OPTIMAL) && fabs(a - 3.0) < 1e-4 &&
-        fabs(b - 4.0) < 1e-4 && fabs(v - 3.0) < 1e-4 && fabs(w - 4.0) < 1e-4 && fabs(z - 5.0) < 1e-4 &&
-        fabs(cone_viol) < 1e-4 && fabs(res->primal_objective_value - (-1.5)) < 1e-3;
     printf("%s\n", pass ? "PASS" : "FAIL");
 
-    pdhcg_result_free(res);
     qp_problem_free(prob);
     return pass ? 0 : 1;
 }

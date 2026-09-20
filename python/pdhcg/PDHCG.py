@@ -55,6 +55,7 @@ _PARAM_ALIAS = {
     "RestartKp": "k_p",
     # reflection
     "ReflectionCoeff": "reflection_coefficient",
+    "NonDiagonalQuadraticMode": "non_diagonal_quadratic_mode",
     # termination criteria
     "OptimalityNorm": "optimality_norm",
     # singular value estimation (power method)

@@ -34,6 +34,7 @@ m.setParams(TimeLimit=3600, LogLevel=1)
 | `UseBoundObjectiveRescaling` | bool | True | Enable bound objective rescaling |
 | `UseConePreservingScaling` | bool | True | Broadcast one scaling value over every cone block |
 | `EvalFrequency` | int | 200 | Frequency of termination criteria evaluation |
+| `NonDiagonalQuadraticMode` | str | "inner" | Non-diagonal Q update: "inner" or single-projection "linearized" |
 
 ### Inner Solver Parameters
 

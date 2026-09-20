@@ -39,6 +39,13 @@ limitations under the License.
 #include <stdio.h>
 #include <time.h>
 
+static const double SPECTRAL_ESTIMATE_STEP_SAFETY = 0.998;
+
+static double safeguarded_spectral_estimate(double estimate)
+{
+    return fabs(estimate) / SPECTRAL_ESTIMATE_STEP_SAFETY;
+}
+
 static const double *cone_dual_residual_effective_obj(pdhg_solver_state_t *state)
 {
     if (state->cones.effective_objective_gradient)
@@ -269,9 +276,8 @@ static void compute_power_cone_primal_violation(pdhg_solver_state_t *state,
     *relative_violation = relative_accumulator;
 }
 
-static void apply_lowrank_middle(pdhg_solver_state_t *state)
+static void apply_lowrank_middle(cublasHandle_t blas_handle, quadratic_objective_term_t *qot)
 {
-    quadratic_objective_term_t *qot = state->quadratic_objective_term;
     int rank = qot->num_rank_lowrank_obj;
     if (qot->lowrank_middle_type == 0 || rank <= 0)
         return;
@@ -284,9 +290,9 @@ static void apply_lowrank_middle(pdhg_solver_state_t *state)
     }
 
     cublasPointerMode_t prev_mode;
-    CUBLAS_CHECK(cublasGetPointerMode(state->blas_handle, &prev_mode));
-    CUBLAS_CHECK(cublasSetPointerMode(state->blas_handle, CUBLAS_POINTER_MODE_HOST));
-    CUBLAS_CHECK(cublasDsymv(state->blas_handle,
+    CUBLAS_CHECK(cublasGetPointerMode(blas_handle, &prev_mode));
+    CUBLAS_CHECK(cublasSetPointerMode(blas_handle, CUBLAS_POINTER_MODE_HOST));
+    CUBLAS_CHECK(cublasDsymv(blas_handle,
                              CUBLAS_FILL_MODE_LOWER,
                              rank,
                              &HOST_ONE,
@@ -297,119 +303,82 @@ static void apply_lowrank_middle(pdhg_solver_state_t *state)
                              &HOST_ZERO,
                              qot->Rx_buffer,
                              1));
-    CUBLAS_CHECK(cublasSetPointerMode(state->blas_handle, prev_mode));
+    CUBLAS_CHECK(cublasSetPointerMode(blas_handle, prev_mode));
     CUDA_CHECK(
         cudaMemcpyAsync(qot->Rx_product, qot->Rx_buffer, (size_t)rank * sizeof(double), cudaMemcpyDeviceToDevice));
 }
 
+static void compute_quadratic_objective_product(cusparseHandle_t sparse_handle,
+                                                cublasHandle_t blas_handle,
+                                                quadratic_objective_term_t *qot,
+                                                double *primal_solution,
+                                                int num_variables,
+                                                grid_context_t *grid_context)
+{
+    if (qot->quad_obj_type == PDHCG_NON_Q)
+        return;
+
+    if (qot->quad_obj_type == PDHCG_DIAG_Q)
+    {
+        int num_blocks = (num_variables + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        element_wise_mul_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(
+            qot->diagonal_objective_matrix, primal_solution, qot->primal_obj_product, num_variables);
+        return;
+    }
+
+    bool has_sparse = quadratic_type_has_sparse_component(qot->quad_obj_type);
+    bool has_lowrank = quadratic_type_has_lowrank_component(qot->quad_obj_type);
+    if (!has_sparse && !has_lowrank)
+    {
+        fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (has_sparse)
+    {
+        int global_num_variables = pdhcg_get_global_num_variables(grid_context);
+        if (global_num_variables <= 0)
+            global_num_variables = num_variables;
+        pdhcg_spmv_execute(
+            sparse_handle, qot->spmv_ctx_Q, &HOST_ONE, &HOST_ZERO, primal_solution, qot->global_primal_obj_product);
+        pdhcg_all_reduce_array(
+            grid_context, qot->global_primal_obj_product, global_num_variables, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
+    }
+
+    if (has_lowrank)
+    {
+        pdhcg_spmv_execute(sparse_handle, qot->spmv_ctx_R, &HOST_ONE, &HOST_ZERO, primal_solution, qot->Rx_product);
+        pdhcg_all_reduce_array(
+            grid_context, qot->Rx_product, qot->num_rank_lowrank_obj, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
+        apply_lowrank_middle(blas_handle, qot);
+        pdhcg_spmv_execute(sparse_handle,
+                           qot->spmv_ctx_Rt,
+                           &HOST_ONE,
+                           has_sparse ? &HOST_ONE : &HOST_ZERO,
+                           qot->Rx_product,
+                           qot->primal_obj_product);
+    }
+}
+
 void update_obj_product(pdhg_solver_state_t *state, double *primal_solution)
 {
-    switch (state->quadratic_objective_term->quad_obj_type)
-    {
-        case PDHCG_NON_Q:
-            return;
+    compute_quadratic_objective_product(state->sparse_handle,
+                                        state->blas_handle,
+                                        state->quadratic_objective_term,
+                                        primal_solution,
+                                        state->num_variables,
+                                        state->grid_context);
+}
 
-        case PDHCG_DIAG_Q:
-            element_wise_mul_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-                state->quadratic_objective_term->diagonal_objective_matrix,
-                primal_solution,
-                state->quadratic_objective_term->primal_obj_product,
-                state->num_variables);
-            break;
-
-        case PDHCG_SPARSE_Q:
-            pdhcg_spmv_execute(state->sparse_handle,
-                               state->quadratic_objective_term->spmv_ctx_Q,
-                               &HOST_ONE,
-                               &HOST_ZERO,
-                               primal_solution,
-                               state->quadratic_objective_term->global_primal_obj_product);
-
-            pdhcg_all_reduce_array(state->grid_context,
-                                   state->quadratic_objective_term->global_primal_obj_product,
-                                   get_global_n(state),
-                                   PDHCG_OP_SUM,
-                                   PDHCG_SCOPE_ROW,
-                                   0);
-            break;
-
-        case PDHCG_LOW_RANK_Q:
-            pdhcg_spmv_execute(state->sparse_handle,
-                               state->quadratic_objective_term->spmv_ctx_R,
-                               &HOST_ONE,
-                               &HOST_ZERO,
-                               primal_solution,
-                               state->quadratic_objective_term->Rx_product);
-
-            pdhcg_all_reduce_array(state->grid_context,
-                                   state->quadratic_objective_term->Rx_product,
-                                   state->quadratic_objective_term->num_rank_lowrank_obj,
-                                   PDHCG_OP_SUM,
-                                   PDHCG_SCOPE_ROW,
-                                   0);
-
-            apply_lowrank_middle(state);
-
-            pdhcg_spmv_execute(state->sparse_handle,
-                               state->quadratic_objective_term->spmv_ctx_Rt,
-                               &HOST_ONE,
-                               &HOST_ZERO,
-                               state->quadratic_objective_term->Rx_product,
-                               state->quadratic_objective_term->primal_obj_product);
-            break;
-
-        case PDHCG_LOW_RANK_PLUS_SPARSE_Q:
-            pdhcg_spmv_execute(state->sparse_handle,
-                               state->quadratic_objective_term->spmv_ctx_Q,
-                               &HOST_ONE,
-                               &HOST_ZERO,
-                               primal_solution,
-                               state->quadratic_objective_term->global_primal_obj_product);
-
-            pdhcg_all_reduce_array(state->grid_context,
-                                   state->quadratic_objective_term->global_primal_obj_product,
-                                   get_global_n(state),
-                                   PDHCG_OP_SUM,
-                                   PDHCG_SCOPE_ROW,
-                                   0);
-
-            pdhcg_spmv_execute(state->sparse_handle,
-                               state->quadratic_objective_term->spmv_ctx_R,
-                               &HOST_ONE,
-                               &HOST_ZERO,
-                               primal_solution,
-                               state->quadratic_objective_term->Rx_product);
-
-            pdhcg_all_reduce_array(state->grid_context,
-                                   state->quadratic_objective_term->Rx_product,
-                                   state->quadratic_objective_term->num_rank_lowrank_obj,
-                                   PDHCG_OP_SUM,
-                                   PDHCG_SCOPE_ROW,
-                                   0);
-
-            apply_lowrank_middle(state);
-
-            pdhcg_spmv_execute(state->sparse_handle,
-                               state->quadratic_objective_term->spmv_ctx_Rt,
-                               &HOST_ONE,
-                               &HOST_ONE,
-                               state->quadratic_objective_term->Rx_product,
-                               state->quadratic_objective_term->primal_obj_product);
-            break;
-
-        default:
-            fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
-            exit(EXIT_FAILURE);
-    }
-
-    if (state->cones.effective_objective_gradient)
-    {
-        vector_add_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
-            state->objective_vector,
-            state->quadratic_objective_term->primal_obj_product,
-            state->cones.effective_objective_gradient,
-            state->num_variables);
-    }
+static void update_cone_effective_objective_gradient(pdhg_solver_state_t *state)
+{
+    if (!state->cones.effective_objective_gradient)
+        return;
+    vector_add_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
+        state->objective_vector,
+        state->quadratic_objective_term->primal_obj_product,
+        state->cones.effective_objective_gradient,
+        state->num_variables);
 }
 
 double compute_xQx(pdhg_solver_state_t *state, double *primal_sol, double *primal_obj_product)
@@ -665,15 +634,19 @@ void primal_BB_step_size_update(pdhg_solver_state_t *state, double step_size)
                                                                             state->pdhg_primal_solution,
                                                                             state->reflected_primal_solution,
                                                                             state->num_variables);
-    state->inner_solver->total_count += (inner_solver_iter - 1);
+    state->inner_solver->total_count += inner_solver_iter;
 }
 
-void primal_gradient_update(pdhg_solver_state_t *state, double step_size)
+static void linearized_quadratic_primal_update(pdhg_solver_state_t *state, double step_size)
 {
     double inv_step_size = 1.0 / step_size;
-    double alpha = 1.0 / (state->quadratic_objective_term->norm + inv_step_size);
+    /* S = L I - H cancels the quadratic prox Hessian, leaving one projected gradient step. */
+    double linearization_norm = safeguarded_spectral_estimate(state->quadratic_objective_term->norm);
+    double alpha = 1.0 / (linearization_norm + inv_step_size);
     update_obj_product(state, state->current_primal_solution);
-    if (state->is_this_major_iteration || ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0)
+    bool store_candidate = state->is_this_major_iteration || state->has_variable_cones ||
+        ((state->total_count + 2) % get_print_frequency(state->total_count + 2)) == 0;
+    if (store_candidate)
     {
         primal_gradient_descent_kernel_major<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
             state->dual_product,
@@ -700,6 +673,12 @@ void primal_gradient_update(pdhg_solver_state_t *state, double step_size)
             alpha,
             state->num_variables);
     }
+
+    if (state->has_variable_cones)
+    {
+        project_cone_runtime(state, &state->cones, state->pdhg_primal_solution, state->cones.projection_warm_start);
+        recompute_cone_reflection(state);
+    }
 }
 
 void pdhg_update(pdhg_solver_state_t *state)
@@ -722,44 +701,49 @@ void pdhg_update(pdhg_solver_state_t *state)
     pdhcg_all_reduce_array(
         state->grid_context, state->dual_product, state->num_variables, PDHCG_OP_SUM, PDHCG_SCOPE_COL, 0);
 
-    switch (state->quadratic_objective_term->quad_obj_type)
+    if (state->use_linearized_quadratic_update)
     {
-        case PDHCG_NON_Q:
-        {
-            lp_primal_update(state, primal_step_size);
-            if (state->has_variable_cones)
-            {
-                project_cone_runtime(
-                    state, &state->cones, state->pdhg_primal_solution, state->cones.projection_warm_start);
-                recompute_cone_reflection(state);
-            }
-            break;
-        }
-        case PDHCG_DIAG_Q:
-        {
-            if (state->cones.has_psd_cones)
-                primal_BB_step_size_update(state, primal_step_size);
-            else
-            {
-                diag_q_primal_update(state, primal_step_size);
-                if (state->has_variable_cones)
-                    project_cone_runtime_diag_q(state, &state->cones, primal_step_size);
-            }
-            break;
-        }
-        case PDHCG_SPARSE_Q:
-        case PDHCG_LOW_RANK_Q:
-        case PDHCG_LOW_RANK_PLUS_SPARSE_Q:
-        {
-            primal_BB_step_size_update(state, primal_step_size);
-            break;
-        }
-        default:
-            fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
-            exit(EXIT_FAILURE);
+        linearized_quadratic_primal_update(state, primal_step_size);
     }
-
-    state->inner_solver->total_count++;
+    else
+    {
+        switch (state->quadratic_objective_term->quad_obj_type)
+        {
+            case PDHCG_NON_Q:
+            {
+                lp_primal_update(state, primal_step_size);
+                if (state->has_variable_cones)
+                {
+                    project_cone_runtime(
+                        state, &state->cones, state->pdhg_primal_solution, state->cones.projection_warm_start);
+                    recompute_cone_reflection(state);
+                }
+                break;
+            }
+            case PDHCG_DIAG_Q:
+            {
+                if (state->cones.has_psd_cones)
+                    primal_BB_step_size_update(state, primal_step_size);
+                else
+                {
+                    diag_q_primal_update(state, primal_step_size);
+                    if (state->has_variable_cones)
+                        project_cone_runtime_diag_q(state, &state->cones, primal_step_size);
+                }
+                break;
+            }
+            case PDHCG_SPARSE_Q:
+            case PDHCG_LOW_RANK_Q:
+            case PDHCG_LOW_RANK_PLUS_SPARSE_Q:
+            {
+                primal_BB_step_size_update(state, primal_step_size);
+                break;
+            }
+            default:
+                fprintf(stderr, "Error: Unknown Quadratic Objective Type detected.\n");
+                exit(EXIT_FAILURE);
+        }
+    }
 
     pdhcg_spmv_execute(state->sparse_handle,
                        state->spmv_ctx_A,
@@ -955,7 +939,7 @@ void initialize_step_size_and_primal_weight(pdhg_solver_state_t *state, const pd
         }
         else
         {
-            state->step_size = 0.998 / max_sv;
+            state->step_size = SPECTRAL_ESTIMATE_STEP_SAFETY / max_sv;
         }
     }
 
@@ -1011,7 +995,17 @@ void compute_fixed_point_error(pdhg_solver_state_t *state)
     pdhcg_all_reduce_scalar(state->grid_context, &primal_norm_sq, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
     primal_norm = sqrt(primal_norm_sq);
 
-    movement = primal_norm * primal_norm * state->primal_weight + dual_norm * dual_norm / state->primal_weight;
+    movement = primal_norm_sq * state->primal_weight + dual_norm_sq / state->primal_weight;
+
+    if (state->use_linearized_quadratic_update)
+    {
+        /* The fixed-point metric gains eta * <dx, (L I - H) dx>. */
+        update_obj_product(state, state->delta_primal_solution);
+        double delta_h_delta =
+            compute_xQx(state, state->delta_primal_solution, state->quadratic_objective_term->primal_obj_product);
+        double linearization_norm = safeguarded_spectral_estimate(state->quadratic_objective_term->norm);
+        movement += state->step_size * (linearization_norm * primal_norm_sq - delta_h_delta);
+    }
 
     CUBLAS_CHECK(cublasDdot(state->blas_handle,
                             state->num_variables,
@@ -1025,7 +1019,7 @@ void compute_fixed_point_error(pdhg_solver_state_t *state)
 
     interaction = 2 * state->step_size * cross_term;
 
-    state->fixed_point_error = sqrt(movement + interaction);
+    state->fixed_point_error = sqrt(fmax(0.0, movement + interaction));
     if (state->problem_type == CONVEX_QP && state->inner_solver->bb_step_size)
     {
         state->inner_solver->tol =
@@ -1063,6 +1057,7 @@ void compute_residual(pdhg_solver_state_t *state, norm_type_t optimality_norm)
         state->grid_context, state->dual_product, state->num_variables, PDHCG_OP_SUM, PDHCG_SCOPE_COL, 0);
 
     update_obj_product(state, state->pdhg_primal_solution);
+    update_cone_effective_objective_gradient(state);
 
     if (state->problem_type == LP)
     {
@@ -1497,182 +1492,161 @@ pdhcg_result_t *create_result_from_state(pdhg_solver_state_t *state, const qp_pr
 
 static bool spectral_error_within_tolerance(double error, double estimate, double tolerance)
 {
-    return fabs(error) <= tolerance * fmin(1.0, fabs(estimate));
+    return fabs(error) <= tolerance * fmax(1.0, fabs(estimate));
 }
 
-double estimate_maximum_eigenvalue(cusparseHandle_t sparse_handle,
-                                   cublasHandle_t blas_handle,
-                                   const cu_sparse_matrix_csr_t *A,
-                                   int max_iterations,
-                                   double tolerance,
-                                   struct grid_context_s *ctx)
+double estimate_quadratic_objective_norm(cusparseHandle_t sparse_handle,
+                                         cublasHandle_t blas_handle,
+                                         quadratic_objective_term_t *quadratic_objective,
+                                         int num_variables,
+                                         int max_iterations,
+                                         double tolerance,
+                                         grid_context_t *grid_context)
 {
-    int n_global = A->num_rows;
-    int n_local = A->num_cols;
-    int n_start = get_n_start(ctx);
-    int row_coord = pdhcg_get_grid_row_coord(ctx);
+    int n = num_variables;
+    if (n <= 0)
+        return 0.0;
 
-    int safe_local = n_local > 0 ? n_local : 1;
-    int safe_global = n_global > 0 ? n_global : 1;
+    double *vector = NULL;
+    double *image_vector = NULL;
+    double *next_vector = NULL;
+    CUDA_CHECK(cudaMalloc(&vector, (size_t)n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&image_vector, (size_t)n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&next_vector, (size_t)n * sizeof(double)));
 
-    double *v_local_d, *Av_global_d;
-    CUDA_CHECK(cudaMalloc(&v_local_d, safe_local * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&Av_global_d, safe_global * sizeof(double)));
+    double *host_vector = (double *)safe_malloc((size_t)n * sizeof(double));
+    unsigned int seed = 1234U + (unsigned int)get_n_start(grid_context);
+    for (int i = 0; i < n; ++i)
+        host_vector[i] = 2.0 * (double)rand_r(&seed) / RAND_MAX - 1.0;
+    CUDA_CHECK(cudaMemcpy(vector, host_vector, (size_t)n * sizeof(double), cudaMemcpyHostToDevice));
+    free(host_vector);
 
-    double *v_local_h = (double *)safe_malloc(safe_local * sizeof(double));
-    unsigned int seed = 1234 + row_coord;
-    for (int i = 0; i < safe_local; ++i)
-        v_local_h[i] = (double)rand_r(&seed) / RAND_MAX;
-
-    if (n_local > 0)
-        CUDA_CHECK(cudaMemcpy(v_local_d, v_local_h, n_local * sizeof(double), cudaMemcpyHostToDevice));
-    free(v_local_h);
-
-    cusparseDnVecDescr_t vecV, vecAv;
-    CUSPARSE_CHECK(cusparseCreateDnVec(&vecV, n_local, v_local_d, CUDA_R_64F));
-    CUSPARSE_CHECK(cusparseCreateDnVec(&vecAv, n_global, Av_global_d, CUDA_R_64F));
-
-    pdhcg_spmv_ctx_t *ctx_A = pdhcg_spmv_ctx_create(
-        sparse_handle, n_global, n_local, A->num_nonzeros, A->row_ptr, A->col_ind, A->val, vecV, vecAv);
-
-    double lambda = 0.0;
-
-    for (int i = 0; i < max_iterations; ++i)
+    double estimate = 0.0;
+    for (int iteration = 0; iteration < max_iterations; ++iteration)
     {
-        double norm = 0.0;
-        if (n_local > 0)
-            CUBLAS_CHECK(cublasDnrm2_v2_64(blas_handle, n_local, v_local_d, 1, &norm));
-
-        double norm_sq = norm * norm;
-        pdhcg_all_reduce_scalar(ctx, &norm_sq, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
-        norm = sqrt(norm_sq);
-
-        double inv_norm = 1.0 / norm;
-        if (n_local > 0)
-            CUBLAS_CHECK(cublasDscal(blas_handle, n_local, &inv_norm, v_local_d, 1));
-
-        pdhcg_spmv_execute(sparse_handle, ctx_A, &HOST_ONE, &HOST_ZERO, v_local_d, Av_global_d);
-
-        pdhcg_all_reduce_array(ctx, Av_global_d, n_global, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
-
-        double old_lambda = lambda;
-        double local_dot = 0.0;
-
-        if (n_local > 0)
-        {
-            CUBLAS_CHECK(cublasDdot(blas_handle, n_local, v_local_d, 1, Av_global_d + n_start, 1, &local_dot));
-        }
-
-        pdhcg_all_reduce_scalar(ctx, &local_dot, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
-        lambda = local_dot;
-
-        if (i > 0 && spectral_error_within_tolerance(lambda - old_lambda, lambda, tolerance))
+        double local_norm = 0.0;
+        CUBLAS_CHECK(cublasDnrm2_v2_64(blas_handle, n, vector, 1, &local_norm));
+        double norm_squared = local_norm * local_norm;
+        pdhcg_all_reduce_scalar(grid_context, &norm_squared, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
+        double norm = sqrt(norm_squared);
+        if (!(norm > 0.0) || !isfinite(norm))
             break;
 
-        if (n_local > 0)
-            CUDA_CHECK(
-                cudaMemcpy(v_local_d, Av_global_d + n_start, n_local * sizeof(double), cudaMemcpyDeviceToDevice));
+        double inverse_norm = 1.0 / norm;
+        CUBLAS_CHECK(cublasDscal(blas_handle, n, &inverse_norm, vector, 1));
+        compute_quadratic_objective_product(sparse_handle, blas_handle, quadratic_objective, vector, n, grid_context);
+        CUDA_CHECK(cudaMemcpy(image_vector,
+                              quadratic_objective->primal_obj_product,
+                              (size_t)n * sizeof(double),
+                              cudaMemcpyDeviceToDevice));
+
+        double local_image_norm = 0.0;
+        CUBLAS_CHECK(cublasDnrm2_v2_64(blas_handle, n, image_vector, 1, &local_image_norm));
+        double image_norm_squared = local_image_norm * local_image_norm;
+        pdhcg_all_reduce_scalar(grid_context, &image_norm_squared, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
+        estimate = sqrt(image_norm_squared);
+        if (!(estimate > 0.0) || !isfinite(estimate))
+            break;
+
+        compute_quadratic_objective_product(
+            sparse_handle, blas_handle, quadratic_objective, image_vector, n, grid_context);
+        CUDA_CHECK(cudaMemcpy(next_vector,
+                              quadratic_objective->primal_obj_product,
+                              (size_t)n * sizeof(double),
+                              cudaMemcpyDeviceToDevice));
+
+        double eigenvalue = estimate * estimate;
+        double negative_eigenvalue = -eigenvalue;
+        CUBLAS_CHECK(cublasDaxpy(blas_handle, n, &negative_eigenvalue, vector, 1, next_vector, 1));
+        double local_residual_norm = 0.0;
+        CUBLAS_CHECK(cublasDnrm2_v2_64(blas_handle, n, next_vector, 1, &local_residual_norm));
+        double residual_norm_squared = local_residual_norm * local_residual_norm;
+        pdhcg_all_reduce_scalar(grid_context, &residual_norm_squared, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
+        if (spectral_error_within_tolerance(sqrt(residual_norm_squared), eigenvalue, tolerance))
+            break;
+
+        CUBLAS_CHECK(cublasDaxpy(blas_handle, n, &eigenvalue, vector, 1, next_vector, 1));
+        double *swap = vector;
+        vector = next_vector;
+        next_vector = swap;
     }
 
-    pdhcg_spmv_ctx_destroy(ctx_A);
-    CUSPARSE_CHECK(cusparseDestroyDnVec(vecV));
-    CUSPARSE_CHECK(cusparseDestroyDnVec(vecAv));
-    CUDA_CHECK(cudaFree(v_local_d));
-    CUDA_CHECK(cudaFree(Av_global_d));
-
-    return lambda;
+    CUDA_CHECK(cudaFree(vector));
+    CUDA_CHECK(cudaFree(image_vector));
+    CUDA_CHECK(cudaFree(next_vector));
+    return estimate;
 }
 
-double estimate_minimum_eigenvalue(cusparseHandle_t sparse_handle,
-                                   cublasHandle_t blas_handle,
-                                   const cu_sparse_matrix_csr_t *A,
-                                   double lambda_max,
-                                   int max_iterations,
-                                   double tolerance,
-                                   struct grid_context_s *ctx)
+double estimate_quadratic_objective_minimum_eigenvalue(cusparseHandle_t sparse_handle,
+                                                       cublasHandle_t blas_handle,
+                                                       quadratic_objective_term_t *quadratic_objective,
+                                                       int num_variables,
+                                                       double spectral_norm,
+                                                       int max_iterations,
+                                                       double tolerance,
+                                                       grid_context_t *grid_context)
 {
-    int n_global = A->num_rows;
-    int n_local = A->num_cols;
-    int n_start = get_n_start(ctx);
-    int row_coord = pdhcg_get_grid_row_coord(ctx);
+    int n = num_variables;
+    if (n <= 0)
+        return 0.0;
 
-    int safe_local = n_local > 0 ? n_local : 1;
-    int safe_global = n_global > 0 ? n_global : 1;
+    double *vector = NULL;
+    double *shifted_vector = NULL;
+    CUDA_CHECK(cudaMalloc(&vector, (size_t)n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&shifted_vector, (size_t)n * sizeof(double)));
 
-    double *v_local_d, *Av_global_d, *shifted_v_local_d;
-    CUDA_CHECK(cudaMalloc(&v_local_d, safe_local * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&Av_global_d, safe_global * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&shifted_v_local_d, safe_local * sizeof(double)));
+    double *host_vector = (double *)safe_malloc((size_t)n * sizeof(double));
+    unsigned int seed = 1234U + (unsigned int)get_n_start(grid_context);
+    for (int i = 0; i < n; ++i)
+        host_vector[i] = 2.0 * (double)rand_r(&seed) / RAND_MAX - 1.0;
+    CUDA_CHECK(cudaMemcpy(vector, host_vector, (size_t)n * sizeof(double), cudaMemcpyHostToDevice));
+    free(host_vector);
 
-    double *v_local_h = (double *)safe_malloc(safe_local * sizeof(double));
-    unsigned int seed = 1234 + row_coord;
-    for (int i = 0; i < safe_local; ++i)
-        v_local_h[i] = (double)rand_r(&seed) / RAND_MAX;
-
-    if (n_local > 0)
-        CUDA_CHECK(cudaMemcpy(v_local_d, v_local_h, n_local * sizeof(double), cudaMemcpyHostToDevice));
-    free(v_local_h);
-
-    cusparseDnVecDescr_t vecV, vecAv;
-    CUSPARSE_CHECK(cusparseCreateDnVec(&vecV, n_local, v_local_d, CUDA_R_64F));
-    CUSPARSE_CHECK(cusparseCreateDnVec(&vecAv, n_global, Av_global_d, CUDA_R_64F));
-
-    pdhcg_spmv_ctx_t *ctx_A = pdhcg_spmv_ctx_create(
-        sparse_handle, n_global, n_local, A->num_nonzeros, A->row_ptr, A->col_ind, A->val, vecV, vecAv);
-
+    double shift = safeguarded_spectral_estimate(spectral_norm);
     double mu = 0.0;
-
-    for (int i = 0; i < max_iterations; ++i)
+    for (int iteration = 0; iteration < max_iterations; ++iteration)
     {
-        double norm = 0.0;
-        if (n_local > 0)
-            CUBLAS_CHECK(cublasDnrm2_v2_64(blas_handle, n_local, v_local_d, 1, &norm));
-
-        double norm_sq = norm * norm;
-        pdhcg_all_reduce_scalar(ctx, &norm_sq, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
-        norm = sqrt(norm_sq);
-
-        double inv_norm = 1.0 / norm;
-        if (n_local > 0)
-            CUBLAS_CHECK(cublasDscal(blas_handle, n_local, &inv_norm, v_local_d, 1));
-
-        pdhcg_spmv_execute(sparse_handle, ctx_A, &HOST_ONE, &HOST_ZERO, v_local_d, Av_global_d);
-
-        pdhcg_all_reduce_array(ctx, Av_global_d, n_global, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, 0);
-
-        double neg_one = -1.0;
-        double old_mu = mu;
-        double local_dot = 0.0;
-
-        if (n_local > 0)
-        {
-            CUDA_CHECK(cudaMemcpy(
-                shifted_v_local_d, Av_global_d + n_start, n_local * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUBLAS_CHECK(cublasDscal(blas_handle, n_local, &neg_one, shifted_v_local_d, 1));
-            CUBLAS_CHECK(cublasDaxpy(blas_handle, n_local, &lambda_max, v_local_d, 1, shifted_v_local_d, 1));
-            CUBLAS_CHECK(cublasDdot(blas_handle, n_local, v_local_d, 1, shifted_v_local_d, 1, &local_dot));
-        }
-
-        pdhcg_all_reduce_scalar(ctx, &local_dot, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
-        mu = local_dot;
-
-        if (i > 0 && spectral_error_within_tolerance(mu - old_mu, mu, tolerance))
+        double local_norm = 0.0;
+        CUBLAS_CHECK(cublasDnrm2_v2_64(blas_handle, n, vector, 1, &local_norm));
+        double norm_squared = local_norm * local_norm;
+        pdhcg_all_reduce_scalar(grid_context, &norm_squared, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
+        double norm = sqrt(norm_squared);
+        if (!(norm > 0.0) || !isfinite(norm))
             break;
 
-        if (n_local > 0)
-            CUDA_CHECK(cudaMemcpy(v_local_d, shifted_v_local_d, n_local * sizeof(double), cudaMemcpyDeviceToDevice));
+        double inverse_norm = 1.0 / norm;
+        CUBLAS_CHECK(cublasDscal(blas_handle, n, &inverse_norm, vector, 1));
+        compute_quadratic_objective_product(sparse_handle, blas_handle, quadratic_objective, vector, n, grid_context);
+        CUDA_CHECK(cudaMemcpy(shifted_vector,
+                              quadratic_objective->primal_obj_product,
+                              (size_t)n * sizeof(double),
+                              cudaMemcpyDeviceToDevice));
+
+        double negative_one = -1.0;
+        CUBLAS_CHECK(cublasDscal(blas_handle, n, &negative_one, shifted_vector, 1));
+        CUBLAS_CHECK(cublasDaxpy(blas_handle, n, &shift, vector, 1, shifted_vector, 1));
+
+        CUBLAS_CHECK(cublasDdot(blas_handle, n, vector, 1, shifted_vector, 1, &mu));
+        pdhcg_all_reduce_scalar(grid_context, &mu, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
+
+        double negative_mu = -mu;
+        CUBLAS_CHECK(cublasDaxpy(blas_handle, n, &negative_mu, vector, 1, shifted_vector, 1));
+        double local_residual_norm = 0.0;
+        CUBLAS_CHECK(cublasDnrm2_v2_64(blas_handle, n, shifted_vector, 1, &local_residual_norm));
+        double residual_norm_squared = local_residual_norm * local_residual_norm;
+        pdhcg_all_reduce_scalar(grid_context, &residual_norm_squared, PDHCG_OP_SUM, PDHCG_SCOPE_ROW, false);
+        if (spectral_error_within_tolerance(sqrt(residual_norm_squared), mu, tolerance))
+            break;
+
+        CUBLAS_CHECK(cublasDaxpy(blas_handle, n, &mu, vector, 1, shifted_vector, 1));
+        double *swap = vector;
+        vector = shifted_vector;
+        shifted_vector = swap;
     }
 
-    double lambda_min = lambda_max - mu;
-
-    pdhcg_spmv_ctx_destroy(ctx_A);
-    CUSPARSE_CHECK(cusparseDestroyDnVec(vecV));
-    CUSPARSE_CHECK(cusparseDestroyDnVec(vecAv));
-    CUDA_CHECK(cudaFree(v_local_d));
-    CUDA_CHECK(cudaFree(Av_global_d));
-    CUDA_CHECK(cudaFree(shifted_v_local_d));
-
-    return lambda_min;
+    CUDA_CHECK(cudaFree(vector));
+    CUDA_CHECK(cudaFree(shifted_vector));
+    return shift - mu;
 }
 
 double estimate_maximum_singular_value(cusparseHandle_t sparse_handle,

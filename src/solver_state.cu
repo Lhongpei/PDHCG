@@ -303,8 +303,12 @@ static void initialize_inner_solver(pdhg_solver_state_t *state, const pdhg_param
         min_tol = 1e-9;
     }
 
-    quad_obj_type_t objective_type = state->quadratic_objective_term->quad_obj_type;
-    if (objective_type == PDHCG_NON_Q || (objective_type == PDHCG_DIAG_Q && !state->cones.has_psd_cones))
+    state->inner_solver->iteration_limit = iteration_limit;
+    state->inner_solver->tol = initial_tol;
+    state->inner_solver->min_tol = min_tol;
+
+    if (state->quadratic_objective_term->quad_obj_type == PDHCG_NON_Q || state->use_linearized_quadratic_update ||
+        (state->quadratic_objective_term->quad_obj_type == PDHCG_DIAG_Q && !state->cones.has_psd_cones))
         return;
 
     /* A nonuniform diagonal metric has no one-EVD PSD prox, so diagonal-Q
@@ -315,10 +319,6 @@ static void initialize_inner_solver(pdhg_solver_state_t *state, const pdhg_param
     ALLOC_ZERO(state->inner_solver->bb_step_size->gradient, state->num_variables * sizeof(double));
     ALLOC_ZERO(state->inner_solver->bb_step_size->direction, state->num_variables * sizeof(double));
     ALLOC_ZERO(state->inner_solver->bb_step_size->scalar_buffer, 4 * sizeof(double));
-
-    state->inner_solver->iteration_limit = iteration_limit;
-    state->inner_solver->tol = initial_tol;
-    state->inner_solver->min_tol = min_tol;
 
     state->inner_solver->bb_step_size->precond_enabled = params->diag_jacobi_precond && !state->cones.has_psd_cones;
     if (state->inner_solver->bb_step_size->precond_enabled)
@@ -331,7 +331,7 @@ static void initialize_inner_solver(pdhg_solver_state_t *state, const pdhg_param
         state->inner_solver->bb_step_size->cached_inv_tau = -1.0;
         state->inner_solver->bb_step_size->tol_scale = 1.0;
 
-        if (objective_type == PDHCG_SPARSE_Q || objective_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+        if (quadratic_type_has_sparse_component(state->quadratic_objective_term->quad_obj_type))
         {
             cu_sparse_matrix_csr_t *Q = state->quadratic_objective_term->objective_sparse_matrix;
             compute_csr_diag_kernel<<<state->num_blocks_primal, THREADS_PER_BLOCK>>>(
@@ -339,7 +339,7 @@ static void initialize_inner_solver(pdhg_solver_state_t *state, const pdhg_param
             CUDA_CHECK(cudaGetLastError());
         }
 
-        if (objective_type == PDHCG_LOW_RANK_Q || objective_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+        if (quadratic_type_has_lowrank_component(state->quadratic_objective_term->quad_obj_type))
         {
             cu_sparse_matrix_csr_t *Rt = state->quadratic_objective_term->objective_lowrank_matrix_t;
             double *out = state->inner_solver->bb_step_size->Ms_buffer;
@@ -379,44 +379,46 @@ static void decide_problem_type(pdhg_solver_state_t *state)
 
 void initialize_quadratic_term_information(pdhg_solver_state_t *state, const pdhg_parameters_t *params)
 {
-    if (state->quadratic_objective_term->quad_obj_type == PDHCG_SPARSE_Q)
-    {
-        state->quadratic_objective_term->norm =
-            estimate_maximum_eigenvalue(state->sparse_handle,
-                                        state->blas_handle,
-                                        state->quadratic_objective_term->objective_sparse_matrix,
-                                        params->sv_max_iter,
-                                        params->sv_tol,
-                                        state->grid_context);
-        state->quadratic_objective_term->nonconvexity =
-            estimate_minimum_eigenvalue(state->sparse_handle,
-                                        state->blas_handle,
-                                        state->quadratic_objective_term->objective_sparse_matrix,
-                                        state->quadratic_objective_term->norm,
-                                        params->sv_max_iter,
-                                        params->sv_tol,
-                                        state->grid_context);
+    quadratic_objective_term_t *quadratic_objective = state->quadratic_objective_term;
+    if (quadratic_objective->quad_obj_type == PDHCG_NON_Q)
         return;
-    }
-    if (state->quadratic_objective_term->quad_obj_type == PDHCG_DIAG_Q)
+
+    if (quadratic_objective->quad_obj_type == PDHCG_DIAG_Q)
     {
         double max_eigen = 0.0;
-        double min_eigen = 0.0;
-        double *temp_diag_host = (double *)malloc(state->num_variables * sizeof(double));
-        cudaMemcpy(temp_diag_host,
-                   state->quadratic_objective_term->diagonal_objective_matrix,
-                   state->num_variables * sizeof(double),
-                   cudaMemcpyDeviceToHost);
+        double min_eigen = INFINITY;
+        double *temp_diag_host = (double *)safe_malloc((size_t)state->num_variables * sizeof(double));
+        CUDA_CHECK(cudaMemcpy(temp_diag_host,
+                              quadratic_objective->diagonal_objective_matrix,
+                              (size_t)state->num_variables * sizeof(double),
+                              cudaMemcpyDeviceToHost));
         for (int i = 0; i < state->num_variables; i++)
         {
             double item = temp_diag_host[i];
             max_eigen = fmax(max_eigen, fabs(item));
             min_eigen = fmin(min_eigen, item);
         }
-        state->quadratic_objective_term->norm = max_eigen;
-        state->quadratic_objective_term->nonconvexity = min_eigen;
+        quadratic_objective->norm = max_eigen;
+        quadratic_objective->nonconvexity = state->num_variables > 0 ? min_eigen : 0.0;
         free(temp_diag_host);
+        return;
     }
+
+    quadratic_objective->norm = estimate_quadratic_objective_norm(state->sparse_handle,
+                                                                  state->blas_handle,
+                                                                  quadratic_objective,
+                                                                  state->num_variables,
+                                                                  params->sv_max_iter,
+                                                                  params->sv_tol,
+                                                                  state->grid_context);
+    quadratic_objective->nonconvexity = estimate_quadratic_objective_minimum_eigenvalue(state->sparse_handle,
+                                                                                        state->blas_handle,
+                                                                                        quadratic_objective,
+                                                                                        state->num_variables,
+                                                                                        quadratic_objective->norm,
+                                                                                        params->sv_max_iter,
+                                                                                        params->sv_tol,
+                                                                                        state->grid_context);
 }
 
 static cone_proj_method_t
@@ -597,14 +599,6 @@ static void initialize_cone_runtime(pdhg_solver_state_t *state,
         CUDA_CHECK(cudaMemcpy(state->cones.is_fixed, working_problem->cones.is_fixed, fb, cudaMemcpyHostToDevice));
     }
 
-    if (state->has_variable_cones)
-    {
-        quad_obj_type_t qt = rescale_info->processed_problem ? rescale_info->processed_problem->quad_type : PDHCG_NON_Q;
-        size_t vb = (size_t)state->num_variables * sizeof(double);
-        if (qt != PDHCG_NON_Q)
-            CUDA_CHECK(cudaMalloc(&state->cones.effective_objective_gradient, vb));
-    }
-
     initialize_cone_layout(&state->cones, &working_problem->cones, rescale_info->var_rescale);
     double global_has_power_cones = state->cones.has_power_cones ? 1.0 : 0.0;
     pdhcg_all_reduce_scalar(state->grid_context, &global_has_power_cones, PDHCG_OP_MAX, PDHCG_SCOPE_ROW, false);
@@ -615,8 +609,11 @@ static void initialize_cone_runtime(pdhg_solver_state_t *state,
     if (state->has_variable_cones)
     {
         quad_obj_type_t qt = rescale_info->processed_problem ? rescale_info->processed_problem->quad_type : PDHCG_NON_Q;
+        size_t variable_bytes = (size_t)state->num_variables * sizeof(double);
+        if (qt != PDHCG_NON_Q)
+            CUDA_CHECK(cudaMalloc(&state->cones.effective_objective_gradient, variable_bytes));
         if (qt != PDHCG_NON_Q && (qt != PDHCG_DIAG_Q || state->cones.has_psd_cones))
-            CUDA_CHECK(cudaMalloc(&state->cones.bb_primal_snapshot, (size_t)state->num_variables * sizeof(double)));
+            CUDA_CHECK(cudaMalloc(&state->cones.bb_primal_snapshot, variable_bytes));
     }
 
     bool has_affine_cones = working_problem->affine_cones.num_cones > 0 || state->affine_cones.split != NULL ||
@@ -995,6 +992,8 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
         state->reflected_primal_solution, state->initial_primal_solution, var_bytes, cudaMemcpyDeviceToDevice));
 
     initialize_quadratic_obj_term(state, rescale_info->processed_problem);
+    state->use_linearized_quadratic_update = uses_linearized_quadratic_update(
+        params->non_diagonal_quadratic_mode, state->quadratic_objective_term->quad_obj_type);
     initialize_quadratic_term_information(state, params);
     initialize_inner_solver(state, params);
 
@@ -1023,11 +1022,11 @@ pdhg_solver_state_t *initialize_solver_state(const pdhg_parameters_t *params,
         printf("Problem Type: %s\n", problem_type_to_string(state->problem_type));
         printf("Quadratic Objective Matrix Type: %s\n",
                quad_obj_type_to_string(state->quadratic_objective_term->quad_obj_type));
-        if (state->quadratic_objective_term->quad_obj_type == PDHCG_SPARSE_Q ||
-            state->quadratic_objective_term->quad_obj_type == PDHCG_LOW_RANK_PLUS_SPARSE_Q)
+        if (state->quadratic_objective_term->quad_obj_type != PDHCG_NON_Q)
         {
-            printf("L2 Norm of Sparse Q: %.3e\n", state->quadratic_objective_term->norm);
-            printf("Minimum Eigenvalue of Sparse Q: %.3e\n", state->quadratic_objective_term->nonconvexity);
+            printf("Quadratic Objective Norm Estimate: %.3e\n", state->quadratic_objective_term->norm);
+            printf("Quadratic Objective Minimum Eigenvalue Estimate: %.3e\n",
+                   state->quadratic_objective_term->nonconvexity);
         }
         printf("-------------------------------------------------------------------"
                "----------"
